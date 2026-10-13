@@ -59,7 +59,7 @@ func newDefault(git *GoGitRepo, namespace string) (Repo, error) {
 		RepoConfig:  NewRepoConfig(NewGitConfig(env)),
 		RepoKeyring: NewRepoKeyring(keyring),
 		RepoStorage: NewRepoStorage(storage),
-		RepoIndex:   NewBleveIndexes(filepath.Join(storage.Root(), "indexes")),
+		RepoIndex:   NewSqliteIndex(filepath.Join(storage.Root(), "index.db")),
 		RepoData:    git,
 		RepoBrowse:  git,
 		RepoClock:   NewPersistedClocks(storage),

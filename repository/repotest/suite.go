@@ -380,6 +380,7 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 		// an entity id, the usual kind of document id
 		entityId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	)
+	excerpt := []byte(`{}`)
 
 	requireBuiltFrom := func(t *testing.T, idx repository.Index, expected map[string]repository.Hash) {
 		t.Helper()
@@ -396,13 +397,13 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 	}
 
 	t.Run("search", func(t *testing.T) {
-		idx, err := repo.GetIndex("search")
+		idx, err := repo.GetIndex("search", 1)
 		require.NoError(t, err)
 
 		b := idx.NewBatch()
-		require.NoError(t, b.Set("id1", []string{"foo", "bar", "foobar barfoo"}, commit1))
-		require.NoError(t, b.Set("id2", []string{"hello", "foo bar"}, commit1))
-		require.NoError(t, b.Set("id3", []string{"Hola", "Esta bien"}, commit1))
+		require.NoError(t, b.Set("id1", commit1, excerpt, []string{"foo", "bar", "foobar barfoo"}))
+		require.NoError(t, b.Set("id2", commit1, excerpt, []string{"hello", "foo bar"}))
+		require.NoError(t, b.Set("id3", commit1, excerpt, []string{"Hola", "Esta bien"}))
 		require.NoError(t, b.Apply())
 
 		requireSearch(t, idx, "foobar", "id1")
@@ -415,7 +416,7 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 
 		// re-indexing an item replace previous versions
 		b = idx.NewBatch()
-		require.NoError(t, b.Set("id2", []string{"hello"}, commit2))
+		require.NoError(t, b.Set("id2", commit2, excerpt, []string{"hello"}))
 		require.NoError(t, b.Apply())
 		requireSearch(t, idx, "foo", "id1")
 		requireSearch(t, idx, "hello", "id2")
@@ -431,16 +432,16 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 	})
 
 	t.Run("search returns every match", func(t *testing.T) {
-		idx, err := repo.GetIndex("every")
+		idx, err := repo.GetIndex("every", 1)
 		require.NoError(t, err)
 
-		// more than bleve returns by default
+		// more than a page of results of a typical search engine
 		var ids []string
 		b := idx.NewBatch()
 		for i := 0; i < 25; i++ {
 			id := fmt.Sprintf("id%d", i)
 			ids = append(ids, id)
-			require.NoError(t, b.Set(id, []string{"marker"}, commit1))
+			require.NoError(t, b.Set(id, commit1, excerpt, []string{"marker"}))
 		}
 		require.NoError(t, b.Apply())
 
@@ -448,16 +449,16 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 	})
 
 	t.Run("a batch is applied as a whole", func(t *testing.T) {
-		idx, err := repo.GetIndex("whole")
+		idx, err := repo.GetIndex("whole", 1)
 		require.NoError(t, err)
 
 		b := idx.NewBatch()
-		require.NoError(t, b.Set("gone", []string{"marker"}, commit1))
+		require.NoError(t, b.Set("gone", commit1, excerpt, []string{"marker"}))
 		require.NoError(t, b.Apply())
 
 		b = idx.NewBatch()
-		require.NoError(t, b.Set("id1", []string{"marker"}, commit1))
-		require.NoError(t, b.Set(entityId, []string{"marker"}, commit2))
+		require.NoError(t, b.Set("id1", commit1, excerpt, []string{"marker"}))
+		require.NoError(t, b.Set(entityId, commit2, excerpt, []string{"marker"}))
 		b.Remove("gone")
 
 		// nothing is visible before Apply
@@ -470,25 +471,25 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 	})
 
 	t.Run("records the commit of each document", func(t *testing.T) {
-		idx, err := repo.GetIndex("record")
+		idx, err := repo.GetIndex("record", 1)
 		require.NoError(t, err)
 
 		// nothing indexed, nothing recorded
 		requireBuiltFrom(t, idx, map[string]repository.Hash{})
 
 		b := idx.NewBatch()
-		require.NoError(t, b.Set("id1", []string{"a"}, commit1))
-		require.NoError(t, b.Set(entityId, []string{"b"}, commit1))
+		require.NoError(t, b.Set("id1", commit1, excerpt, []string{"a"}))
+		require.NoError(t, b.Set(entityId, commit1, excerpt, []string{"b"}))
 		// a document with no text is still a document
-		require.NoError(t, b.Set("empty", nil, commit1))
+		require.NoError(t, b.Set("empty", commit1, excerpt, nil))
 		require.NoError(t, b.Apply())
 		requireBuiltFrom(t, idx, map[string]repository.Hash{"id1": commit1, entityId: commit1, "empty": commit1})
 
 		// the latest change of a document in a batch wins
 		b = idx.NewBatch()
-		require.NoError(t, b.Set("id1", []string{"a"}, commit2))
+		require.NoError(t, b.Set("id1", commit2, excerpt, []string{"a"}))
 		b.Remove(entityId)
-		require.NoError(t, b.Set(entityId, []string{"b"}, commit2))
+		require.NoError(t, b.Set(entityId, commit2, excerpt, []string{"b"}))
 		b.Remove("empty")
 		require.NoError(t, b.Apply())
 		requireBuiltFrom(t, idx, map[string]repository.Hash{"id1": commit2, entityId: commit2})
@@ -504,19 +505,19 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 	})
 
 	t.Run("the texts of a document are left untouched", func(t *testing.T) {
-		idx, err := repo.GetIndex("untouched")
+		idx, err := repo.GetIndex("untouched", 1)
 		require.NoError(t, err)
 
 		texts := []string{"some  spaced   text", strings.Repeat("x", 200)}
 		b := idx.NewBatch()
-		require.NoError(t, b.Set("id1", texts, commit1))
+		require.NoError(t, b.Set("id1", commit1, excerpt, texts))
 		require.NoError(t, b.Apply())
 
 		require.Equal(t, []string{"some  spaced   text", strings.Repeat("x", 200)}, texts)
 	})
 
 	t.Run("concurrent batches all land", func(t *testing.T) {
-		idx, err := repo.GetIndex("concurrent")
+		idx, err := repo.GetIndex("concurrent", 1)
 		require.NoError(t, err)
 
 		const batches = 20
@@ -532,7 +533,7 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 			go func() {
 				defer wg.Done()
 				b := idx.NewBatch()
-				if err := b.Set(id, []string{"marker"}, commit1); err != nil {
+				if err := b.Set(id, commit1, excerpt, []string{"marker"}); err != nil {
 					errs <- err
 					return
 				}
@@ -549,13 +550,107 @@ func RepoIndexTest(t *testing.T, repo repository.RepoIndex) {
 		requireBuiltFrom(t, idx, expected)
 	})
 
-	t.Run("an invalid commit is rejected", func(t *testing.T) {
-		idx, err := repo.GetIndex("invalid")
+	t.Run("excerpts", func(t *testing.T) {
+		idx, err := repo.GetIndex("excerpts", 1)
+		require.NoError(t, err)
+
+		_, _, err = idx.Excerpt("id1")
+		require.ErrorIs(t, err, repository.ErrNotFound)
+		builtFrom, excerpts, err := idx.Excerpts()
+		require.NoError(t, err)
+		require.Empty(t, builtFrom)
+		require.Empty(t, excerpts)
+
+		b := idx.NewBatch()
+		require.NoError(t, b.Set("id1", commit1, []byte(`{"title": "first", "labels": ["a", "b"]}`), nil))
+		require.NoError(t, b.Set("id2", commit1, []byte(`{"title": "second"}`), nil))
+		require.NoError(t, b.Apply())
+
+		commit, got, err := idx.Excerpt("id1")
+		require.NoError(t, err)
+		require.Equal(t, commit1, commit)
+		require.JSONEq(t, `{"title": "first", "labels": ["a", "b"]}`, string(got))
+
+		// replaced by a new version, dropped with its document
+		b = idx.NewBatch()
+		require.NoError(t, b.Set("id1", commit2, []byte(`{"title": "first, edited"}`), nil))
+		b.Remove("id2")
+		require.NoError(t, b.Apply())
+
+		builtFrom, excerpts, err = idx.Excerpts()
+		require.NoError(t, err)
+		require.Equal(t, map[string]repository.Hash{"id1": commit2}, builtFrom)
+		require.Len(t, excerpts, 1)
+		require.JSONEq(t, `{"title": "first, edited"}`, string(excerpts["id1"]))
+		_, _, err = idx.Excerpt("id2")
+		require.ErrorIs(t, err, repository.ErrNotFound)
+	})
+
+	t.Run("namespaces are separate", func(t *testing.T) {
+		idxA, err := repo.GetIndex("ns-a", 1)
+		require.NoError(t, err)
+		idxB, err := repo.GetIndex("ns-b", 1)
+		require.NoError(t, err)
+
+		b := idxA.NewBatch()
+		require.NoError(t, b.Set("id1", commit1, excerpt, []string{"marker"}))
+		require.NoError(t, b.Apply())
+		b = idxB.NewBatch()
+		require.NoError(t, b.Set("id1", commit2, excerpt, []string{"other"}))
+		require.NoError(t, b.Apply())
+
+		requireSearch(t, idxA, "marker", "id1")
+		requireSearch(t, idxB, "marker")
+		requireBuiltFrom(t, idxB, map[string]repository.Hash{"id1": commit2})
+
+		require.NoError(t, idxB.Clear())
+		requireSearch(t, idxA, "marker", "id1")
+		requireBuiltFrom(t, idxA, map[string]repository.Hash{"id1": commit1})
+	})
+
+	t.Run("an index of another version is emptied", func(t *testing.T) {
+		idx, err := repo.GetIndex("versioned", 1)
+		require.NoError(t, err)
+		b := idx.NewBatch()
+		require.NoError(t, b.Set("id1", commit1, excerpt, []string{"marker"}))
+		require.NoError(t, b.Apply())
+		other, err := repo.GetIndex("unversioned", 1)
+		require.NoError(t, err)
+		b = other.NewBatch()
+		require.NoError(t, b.Set("id1", commit1, excerpt, []string{"marker"}))
+		require.NoError(t, b.Apply())
+
+		// the same version keeps the documents
+		idx, err = repo.GetIndex("versioned", 1)
+		require.NoError(t, err)
+		requireBuiltFrom(t, idx, map[string]repository.Hash{"id1": commit1})
+
+		idx, err = repo.GetIndex("versioned", 2)
+		require.NoError(t, err)
+		requireBuiltFrom(t, idx, map[string]repository.Hash{})
+		requireSearch(t, idx, "marker")
+		_, _, err = idx.Excerpt("id1")
+		require.ErrorIs(t, err, repository.ErrNotFound)
+
+		// the new version is kept, the other namespaces untouched
+		b = idx.NewBatch()
+		require.NoError(t, b.Set("id2", commit1, excerpt, []string{"marker"}))
+		require.NoError(t, b.Apply())
+		idx, err = repo.GetIndex("versioned", 2)
+		require.NoError(t, err)
+		requireSearch(t, idx, "marker", "id2")
+		requireSearch(t, other, "marker", "id1")
+	})
+
+	t.Run("an invalid commit or excerpt is rejected", func(t *testing.T) {
+		idx, err := repo.GetIndex("invalid", 1)
 		require.NoError(t, err)
 
 		b := idx.NewBatch()
-		require.Error(t, b.Set("id1", []string{"marker"}, ""))
-		require.Error(t, b.Set("id1", []string{"marker"}, "nothex"))
+		require.Error(t, b.Set("id1", "", excerpt, []string{"marker"}))
+		require.Error(t, b.Set("id1", "nothex", excerpt, []string{"marker"}))
+		require.Error(t, b.Set("id1", commit1, nil, []string{"marker"}))
+		require.Error(t, b.Set("id1", commit1, []byte(`{"unfinished": `), []string{"marker"}))
 		require.NoError(t, b.Apply())
 
 		requireSearch(t, idx, "marker")
