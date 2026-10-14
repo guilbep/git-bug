@@ -11,6 +11,7 @@ import (
 	"github.com/git-bug/git-bug/bridge/core"
 	"github.com/git-bug/git-bug/bridge/core/synctest"
 	"github.com/git-bug/git-bug/cache"
+	"github.com/git-bug/git-bug/entity"
 )
 
 // forges are the fake forges of the fakesync bridges, by project name.
@@ -133,4 +134,59 @@ func TestSyncAllDryRun(t *testing.T) {
 	all := strings.Join(report, "\n")
 	require.Contains(t, all, "would import issue https://a.test/issues/1")
 	require.Contains(t, all, "would create issue: from git-bug")
+}
+
+// The same person on two forges is one identity once each bridge links their
+// login to it.
+func TestSyncLinkedLogins(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	b := newSyncForge(t, repo, "b")
+	a.UserAct("alice").CreateIssue("from a", "body")
+	b.UserAct("alice-b").CreateIssue("from b", "body")
+	b.UserAct("bob").CreateIssue("from bob", "body")
+
+	alice, err := repo.Identities().New("Alice", "alice@example.com")
+	require.NoError(t, err)
+	require.NoError(t, core.SetBridgeConfig(repo, "a", "login-"+alice.Id().Human(), "alice"))
+	require.NoError(t, core.SetBridgeConfig(repo, "b", "login-"+alice.Id().Human(), "Alice-B"))
+
+	results, err := core.SyncAll(context.Background(), repo, []string{"a", "b"}, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+
+	authors := map[string]entity.Id{}
+	for _, id := range repo.Bugs().AllIds() {
+		b, err := repo.Bugs().Resolve(id)
+		require.NoError(t, err)
+		authors[b.Snapshot().Title] = b.Snapshot().Author.Id()
+	}
+	require.Equal(t, alice.Id(), authors["from a"])
+	require.Equal(t, alice.Id(), authors["from b"])
+	require.NotEqual(t, alice.Id(), authors["from bob"])
+}
+
+func TestSyncLinkErrors(t *testing.T) {
+	for name, links := range map[string]map[string]string{
+		"unknown identity": {"login-0000000": "alice"},
+		"login twice":      {"login-" + "%me": "alice", "login-" + "%other": "ALICE"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newRepo(t)
+			newSyncForge(t, repo, "a")
+			me, err := repo.GetUserIdentity()
+			require.NoError(t, err)
+			other, err := repo.Identities().New("Other", "other@example.com")
+			require.NoError(t, err)
+			for k, v := range links {
+				k = strings.NewReplacer("%me", me.Id().Human(), "%other", other.Id().Human()).Replace(k)
+				require.NoError(t, core.SetBridgeConfig(repo, "a", k, v))
+			}
+
+			_, err = core.SyncAll(context.Background(), repo, []string{"a"}, false)
+			require.ErrorContains(t, err, "login-")
+		})
+	}
 }

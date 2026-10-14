@@ -61,9 +61,37 @@ Known limits it showed:
 - [ ] Text mirrored by another git-bug repository loses its attribution on
       pull: the header is removed with the marker. Only the early
       export-foreign header exists in the wild (scratch and EPFL projects).
-- [ ] The repository that pushed the 5 EPFL-ENAC/wiki issues to gitlab.epfl.ch
+- [x] The repository that pushed the 5 EPFL-ENAC/wiki issues to gitlab.epfl.ch
       is the only one linking them to their GitHub originals: a new hub
-      would import both as different bugs.
+      would import both as different bugs. Deleted those GitLab issues.
+
+## EPFL-ENAC/wiki dry run, 2026-10-14 evening
+
+GitLab issues #2-#6 deleted; the wiki's own git-bug data pulled (6 bugs,
+4 identities), both bridges with `sync`, existing credentials.
+
+- [x] The stored GitLab token (`https://gitlab.epfl.ch`) wasn't found by a
+      bridge on `https://gitlab.epfl.ch/`: base URLs now compare without
+      their trailing slash.
+- [x] Bugs synced by the engine had no `github-url`, which git-board reads:
+      kept on every synced bug.
+- [x] Dry run: the 5 GitHub issues are the 5 bugs the old bridge left
+      (recognized); it would create `e7ae216` on GitHub (a test bug, no
+      GitHub link) and the 5 others on GitLab. `e7ae216`'s GitLab issue #1
+      is deleted: marked gone, not recreated.
+- [x] Same person on two forges: `login-<identity>` links in the bridge
+      configuration.
+
+## Next
+
+- [ ] A scheduled CI job as the one runner (`git bug pull && git bug bridge
+      sync && git bug push`), with tokens from secrets.
+- [ ] Binaries of the fork for teammates (a tag on the fork runs
+      release.yml), as `go install` can't fetch a fork of this module.
+- [ ] git-board on the fork: a `replace` for the library; its labels
+      (`status:`, `prio:`, `sprint:`) are pushed to every synced forge.
+- [ ] GitHub end-to-end tests: need a token with `delete_repo`.
+- [ ] Upstream: discuss on #1476 before a PR, given #1223.
 
 ## Design (sync.md), approved section by section
 

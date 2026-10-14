@@ -120,6 +120,7 @@ Every bridge has:
 | `git-bug.bridge.<name>.target`         | string    | The bridge: `gitea`, `github`, `gitlab`, `jira` or `launchpad`.        |
 | `git-bug.bridge.<name>.lastImportTime` | timestamp | Bookkeeping for incremental imports. Written by `git bug bridge pull`. |
 | `git-bug.bridge.<name>.sync`           | bool      | Set by hand, for Gitea, GitHub and GitLab. See [Syncing](#syncing).    |
+| `git-bug.bridge.<name>.login-<id>`     | string    | Set by hand: the login of identity `<id>` on the forge. See [Syncing](#syncing). |
 
 ### Syncing<a name="syncing"></a>
 
@@ -139,7 +140,23 @@ posted there with the bridge's `default-login` token (preferably a bot
 account), under a header naming its author, with a link to where it was
 written. Mentions in text from another forge are defused, and issue
 references translated. Run it from one place only, such as a CI job:
-`git bug pull && git bug bridge sync && git bug push`.
+`git bug pull && git bug bridge sync && git bug push`. Everyone running
+bridges on a synced repository needs a version with `bridge sync`: older ones
+don't recognize what it records, and import synced issues again.
+
+Each forge account is a git-bug identity, so the same person on two forges is
+two identities, except token owners, whose identity `bridge new` and
+`bridge auth add-token` tag with their logins. To make someone one identity,
+link their login on each bridge to it:
+
+```bash
+git config git-bug.bridge.github.login-22ea975 alice
+git config git-bug.bridge.gitlab.login-22ea975 alice-epfl
+```
+
+What they write on either forge is then authored by that identity, and posted
+as them wherever they have a token, so check the logins. What was pulled
+before the link keeps its author, and `git config --unset` removes a link.
 
 The remaining keys depend on the target.
 

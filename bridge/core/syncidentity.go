@@ -3,10 +3,21 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entity"
 )
+
+// identityFor returns the identity of a forge user: the one their login is
+// linked to in the bridge's configuration, else the one the package-level
+// identityFor finds or creates.
+func (e *Engine) identityFor(u User) (*cache.IdentityCache, error) {
+	if id, ok := e.links[strings.ToLower(u.Login)]; ok {
+		return e.repo.Identities().Resolve(id)
+	}
+	return identityFor(e.repo, e.remote, u, "")
+}
 
 // identityFor returns the identity of a forge user, created if there's none.
 // See identitiesFor.

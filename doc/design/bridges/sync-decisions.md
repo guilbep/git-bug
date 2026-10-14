@@ -17,6 +17,15 @@ spec stays the authority.
 - **A pulled label event records the forge's label set, computed from what
   the forge last saw**, not from git-bug's labels, which local changes may
   have moved. *If wrong:* labels flapping between runs.
+- **Synced bugs keep `<kind>-url` on their create operation**, as the old
+  bridges did: tools built on them, such as git-board, find a bug's issue
+  through it. *If wrong:* nothing; with two remotes of one kind, it's the
+  first one's URL.
+- **Older git-bug versions don't read what sync records**: their `bridge
+  pull` matches `github-id` and `gitlab-id`, and imports synced issues
+  again. Writing those too would half-work (comments would still
+  duplicate), so it's documented instead. *If wrong:* duplicates, from
+  someone else's older binary.
 - **Remote ids**: GitLab keeps raw numbers as its old bridge did, so old data
   stays recognized; Gitea prefixes issue ids (`issue-<n>`), as its issue
   numbers and comment ids collide; GitHub uses its node ids. *If wrong:* a
@@ -92,6 +101,14 @@ spec stays the authority.
   identity.
 - **`Account` carries no token**: `bridge/core/auth` imports `bridge/core`, and
   it keeps secrets out of the engine.
+- **The same person on two forges is linked by hand, in each bridge's
+  configuration** (`login-<identity> = <login>`), checked before any other
+  match. Not on the identity: its metadata keeps a key's first value
+  forever, and a wrong link posts someone's text with another person's
+  token. Not by email or login: unverified on some forges, with the same
+  risk. *If wrong:* links don't travel with the repository; whoever runs
+  sync sets them, as they set the bridges. A renamed account needs its link
+  updated.
 
 ## The command and the bridges
 
@@ -101,6 +118,15 @@ spec stays the authority.
   comments exactly, and updates as "up to N changes", as echoes can't be
   claimed without writing.
 - **`default-login` is a core configuration key**, as every bridge used it.
+- **GitLab base URLs are compared without their trailing slash**, for tokens
+  and old bugs: `bridge new` stores whichever form was typed. *If wrong:*
+  nothing.
+- **Sync lives in this git-bug fork, and git-board stays its own
+  repository.** Sync replaces git-bug's bridges, and needs their
+  configuration, the keyring, the bridge lock and the command; git-board
+  uses git-bug as a library (cache, query) to add fields, sprints and
+  views. Their contract is git-bug's data: labels, and `<kind>-url`. *If
+  wrong:* moving code between them later.
 - **The Gitea client is written on the standard library**: about ten
   endpoints, no new dependency.
 - **The end-to-end tests of GitHub and GitLab assert each bug's final state**
@@ -120,5 +146,5 @@ decision, or the known limits in [sync-todo.md](sync-todo.md):
   that value only);
 - with `sync`, a text is edited with the account that posted it, whoever
   edited it (spec);
-- one runner, two identities per person across forges, attribution lost
-  through another hub (spec and known limits).
+- one runner, attribution lost through another hub (spec and known
+  limits).

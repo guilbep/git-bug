@@ -216,7 +216,7 @@ func (e *Engine) urlKey() string {
 }
 
 func (e *Engine) newBug(issue *Issue) (*cache.BugCache, error) {
-	author, err := identityFor(e.repo, e.remote, issue.Author, "")
+	author, err := e.identityFor(issue.Author)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func (e *Engine) pullComment(b *cache.BugCache, c *Comment, out chan<- ImportRes
 		}
 	}
 
-	author, err := identityFor(e.repo, e.remote, c.Author, "")
+	author, err := e.identityFor(c.Author)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, decided map[slot]bool, 
 		return err
 	}
 
-	author, err := identityFor(e.repo, e.remote, ev.Author, "")
+	author, err := e.identityFor(ev.Author)
 	if err != nil {
 		return err
 	}
@@ -554,7 +554,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 			if sc.local != baseValue {
 				conflict(string(sc.kind), true)
 			}
-			author, err := identityFor(e.repo, e.remote, issue.Author, "")
+			author, err := e.identityFor(issue.Author)
 			if err != nil {
 				return err
 			}
@@ -585,7 +585,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 			if len(added) == 0 && len(removed) == 0 {
 				record(lastSlotOp(snap, slot{kind: slotLabels}).Id(), string(slotLabels), labelsValue(remote))
 			} else {
-				author, err := identityFor(e.repo, e.remote, issue.Author, "")
+				author, err := e.identityFor(issue.Author)
 				if err != nil {
 					return err
 				}
@@ -640,7 +640,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 			if local.Id() != baseOp.Id() {
 				conflict("a text", true)
 			}
-			author, err := identityFor(e.repo, e.remote, rt.editor, "")
+			author, err := e.identityFor(rt.editor)
 			if err != nil {
 				return err
 			}

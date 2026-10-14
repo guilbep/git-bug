@@ -30,6 +30,9 @@ const (
 	ConfigKeySync = "sync"
 	// ConfigKeyDefaultLogin is the login posting for people without a token.
 	ConfigKeyDefaultLogin = "default-login"
+	// ConfigKeyLoginPrefix, followed by an identity id, links that identity
+	// to the login it has on the forge: login-<identity> = <login>.
+	ConfigKeyLoginPrefix = "login-"
 
 	MetaKeyOrigin = "origin"
 
@@ -437,11 +440,24 @@ func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
 			return nil, fmt.Errorf("%s: %w", ConfigKeySync, err)
 		}
 	}
+	links := map[string]string{}
+	for k, login := range b.conf {
+		prefix, ok := strings.CutPrefix(k, ConfigKeyLoginPrefix)
+		if !ok {
+			continue
+		}
+		login = strings.ToLower(login)
+		if other, ok := links[login]; ok {
+			return nil, fmt.Errorf("%s%s and %s%s: the login %s is linked to two identities", ConfigKeyLoginPrefix, other, ConfigKeyLoginPrefix, prefix, login)
+		}
+		links[login] = prefix
+	}
 	return NewEngine(ctx, b.repo, remote, SyncOptions{
 		Foreign:      foreign,
 		DryRun:       dryRun,
 		DefaultLogin: b.conf[ConfigKeyDefaultLogin],
 		LoginKey:     b.impl.LoginMetaKey(),
+		Links:        links,
 	})
 }
 

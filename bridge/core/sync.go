@@ -26,6 +26,9 @@ type SyncOptions struct {
 	DefaultLogin string
 	// LoginKey is the identity metadata `bridge new` tags token owners with.
 	LoginKey string
+	// Links are identity id prefixes, by lowercased login: the identity of
+	// that forge user, whatever else matches them.
+	Links map[string]string
 }
 
 // Engine syncs a git-bug repository with one forge project.
@@ -39,6 +42,8 @@ type Engine struct {
 	accounts map[entity.Id]Account
 	// defaultAccount posts for people without an account, with Foreign.
 	defaultAccount *Account
+	// links are the identities of forge users, by lowercased login.
+	links map[string]entity.Id
 }
 
 func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOptions) (*Engine, error) {
@@ -47,7 +52,14 @@ func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOp
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{repo: repo, remote: r, opts: opts}
+	e := &Engine{repo: repo, remote: r, opts: opts, links: map[string]entity.Id{}}
+	for login, prefix := range opts.Links {
+		i, err := repo.Identities().ResolvePrefix(prefix)
+		if err != nil {
+			return nil, fmt.Errorf("%s%s: %w", ConfigKeyLoginPrefix, prefix, err)
+		}
+		e.links[login] = i.Id()
+	}
 	for _, a := range list {
 		if a.Login == opts.DefaultLogin {
 			e.defaultAccount = &a

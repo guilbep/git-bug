@@ -272,12 +272,11 @@ kept as they are: the edit was written on that forge, so they are its refs.
   made with the `default-login` account, without attribution.
 - A text is always edited with the account that posted it, recorded on the
   operation when pushed.
-- The same person on two forges is two git-bug identities. They are not
-  merged automatically, as matching people by email or name is risky, and
-  git-bug has no way to link identities yet (see #642, #351). Alice's GitHub
-  comments reach GitLab through the bot, with the header, even if she has a
-  GitLab token. Linking identities can come later without changing the
-  engine.
+- The same person on two forges is two git-bug identities, unless the
+  bridges link their logins to one identity in their configuration
+  (`login-<identity> = <login>`), which comes before any other match. They
+  are not merged automatically, as matching people by email or name is
+  risky, and git-bug has no way to merge identities (see #642, #351).
 
 ## Migration
 
