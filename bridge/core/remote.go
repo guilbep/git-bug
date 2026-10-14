@@ -154,7 +154,8 @@ type Event struct {
 // Dialect is how a forge writes issue references.
 type Dialect struct {
 	// Ref matches a reference to an issue of the same project. Its first
-	// group is the issue number. Cross-project references must not match.
+	// group is the reference, replaced when rewriting it, and its second the
+	// issue number. Cross-project references must not match.
 	Ref *regexp.Regexp
 	// FormatRef writes a reference to issue number n of the project.
 	FormatRef func(n string) string
