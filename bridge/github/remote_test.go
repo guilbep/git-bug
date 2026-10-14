@@ -492,3 +492,81 @@ func TestGithubLegacyMetadata(t *testing.T) {
 	require.Len(t, got.Snapshot().Operations, ops, "nothing new")
 	require.Zero(t, g.Writes(), "nothing pushed")
 }
+
+// splitClient makes the timeline of an issue need a second page, which then
+// fails to load.
+type splitClient struct {
+	fakeClient
+	split *bool
+}
+
+func (c splitClient) Query(ctx context.Context, q interface{}, vars map[string]interface{}) error {
+	if !*c.split {
+		return c.fakeClient.Query(ctx, q, vars)
+	}
+	switch q := q.(type) {
+	case *timelineQuery:
+		return errors.New("502 Bad Gateway")
+	case *issueQuery:
+		if err := c.fakeClient.Query(ctx, q, vars); err != nil {
+			return err
+		}
+		for i := range q.Repository.Issues.Nodes {
+			items := &q.Repository.Issues.Nodes[i].TimelineItems
+			if len(items.Nodes) > 1 {
+				items.Nodes = items.Nodes[:1]
+				items.PageInfo.HasNextPage = true
+			}
+		}
+	default:
+		return c.fakeClient.Query(ctx, q, vars)
+	}
+	return nil
+}
+
+// Review I1: an issue whose timeline failed to load is not given to the
+// engine as if it were complete.
+func TestGithubPartialTimelineIsAnError(t *testing.T) {
+	defer func(d time.Duration) { retryDelay = d }(retryDelay)
+	retryDelay = time.Millisecond
+
+	fake := newFakeGithub("owner")
+	split := false
+	r, err := newRemote(context.Background(), "owner", "project", "bot", []*auth.Token{auth.NewToken(target, "token-bot")},
+		func(*auth.Token) Client { return splitClient{fakeClient{f: fake, login: "bot"}, &split} })
+	require.NoError(t, err)
+	g := githubForge{remote: r, fake: fake}
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("closed one", "body")
+	alice.Comment(ref, "a comment")
+	alice.SetStatus(ref, common.ClosedStatus)
+	alice.CreateIssue("another one", "body")
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+	pull := func() (errs int) {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{DefaultLogin: "bot", LoginKey: metaKeyGithubLogin})
+		require.NoError(t, err)
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			if r.Event == core.ImportEventError {
+				errs++
+			}
+		}
+		return errs
+	}
+	require.Zero(t, pull())
+	closed, err := backend.Bugs().ResolveBugCreateMetadata("sync:github.com/owner/project:id", ref.ID)
+	require.NoError(t, err)
+	require.Equal(t, common.ClosedStatus, closed.Snapshot().Status)
+
+	split = true
+	require.Positive(t, pull(), "the failure is reported")
+	closed, err = backend.Bugs().Resolve(closed.Id())
+	require.NoError(t, err)
+	require.Equal(t, common.ClosedStatus, closed.Snapshot().Status, "not reopened from a partial timeline")
+}

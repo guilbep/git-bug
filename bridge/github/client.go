@@ -87,6 +87,10 @@ func (c *rateLimitHandlerClient) queryPrintMsgs(ctx context.Context, query inter
 	return c.callAPIAndRetry(ctx, queryFun, callback)
 }
 
+// retryDelay is how long to wait before retrying after a first failure,
+// then twice and three times that.
+var retryDelay = 8 * time.Second
+
 // callAPIAndRetry calls the Github GraphQL API (indirectly through callAPIDealWithLimit) and in
 // case of error it repeats the request to the Github API. The parameter `apiCall` is intended to be
 // a closure containing a query or a mutation to the Github GraphQL API.
@@ -101,7 +105,7 @@ func (c *rateLimitHandlerClient) callAPIAndRetry(ctx context.Context, apiCall fu
 	retries := 3
 	for i := 0; i < retries; i++ {
 		// wait a few seconds before retry
-		sleepTime := time.Duration(8*(i+1)) * time.Second
+		sleepTime := time.Duration(i+1) * retryDelay
 		timer := time.NewTimer(sleepTime)
 		select {
 		case <-ctx.Done():

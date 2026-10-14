@@ -119,6 +119,12 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 			}
 			switch ev := ev.(type) {
 			case IssueEvent:
+				// a failure reading the previous issue leaves it partial: the
+				// mediator records it before going on with this one
+				if err := mm.Error(); err != nil {
+					yield(nil, err)
+					return
+				}
 				if cur != nil && !yield(cur.finish(), nil) {
 					return
 				}

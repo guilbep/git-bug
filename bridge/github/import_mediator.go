@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/shurcooL/githubv4"
@@ -38,7 +39,8 @@ type importMediator struct {
 	// immediately followed by their comment edits.
 	importEvents chan ImportEvent
 
-	// Sticky error
+	// Sticky error, read while the mediator runs
+	mu  sync.Mutex
 	err error
 }
 
@@ -72,7 +74,15 @@ func (mm *importMediator) NextImportEvent() ImportEvent {
 }
 
 func (mm *importMediator) Error() error {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
 	return mm.err
+}
+
+func (mm *importMediator) setErr(err error) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.err = err
 }
 
 func (mm *importMediator) User(ctx context.Context, loginName string) (*user, error) {
@@ -141,7 +151,7 @@ func (mm *importMediator) queryIssueEdits(ctx context.Context, nid githubv4.ID, 
 	}
 	query := issueEditQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Node.Issue.UserContentEdits
@@ -185,7 +195,7 @@ func (mm *importMediator) queryTimeline(ctx context.Context, nid githubv4.ID, cu
 	}
 	query := timelineQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Node.Issue.TimelineItems
@@ -235,7 +245,7 @@ func (mm *importMediator) queryCommentEdits(ctx context.Context, nid githubv4.ID
 	}
 	query := commentEditQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Node.IssueComment.UserContentEdits
@@ -254,7 +264,7 @@ func (mm *importMediator) queryIssue(ctx context.Context, cursor githubv4.String
 	}
 	query := issueQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Repository.Issues
