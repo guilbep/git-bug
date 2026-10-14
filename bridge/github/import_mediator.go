@@ -34,6 +34,10 @@ type importMediator struct {
 	// given date should be imported.
 	since time.Time
 
+	// issueFirst is how many issues a page asks for, lowered when GitHub
+	// finds a page too costly.
+	issueFirst int
+
 	// importEvents holds events representing issues, comments, edits, ...
 	// In this channel issues are immediately followed by their issue edits and comments are
 	// immediately followed by their comment edits.
@@ -50,6 +54,7 @@ func NewImportMediator(ctx context.Context, client *rateLimitHandlerClient, owne
 		owner:        owner,
 		project:      project,
 		since:        since,
+		issueFirst:   NumIssues,
 		importEvents: make(chan ImportEvent, ChanCapacity),
 		err:          nil,
 	}
@@ -263,9 +268,19 @@ func (mm *importMediator) queryIssue(ctx context.Context, cursor githubv4.String
 		vars["issueAfter"] = cursor
 	}
 	query := issueQuery{}
-	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.setErr(err)
-		return nil, false
+	for {
+		vars["issueFirst"] = githubv4.Int(mm.issueFirst)
+		err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents)
+		if isResourceLimit(err) && mm.issueFirst > 1 {
+			// ponytail: halves for the rest of the import, never grows back
+			mm.issueFirst /= 2
+			continue
+		}
+		if err != nil {
+			mm.setErr(err)
+			return nil, false
+		}
+		break
 	}
 	connection := &query.Repository.Issues
 	if len(connection.Nodes) <= 0 {

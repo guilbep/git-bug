@@ -641,3 +641,40 @@ func TestGithubNotFoundByOutsiderIsNotGone(t *testing.T) {
 	sync()
 	require.Equal(t, "by the bot", g.Issue(ref.Number).Title)
 }
+
+// costlyClient refuses pages of more than 5 issues, as GitHub refuses a query
+// too costly to compute on projects with long issue histories.
+type costlyClient struct {
+	fakeClient
+	calls *int
+}
+
+func (c costlyClient) Query(ctx context.Context, q interface{}, vars map[string]interface{}) error {
+	if _, ok := q.(*issueQuery); ok {
+		*c.calls++
+		if vars["issueFirst"].(githubv4.Int) > 5 {
+			return errors.New("Resource limits for this query exceeded.")
+		}
+	}
+	return c.fakeClient.Query(ctx, q, vars)
+}
+
+func TestGithubPullShrinksCostlyPages(t *testing.T) {
+	fake := newFakeGithub("owner")
+	calls := 0
+	r, err := newRemote(context.Background(), "owner", "project", "bot", []*auth.Token{auth.NewToken(target, "token-bot")},
+		func(*auth.Token) Client { return costlyClient{fakeClient{f: fake, login: "bot"}, &calls} })
+	require.NoError(t, err)
+	g := githubForge{remote: r, fake: fake}
+	alice := g.UserAct("alice")
+	alice.CreateIssue("one", "body")
+	alice.CreateIssue("two", "body")
+
+	n := 0
+	for _, err := range g.Issues(context.Background(), time.Time{}) {
+		require.NoError(t, err)
+		n++
+	}
+	require.Equal(t, 2, n)
+	require.Equal(t, 4, calls, "40, 20, 10 refused at once, then 5")
+}
