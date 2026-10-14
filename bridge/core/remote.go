@@ -111,9 +111,9 @@ type Issue struct {
 	// forges that tell without an edit event.
 	BodyEditor  *User
 	BodyUpdated time.Time
-	Status     common.Status
-	Labels     []string
-	Comments   []Comment
+	Status      common.Status
+	Labels      []string
+	Comments    []Comment
 	// Events are time ordered.
 	Events []Event
 }
