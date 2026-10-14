@@ -11,19 +11,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/shurcooL/githubv4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/git-bug/git-bug/bridge/core"
 	"github.com/git-bug/git-bug/bridge/core/auth"
 	"github.com/git-bug/git-bug/cache"
-	"github.com/git-bug/git-bug/entities/bug"
 	"github.com/git-bug/git-bug/entity"
-	"github.com/git-bug/git-bug/entity/dag"
 	"github.com/git-bug/git-bug/repository/repotest"
 )
 
@@ -32,9 +30,8 @@ const (
 )
 
 type testCase struct {
-	name    string
-	bug     *cache.BugCache
-	numOrOp int // number of original operations
+	name string
+	bug  *cache.BugCache
 }
 
 func testCases(t *testing.T, repo *cache.RepoCache) []*testCase {
@@ -106,34 +103,28 @@ func testCases(t *testing.T, repo *cache.RepoCache) []*testCase {
 
 	return []*testCase{
 		{
-			name:    "simple bug",
-			bug:     simpleBug,
-			numOrOp: 1,
+			name: "simple bug",
+			bug:  simpleBug,
 		},
 		{
-			name:    "bug with comments",
-			bug:     bugWithComments,
-			numOrOp: 2,
+			name: "bug with comments",
+			bug:  bugWithComments,
 		},
 		{
-			name:    "bug label change",
-			bug:     bugLabelChange,
-			numOrOp: 6,
+			name: "bug label change",
+			bug:  bugLabelChange,
 		},
 		{
-			name:    "bug with comment editions",
-			bug:     bugWithCommentEditions,
-			numOrOp: 4,
+			name: "bug with comment editions",
+			bug:  bugWithCommentEditions,
 		},
 		{
-			name:    "bug changed status",
-			bug:     bugStatusChanged,
-			numOrOp: 3,
+			name: "bug changed status",
+			bug:  bugStatusChanged,
 		},
 		{
-			name:    "bug title edited",
-			bug:     bugTitleEdited,
-			numOrOp: 2,
+			name: "bug title edited",
+			bug:  bugTitleEdited,
 		},
 	}
 }
@@ -208,25 +199,20 @@ func TestGithubPushPull(t *testing.T) {
 	err = waitRepository(ctx, projectName, envUser, envToken, 60*time.Second)
 	require.NoError(t, err)
 
-	// initialize exporter
-	exporter := &githubExporter{}
-	err = exporter.Init(ctx, backend, core.Configuration{
-		confKeyOwner:        envUser,
-		confKeyProject:      projectName,
-		confKeyDefaultLogin: login,
-	})
-	require.NoError(t, err)
+	newEngine := func(backend *cache.RepoCache) *core.Engine {
+		r, err := newRemote(ctx, envUser, projectName, login, []*auth.Token{token}, graphqlClient)
+		require.NoError(t, err)
+		e, err := core.NewEngine(ctx, backend, r, core.SyncOptions{DefaultLogin: login, LoginKey: metaKeyGithubLogin})
+		require.NoError(t, err)
+		return e
+	}
 
 	start := time.Now()
 
-	// export all bugs
-	exportEvents, err := exporter.ExportAll(ctx, backend, time.Time{})
-	require.NoError(t, err)
-
-	for result := range exportEvents {
-		require.NoError(t, result.Err)
+	// export all bugs, as `bridge push` does
+	for result := range newEngine(backend).Push(ctx) {
+		require.NotEqual(t, core.ExportEventError, result.Event, result.String())
 	}
-	require.NoError(t, err)
 
 	fmt.Printf("test repository exported in %f seconds\n", time.Since(start).Seconds())
 
@@ -236,180 +222,47 @@ func TestGithubPushPull(t *testing.T) {
 	backendTwo, err := cache.NewRepoCacheNoEvents(repoTwo, nil)
 	require.NoError(t, err)
 	defer backendTwo.Close()
-
-	importer := &githubImporter{}
-	err = importer.Init(ctx, backend, core.Configuration{
-		confKeyOwner:        envUser,
-		confKeyProject:      projectName,
-		confKeyDefaultLogin: login,
-	})
+	two, err := backendTwo.Identities().New("other identity", "other@test.org")
 	require.NoError(t, err)
+	require.NoError(t, backendTwo.SetUserIdentity(two))
 
 	// import all exported bugs to the second backend
-	importEvents, err := importer.ImportAll(ctx, backendTwo, time.Time{})
-	require.NoError(t, err)
-
-	for result := range importEvents {
-		require.NoError(t, result.Err)
+	for result := range newEngine(backendTwo).Pull(ctx, time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, result.Event, result.String())
 	}
 
 	require.Len(t, backendTwo.Bugs().AllIds(), len(tests))
 
-	// TEMPORARY(flaky-label-change): used to dump the raw Github timeline when an
-	// assertion fails. Remove once the flaky "bug label change" failure is understood.
-	client := buildClient(token)
-
+	key := "sync:github.com/" + strings.ToLower(envUser+"/"+projectName) + ":id"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// for each operation a SetMetadataOperation will be added
-			// so number of operations should double
-			// TEMPORARY(flaky-label-change): was require.Len, revert once diagnosed
-			requireOpsLen(t, ctx, client, tt.bug.Snapshot(), tt.numOrOp*2)
-
-			// verify operation have correct metadata
-			for _, op := range tt.bug.Snapshot().Operations {
-				// Check if the originals operations (*not* SetMetadata) are tagged properly
-				if _, ok := op.(dag.OperationDoesntChangeSnapshot); !ok {
-					_, haveIDMetadata := op.GetMetadata(metaKeyGithubId)
-					require.True(t, haveIDMetadata)
-
-					_, haveURLMetada := op.GetMetadata(metaKeyGithubUrl)
-					require.True(t, haveURLMetada)
-				}
-			}
+			snap := tt.bug.Snapshot()
 
 			// get bug github ID
-			bugGithubID, ok := tt.bug.Snapshot().GetCreateMetadata(metaKeyGithubId)
+			bugGithubID, ok := snap.GetCreateMetadata(key)
 			require.True(t, ok)
 
 			// retrieve bug from backendTwo
-			importedBug, err := backendTwo.Bugs().ResolveBugCreateMetadata(metaKeyGithubId, bugGithubID)
+			importedBug, err := backendTwo.Bugs().ResolveBugCreateMetadata(key, bugGithubID)
 			require.NoError(t, err)
+			imported := importedBug.Snapshot()
 
-			// verify bug have same number of original operations
-			// TEMPORARY(flaky-label-change): was require.Len, revert once diagnosed
-			requireOpsLen(t, ctx, client, importedBug.Snapshot(), tt.numOrOp)
+			// the same issue, from GitHub's point of view
+			require.Equal(t, snap.Title, imported.Title)
+			require.Equal(t, snap.Status, imported.Status)
+			require.ElementsMatch(t, snap.Labels, imported.Labels)
+			require.Len(t, imported.Comments, len(snap.Comments))
+			for i := range snap.Comments {
+				require.Equal(t, snap.Comments[i].Message, imported.Comments[i].Message)
+			}
 
 			// verify bugs are tagged with origin=github
-			issueOrigin, ok := importedBug.Snapshot().GetCreateMetadata(core.MetaKeyOrigin)
+			issueOrigin, ok := imported.GetCreateMetadata(core.MetaKeyOrigin)
 			require.True(t, ok)
 			require.Equal(t, issueOrigin, target)
-
-			// TODO: maybe more tests to ensure bug final state
 		})
 	}
 }
-
-// ----- BEGIN TEMPORARY(flaky-label-change) -----
-// Instrumentation to diagnose an occasional CI failure where the "bug label
-// change" issue re-imported from Github has one operation too many. Remove this
-// whole block (and its call sites) once the cause is understood.
-
-// requireOpsLen checks the number of operations of a bug. On mismatch, it logs
-// the operations and the raw timeline of the matching Github issue, to help
-// diagnose flaky failures.
-func requireOpsLen(t *testing.T, ctx context.Context, client *rateLimitHandlerClient, snap *bug.Snapshot, expected int) {
-	t.Helper()
-
-	if len(snap.Operations) == expected {
-		return
-	}
-
-	t.Logf("expected %d operations, got %d:", expected, len(snap.Operations))
-	for i, op := range snap.Operations {
-		githubId, _ := op.GetMetadata(metaKeyGithubId)
-		line := fmt.Sprintf("  #%d %T time=%s author=%q github-id=%q",
-			i, op, op.Time().Format(time.RFC3339), op.Author().Name(), githubId)
-		switch op := op.(type) {
-		case *bug.LabelChangeOperation:
-			line += fmt.Sprintf(" added=%v removed=%v", op.Added, op.Removed)
-		case *dag.SetMetadataOperation[*bug.Snapshot]:
-			line += fmt.Sprintf(" target=%s metadata=%v", op.Target, op.NewMetadata)
-		}
-		t.Log(line)
-	}
-
-	if githubId, ok := snap.GetCreateMetadata(metaKeyGithubId); ok {
-		logGithubTimeline(t, ctx, client, githubId)
-	}
-
-	require.Len(t, snap.Operations, expected)
-}
-
-// debugTimelineQuery fetches the raw timeline of an issue, including item types
-// the importer ignores.
-type debugTimelineQuery struct {
-	Node struct {
-		Issue struct {
-			TimelineItems struct {
-				TotalCount githubv4.Int
-				Nodes      []struct {
-					Typename githubv4.String `graphql:"__typename"`
-					Node     struct {
-						Id githubv4.ID
-					} `graphql:"... on Node"`
-					IssueComment   createdAtEvent  `graphql:"... on IssueComment"`
-					LabeledEvent   labelDebugEvent `graphql:"... on LabeledEvent"`
-					UnlabeledEvent labelDebugEvent `graphql:"... on UnlabeledEvent"`
-					ClosedEvent    createdAtEvent  `graphql:"... on ClosedEvent"`
-					ReopenedEvent  createdAtEvent  `graphql:"... on ReopenedEvent"`
-					RenamedTitle   createdAtEvent  `graphql:"... on RenamedTitleEvent"`
-				}
-			} `graphql:"timelineItems(first: 100)"`
-		} `graphql:"... on Issue"`
-	} `graphql:"node(id: $id)"`
-}
-
-type createdAtEvent struct {
-	CreatedAt githubv4.DateTime
-}
-
-type labelDebugEvent struct {
-	CreatedAt githubv4.DateTime
-	Label     struct {
-		Id   githubv4.ID
-		Name githubv4.String
-	}
-}
-
-// logGithubTimeline logs the raw timeline of a Github issue.
-func logGithubTimeline(t *testing.T, ctx context.Context, client *rateLimitHandlerClient, issueId string) {
-	t.Helper()
-
-	var q debugTimelineQuery
-	err := client.queryPrintMsgs(ctx, &q, map[string]interface{}{
-		"id": githubv4.ID(issueId),
-	})
-	if err != nil {
-		t.Logf("failed to fetch Github timeline of issue %s: %v", issueId, err)
-		return
-	}
-
-	items := q.Node.Issue.TimelineItems
-	t.Logf("Github timeline of issue %s (%d items):", issueId, items.TotalCount)
-	for i, item := range items.Nodes {
-		line := fmt.Sprintf("  #%d %s id=%v", i, item.Typename, item.Node.Id)
-		switch item.Typename {
-		case "IssueComment":
-			line += fmt.Sprintf(" time=%s", item.IssueComment.CreatedAt.Format(time.RFC3339))
-		case "LabeledEvent":
-			line += fmt.Sprintf(" time=%s label=%q label-id=%v",
-				item.LabeledEvent.CreatedAt.Format(time.RFC3339), item.LabeledEvent.Label.Name, item.LabeledEvent.Label.Id)
-		case "UnlabeledEvent":
-			line += fmt.Sprintf(" time=%s label=%q label-id=%v",
-				item.UnlabeledEvent.CreatedAt.Format(time.RFC3339), item.UnlabeledEvent.Label.Name, item.UnlabeledEvent.Label.Id)
-		case "ClosedEvent":
-			line += fmt.Sprintf(" time=%s", item.ClosedEvent.CreatedAt.Format(time.RFC3339))
-		case "ReopenedEvent":
-			line += fmt.Sprintf(" time=%s", item.ReopenedEvent.CreatedAt.Format(time.RFC3339))
-		case "RenamedTitleEvent":
-			line += fmt.Sprintf(" time=%s", item.RenamedTitle.CreatedAt.Format(time.RFC3339))
-		}
-		t.Log(line)
-	}
-}
-
-// ----- END TEMPORARY(flaky-label-change) -----
 
 func generateRepoName() string {
 	var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")

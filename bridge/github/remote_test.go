@@ -1,0 +1,494 @@
+package github
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/shurcooL/githubv4"
+	"github.com/stretchr/testify/require"
+
+	"github.com/git-bug/git-bug/bridge/core"
+	"github.com/git-bug/git-bug/bridge/core/auth"
+	"github.com/git-bug/git-bug/bridge/core/synctest"
+	"github.com/git-bug/git-bug/cache"
+	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/repository/repotest"
+)
+
+// fakeGithub answers the GraphQL queries and mutations of the adapter, for
+// one repository, from memory, behaving like GitHub: edits keep a history
+// (newest first, the creation being the oldest), and state, title and label
+// changes leave timeline events.
+type fakeGithub struct {
+	owner string
+
+	mu       sync.Mutex
+	issues   []*ghIssue
+	labels   map[string]string // name by id
+	lastID   int
+	writes   int
+	failNext bool
+}
+
+type ghIssue struct {
+	id, url     string
+	number      int
+	title, body string
+	author      string
+	created     time.Time
+	updated     time.Time
+	closed      bool
+	labels      []string
+	bodyEdits   []userContentEdit // oldest first
+	timeline    []timelineItem
+	edits       map[string][]userContentEdit // comment edits by comment id, oldest first
+	deleted     bool
+}
+
+func newFakeGithub(owner string) *fakeGithub {
+	return &fakeGithub{owner: owner, labels: map[string]string{}}
+}
+
+// The following are called with f.mu held.
+
+func (f *fakeGithub) nextID(prefix string) string {
+	f.lastID++
+	return fmt.Sprintf("%s_%d", prefix, f.lastID)
+}
+
+func now() githubv4.DateTime {
+	return githubv4.DateTime{Time: time.Now().UTC().Truncate(time.Second)}
+}
+
+func actorOf(login string) *actor {
+	name := githubv4.String(strings.ToUpper(login[:1]) + login[1:])
+	return &actor{Typename: "User", Login: githubv4.String(login), User: userActor{Name: &name}}
+}
+
+func (f *fakeGithub) find(id githubv4.ID) (*ghIssue, error) {
+	for _, issue := range f.issues {
+		if issue.id == fmt.Sprint(id) && !issue.deleted {
+			return issue, nil
+		}
+	}
+	return nil, fmt.Errorf("Could not resolve to a node with the global id of '%v'", id)
+}
+
+func (f *fakeGithub) findComment(id githubv4.ID) (*ghIssue, *timelineItem, error) {
+	for _, issue := range f.issues {
+		for i := range issue.timeline {
+			if item := &issue.timeline[i]; item.Typename == "IssueComment" && fmt.Sprint(item.IssueComment.Id) == fmt.Sprint(id) {
+				if issue.deleted {
+					break
+				}
+				return issue, item, nil
+			}
+		}
+	}
+	return nil, nil, fmt.Errorf("Could not resolve to a node with the global id of '%v'", id)
+}
+
+func (f *fakeGithub) createIssue(login, title, body string) *ghIssue {
+	number := len(f.issues) + 1
+	issue := &ghIssue{
+		id: f.nextID("I"), number: number, title: title, body: body, author: login,
+		url:     fmt.Sprintf("https://github.com/%s/project/issues/%d", f.owner, number),
+		created: now().Time, updated: now().Time, edits: map[string][]userContentEdit{},
+	}
+	f.issues = append(f.issues, issue)
+	return issue
+}
+
+func (f *fakeGithub) addComment(login string, issue *ghIssue, body string) timelineItem {
+	id := f.nextID("IC")
+	u, _ := url.Parse(fmt.Sprintf("%s#issuecomment-%s", issue.url, id))
+	item := timelineItem{Typename: "IssueComment", IssueComment: issueComment{
+		authorEvent: authorEvent{Id: githubv4.ID(id), CreatedAt: now(), Author: actorOf(login)},
+		Body:        githubv4.String(body),
+		Url:         githubv4.URI{URL: u},
+	}}
+	issue.timeline = append(issue.timeline, item)
+	issue.updated = now().Time
+	return item
+}
+
+// edited returns the edit history of a text after an edit by login.
+func (f *fakeGithub) edited(history []userContentEdit, author string, created githubv4.DateTime, was, login, text string) []userContentEdit {
+	diff := func(s string) *githubv4.String { v := githubv4.String(s); return &v }
+	if len(history) == 0 {
+		history = append(history, userContentEdit{Id: githubv4.ID(f.nextID("UCE")), CreatedAt: created, Editor: actorOf(author), Diff: diff(was)})
+	}
+	return append(history, userContentEdit{Id: githubv4.ID(f.nextID("UCE")), CreatedAt: now(), Editor: actorOf(login), Diff: diff(text)})
+}
+
+func (f *fakeGithub) editBody(login string, issue *ghIssue, body string) {
+	issue.bodyEdits = f.edited(issue.bodyEdits, issue.author, githubv4.DateTime{Time: issue.created}, issue.body, login, body)
+	issue.body = body
+	issue.updated = now().Time
+}
+
+func (f *fakeGithub) editComment(login string, issue *ghIssue, item *timelineItem, body string) {
+	c := &item.IssueComment
+	id := fmt.Sprint(c.Id)
+	issue.edits[id] = f.edited(issue.edits[id], string(c.Author.Login), c.CreatedAt, string(c.Body), login, body)
+	c.Body = githubv4.String(body)
+	issue.updated = now().Time
+}
+
+func (f *fakeGithub) setState(login string, issue *ghIssue, closed bool) {
+	if issue.closed == closed {
+		return
+	}
+	issue.closed = closed
+	event := actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)}
+	item := timelineItem{Typename: "ReopenedEvent"}
+	item.ReopenedEvent.actorEvent = event
+	if closed {
+		item = timelineItem{Typename: "ClosedEvent"}
+		item.ClosedEvent.actorEvent = event
+	}
+	issue.timeline = append(issue.timeline, item)
+	issue.updated = now().Time
+}
+
+func (f *fakeGithub) setTitle(login string, issue *ghIssue, title string) {
+	if issue.title == title {
+		return
+	}
+	issue.timeline = append(issue.timeline, timelineItem{Typename: "RenamedTitleEvent", RenamedTitleEvent: renamedTitleEvent{
+		actorEvent:    actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)},
+		CurrentTitle:  githubv4.String(title),
+		PreviousTitle: githubv4.String(issue.title),
+	}})
+	issue.title = title
+	issue.updated = now().Time
+}
+
+func (f *fakeGithub) setLabels(login string, issue *ghIssue, labels []string) {
+	event := func() actorEvent {
+		return actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)}
+	}
+	for _, l := range labels {
+		if !slices.Contains(issue.labels, l) {
+			issue.timeline = append(issue.timeline, timelineItem{Typename: "LabeledEvent",
+				LabeledEvent: labeledEvent{actorEvent: event(), Label: label{Name: githubv4.String(l)}}})
+		}
+	}
+	for _, l := range issue.labels {
+		if !slices.Contains(labels, l) {
+			issue.timeline = append(issue.timeline, timelineItem{Typename: "UnlabeledEvent",
+				UnlabeledEvent: unlabeledEvent{actorEvent: event(), Label: label{Name: githubv4.String(l)}}})
+		}
+	}
+	issue.labels = slices.Sorted(slices.Values(labels))
+	issue.updated = now().Time
+}
+
+func newest(edits []userContentEdit) []userContentEdit {
+	res := slices.Clone(edits)
+	slices.Reverse(res)
+	return res
+}
+
+func (f *fakeGithub) node(gi *ghIssue) issueNode {
+	u, _ := url.Parse(gi.url)
+	n := issueNode{issue: issue{
+		authorEvent: authorEvent{Id: githubv4.ID(gi.id), CreatedAt: githubv4.DateTime{Time: gi.created}, Author: actorOf(gi.author)},
+		Title:       githubv4.String(gi.title),
+		Number:      githubv4.Int(gi.number),
+		Body:        githubv4.String(gi.body),
+		Url:         githubv4.URI{URL: u},
+	}}
+	n.UserContentEdits.Nodes = newest(gi.bodyEdits)
+	for _, item := range gi.timeline {
+		if item.Typename == "IssueComment" {
+			item.IssueComment.UserContentEdits.Nodes = newest(gi.edits[fmt.Sprint(item.IssueComment.Id)])
+		}
+		n.TimelineItems.Nodes = append(n.TimelineItems.Nodes, item)
+	}
+	return n
+}
+
+// fakeClient is a GitHub API client acting as one user.
+type fakeClient struct {
+	f     *fakeGithub
+	login string
+}
+
+func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]interface{}) error {
+	f := c.f
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	switch q := q.(type) {
+	case *loginQuery:
+		q.Viewer.Login = c.login
+	case *userQuery:
+		login := string(vars["login"].(githubv4.String))
+		a := actorOf(login)
+		q.User = user{Login: a.Login, Name: a.User.Name}
+	case *repositoryIDQuery:
+		q.Repository.ID = "R_1"
+	case *labelsQuery:
+		for id, name := range f.labels {
+			q.Repository.Labels.Nodes = append(q.Repository.Labels.Nodes, struct {
+				ID          string `graphql:"id"`
+				Name        string `graphql:"name"`
+				Color       string `graphql:"color"`
+				Description string `graphql:"description"`
+			}{ID: id, Name: name})
+		}
+	case *issueQuery:
+		since := vars["issueSince"].(githubv4.DateTime)
+		for _, issue := range f.issues {
+			if !issue.deleted && !issue.updated.Before(since.Time) {
+				q.Repository.Issues.Nodes = append(q.Repository.Issues.Nodes, f.node(issue))
+			}
+		}
+	default:
+		return fmt.Errorf("fake GitHub doesn't answer %T", q)
+	}
+	return nil
+}
+
+func (c fakeClient) Mutate(_ context.Context, m interface{}, input githubv4.Input, _ map[string]interface{}) error {
+	f := c.f
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes++
+
+	err := c.mutate(m, input)
+	if err == nil && f.failNext {
+		// done, but the answer is lost
+		f.failNext = false
+		return errors.New("connection lost")
+	}
+	return err
+}
+
+func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
+	f := c.f
+	switch m := m.(type) {
+	case *createIssueMutation:
+		in := input.(githubv4.CreateIssueInput)
+		issue := f.createIssue(c.login, string(in.Title), string(*in.Body))
+		m.CreateIssue.Issue.ID, m.CreateIssue.Issue.URL = issue.id, issue.url
+	case *addCommentToIssueMutation:
+		in := input.(githubv4.AddCommentInput)
+		issue, err := f.find(in.SubjectID)
+		if err != nil {
+			return err
+		}
+		item := f.addComment(c.login, issue, string(in.Body))
+		m.AddComment.CommentEdge.Node.ID = fmt.Sprint(item.IssueComment.Id)
+		m.AddComment.CommentEdge.Node.URL = item.IssueComment.Url.String()
+	case *updateIssueCommentMutation:
+		in := input.(githubv4.UpdateIssueCommentInput)
+		issue, item, err := f.findComment(in.ID)
+		if err != nil {
+			return err
+		}
+		f.editComment(c.login, issue, item, string(in.Body))
+	case *updateIssueMutation:
+		in := input.(githubv4.UpdateIssueInput)
+		issue, err := f.find(in.ID)
+		if err != nil {
+			return err
+		}
+		if in.Title != nil {
+			f.setTitle(c.login, issue, string(*in.Title))
+		}
+		if in.Body != nil {
+			f.editBody(c.login, issue, string(*in.Body))
+		}
+		if in.State != nil {
+			f.setState(c.login, issue, *in.State == githubv4.IssueStateClosed)
+		}
+		if in.LabelIDs != nil {
+			var names []string
+			for _, id := range *in.LabelIDs {
+				names = append(names, f.labels[fmt.Sprint(id)])
+			}
+			f.setLabels(c.login, issue, names)
+		}
+	default:
+		return fmt.Errorf("fake GitHub doesn't do %T", m)
+	}
+	return nil
+}
+
+// githubForge is the adapter on a fake GitHub, for the conformance suite.
+type githubForge struct {
+	*remote
+	fake *fakeGithub
+}
+
+func newGithubForge(t *testing.T, owner string) githubForge {
+	fake := newFakeGithub(owner)
+	r, err := newRemote(context.Background(), owner, "project", "bot", []*auth.Token{auth.NewToken(target, "token-bot")},
+		func(*auth.Token) Client { return fakeClient{f: fake, login: "bot"} })
+	require.NoError(t, err)
+	r.createLabel = func(_ context.Context, name, _ string) (string, error) {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		fake.writes++
+		id := fake.nextID("LA")
+		fake.labels[id] = name
+		return id, nil
+	}
+	return githubForge{remote: r, fake: fake}
+}
+
+func (g githubForge) UserAct(login string) synctest.Actor {
+	return githubActor{fake: g.fake, login: login}
+}
+
+func (g githubForge) Issue(number string) *core.Issue {
+	for issue, err := range g.Issues(context.Background(), time.Time{}) {
+		if err == nil && issue.Number == number {
+			return issue
+		}
+	}
+	return nil
+}
+
+func (g githubForge) Writes() int {
+	g.fake.mu.Lock()
+	defer g.fake.mu.Unlock()
+	return g.fake.writes
+}
+
+func (g githubForge) FailNextWrite() {
+	g.fake.mu.Lock()
+	defer g.fake.mu.Unlock()
+	g.fake.failNext = true
+}
+
+type githubActor struct {
+	fake  *fakeGithub
+	login string
+}
+
+func (a githubActor) do(fn func()) {
+	a.fake.mu.Lock()
+	defer a.fake.mu.Unlock()
+	fn()
+}
+
+func (a githubActor) issue(ref core.Ref) *ghIssue {
+	issue, err := a.fake.find(githubv4.ID(ref.ID))
+	if err != nil {
+		panic(err)
+	}
+	return issue
+}
+
+func (a githubActor) CreateIssue(title, body string) (ref core.Ref) {
+	a.do(func() {
+		issue := a.fake.createIssue(a.login, title, body)
+		ref = core.Ref{ID: issue.id, URL: issue.url, Number: fmt.Sprint(issue.number)}
+	})
+	return ref
+}
+
+func (a githubActor) Comment(issue core.Ref, body string) (ref core.Ref) {
+	a.do(func() {
+		item := a.fake.addComment(a.login, a.issue(issue), body)
+		ref = core.Ref{ID: fmt.Sprint(item.IssueComment.Id), URL: item.IssueComment.Url.String()}
+	})
+	return ref
+}
+
+func (a githubActor) EditText(issue, target core.Ref, body string) {
+	a.do(func() {
+		if target.ID == issue.ID {
+			a.fake.editBody(a.login, a.issue(issue), body)
+			return
+		}
+		i, item, err := a.fake.findComment(githubv4.ID(target.ID))
+		if err != nil {
+			panic(err)
+		}
+		a.fake.editComment(a.login, i, item, body)
+	})
+}
+
+func (a githubActor) SetStatus(issue core.Ref, status common.Status) {
+	a.do(func() { a.fake.setState(a.login, a.issue(issue), status == common.ClosedStatus) })
+}
+
+func (a githubActor) SetTitle(issue core.Ref, title string) {
+	a.do(func() { a.fake.setTitle(a.login, a.issue(issue), title) })
+}
+
+func (a githubActor) SetLabels(issue core.Ref, labels []string) {
+	a.do(func() { a.fake.setLabels(a.login, a.issue(issue), labels) })
+}
+
+func (a githubActor) Delete(issue core.Ref) {
+	a.do(func() { a.issue(issue).deleted = true })
+}
+
+func TestGithubConformance(t *testing.T) {
+	synctest.Run(t, synctest.Harness{
+		NewForge: func(t *testing.T, name string) synctest.Forge { return newGithubForge(t, "owner-"+name) },
+		LoginKey: metaKeyGithubLogin,
+	})
+}
+
+// A bug imported by the GitHub bridge before the sync engine is recognized,
+// with its comments, and nothing is imported twice.
+func TestGithubLegacyMetadata(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	comment := alice.Comment(ref, "a comment")
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+
+	// as the importer of the GitHub bridge left it
+	b, _, err := backend.Bugs().NewRaw(me, time.Now().Unix(), "title", "body", nil, map[string]string{
+		core.MetaKeyOrigin: target,
+		metaKeyGithubId:    ref.ID,
+		metaKeyGithubUrl:   ref.URL,
+	})
+	require.NoError(t, err)
+	_, _, err = b.AddCommentRaw(me, time.Now().Unix(), "a comment", nil, map[string]string{
+		metaKeyGithubId:  comment.ID,
+		metaKeyGithubUrl: comment.URL,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	ops := len(b.Snapshot().Operations)
+
+	e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{
+		Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin,
+	})
+	require.NoError(t, err)
+	for r := range e.Pull(context.Background(), time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+	}
+	for r := range e.Push(context.Background()) {
+		require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+	}
+
+	require.Len(t, backend.Bugs().AllIds(), 1)
+	got, err := backend.Bugs().Resolve(b.Id())
+	require.NoError(t, err)
+	require.Len(t, got.Snapshot().Comments, 2)
+	require.Len(t, got.Snapshot().Operations, ops, "nothing new")
+	require.Zero(t, g.Writes(), "nothing pushed")
+}

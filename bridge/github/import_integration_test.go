@@ -11,6 +11,8 @@ import (
 	m "github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/git-bug/git-bug/bridge/core"
+	"github.com/git-bug/git-bug/bridge/core/auth"
 	"github.com/git-bug/git-bug/bridge/github/mocks"
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/bug"
@@ -29,36 +31,38 @@ func TestGithubImporterIntegration(t *testing.T) {
 	// mock
 	clientMock := &mocks.Client{}
 	setupExpectations(t, clientMock)
-	importer := githubImporter{}
-	importer.client = &rateLimitHandlerClient{sc: clientMock}
 
 	// arrange
 	repo := repotest.NewGoGitRepo(t, false)
 	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
 	require.NoError(t, err)
-
 	defer backend.Close()
+
+	ctx := context.Background()
+	r, err := newRemote(ctx, "marcus", "to-himself", "marcus", []*auth.Token{auth.NewToken(target, "token")},
+		func(*auth.Token) Client { return clientMock })
+	require.NoError(t, err)
+	e, err := core.NewEngine(ctx, backend, r, core.SyncOptions{DefaultLogin: "marcus", LoginKey: metaKeyGithubLogin})
 	require.NoError(t, err)
 
 	// act
-	events, err := importer.ImportAll(context.Background(), backend, time.Time{})
+	for result := range e.Pull(ctx, time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, result.Event, result.String())
+	}
 
 	// assert
-	require.NoError(t, err)
-	for e := range events {
-		require.NoError(t, e.Err)
-	}
 	require.Len(t, backend.Bugs().AllIds(), 5)
 	require.Len(t, backend.Identities().AllIds(), 2)
 
-	b1, err := backend.Bugs().ResolveBugCreateMetadata(metaKeyGithubUrl, "https://github.com/marcus/to-himself/issues/1")
+	urlKey := "sync:github.com/marcus/to-himself:url"
+	b1, err := backend.Bugs().ResolveBugCreateMetadata(urlKey, "https://github.com/marcus/to-himself/issues/1")
 	require.NoError(t, err)
 	ops1 := b1.Snapshot().Operations
 	require.Equal(t, "marcus", ops1[0].Author().Name())
 	require.Equal(t, "title 1", ops1[0].(*bug.CreateOperation).Title)
 	require.Equal(t, "body text 1", ops1[0].(*bug.CreateOperation).Message)
 
-	b3, err := backend.Bugs().ResolveBugCreateMetadata(metaKeyGithubUrl, "https://github.com/marcus/to-himself/issues/3")
+	b3, err := backend.Bugs().ResolveBugCreateMetadata(urlKey, "https://github.com/marcus/to-himself/issues/3")
 	require.NoError(t, err)
 	ops3 := b3.Snapshot().Operations
 	require.Equal(t, "issue 3 comment 1", ops3[1].(*bug.AddCommentOperation).Message)
@@ -66,11 +70,10 @@ func TestGithubImporterIntegration(t *testing.T) {
 	require.Equal(t, []common.Label{"bug"}, ops3[3].(*bug.LabelChangeOperation).Added)
 	require.Equal(t, "title 3, edit 1", ops3[4].(*bug.SetTitleOperation).Title)
 
-	b4, err := backend.Bugs().ResolveBugCreateMetadata(metaKeyGithubUrl, "https://github.com/marcus/to-himself/issues/4")
+	b4, err := backend.Bugs().ResolveBugCreateMetadata(urlKey, "https://github.com/marcus/to-himself/issues/4")
 	require.NoError(t, err)
 	ops4 := b4.Snapshot().Operations
 	require.Equal(t, "edited", ops4[1].(*bug.EditCommentOperation).Message)
-
 }
 
 func setupExpectations(t *testing.T, mock *mocks.Client) {
@@ -102,6 +105,7 @@ func expectIssueQuery1(mock *mocks.Client) {
 							Id: 1,
 							Author: &actor{
 								Typename: "User",
+								Login:    "marcus",
 								User: userActor{
 									Name:  &userName,
 									Email: userEmail,
@@ -128,6 +132,7 @@ func expectIssueQuery1(mock *mocks.Client) {
 							Id: 2,
 							Author: &actor{
 								Typename: "User",
+								Login:    "marcus",
 								User: userActor{
 									Name:  &userName,
 									Email: userEmail,
@@ -168,6 +173,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 							Id: 3,
 							Author: &actor{
 								Typename: "User",
+								Login:    "marcus",
 								User: userActor{
 									Name:  &userName,
 									Email: userEmail,
@@ -195,6 +201,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 										Id: 301,
 										Author: &actor{
 											Typename: "User",
+											Login:    "marcus",
 											User: userActor{
 												Name:  &userName,
 												Email: userEmail,
@@ -219,6 +226,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 										Id: 302,
 										Author: &actor{
 											Typename: "User",
+											Login:    "marcus",
 											User: userActor{
 												Name:  &userName,
 												Email: userEmail,
@@ -243,6 +251,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 										Id: 303,
 										Actor: &actor{
 											Typename: "User",
+											Login:    "marcus",
 											User: userActor{
 												Name:  &userName,
 												Email: userEmail,
@@ -261,6 +270,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 										Id: 304,
 										Actor: &actor{
 											Typename: "User",
+											Login:    "marcus",
 											User: userActor{
 												Name:  &userName,
 												Email: userEmail,
@@ -280,6 +290,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 							Id: 4,
 							Author: &actor{
 								Typename: "User",
+								Login:    "marcus",
 								User: userActor{
 									Name:  &userName,
 									Email: userEmail,
@@ -304,6 +315,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 								Id: 402,
 								Editor: &actor{
 									Typename: "User",
+									Login:    "marcus",
 									User: userActor{
 										Name:  &userName,
 										Email: userEmail,
@@ -315,6 +327,7 @@ func expectIssueQuery2(mock *mocks.Client) {
 								Id: 401,
 								Editor: &actor{
 									Typename: "User",
+									Login:    "marcus",
 									User: userActor{
 										Name:  &userName,
 										Email: userEmail,
@@ -370,15 +383,18 @@ func expectIssueQuery3(mock *mocks.Client) {
 }
 
 func expectUserQuery(t *testing.T, mock *mocks.Client) {
+	mock.On("Query", m.Anything, m.AnythingOfType("*github.loginQuery"), m.Anything).Return(nil).Run(
+		func(args m.Arguments) {
+			args.Get(1).(*loginQuery).Viewer.Login = "marcus"
+		},
+	).Once()
 	mock.On("Query", m.Anything, m.AnythingOfType("*github.userQuery"), m.AnythingOfType("map[string]interface {}")).Return(nil).Run(
 		func(args m.Arguments) {
 			vars := args.Get(2).(map[string]interface{})
-			ghost := githubv4.String("ghost")
-			require.Equal(t, ghost, vars["login"])
-
+			require.Equal(t, githubv4.String("marcus"), vars["login"])
 			retVal := args.Get(1).(*userQuery)
-			retVal.User.Name = &ghost
-			retVal.User.Login = "ghost-login"
+			retVal.User.Name = &userName
+			retVal.User.Login = "marcus"
 		},
 	).Once()
 }
