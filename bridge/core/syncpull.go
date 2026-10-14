@@ -44,6 +44,10 @@ func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportR
 	if err != nil {
 		return err
 	}
+	if e.opts.DryRun {
+		e.planPull(b, issue, out)
+		return nil
+	}
 	if b == nil {
 		if b, err = e.newBug(issue); err != nil {
 			return err
@@ -117,8 +121,35 @@ func (e *Engine) findBug(issue *Issue) (*cache.BugCache, error) {
 	if _, onRemote := remoteIssueID(b.Snapshot(), e.remote); onRemote {
 		return nil, nil
 	}
+	if e.opts.DryRun {
+		return b, nil
+	}
 	_, err = b.SetMetadata(b.Snapshot().Operations[0].Id(), e.issueTags(issue))
 	return b, err
+}
+
+// planPull reports what pulling an issue would do, without doing it.
+func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResult) {
+	if b == nil {
+		out <- NewImportNothing("", "would import issue "+issue.URL)
+		return
+	}
+	snap := b.Snapshot()
+	n := 0
+	for _, c := range issue.Comments {
+		if e.findOp(snap, c.ID) == nil {
+			n++
+		}
+	}
+	for _, ev := range issue.Events {
+		if e.findOp(snap, ev.ID) == nil {
+			n++
+		}
+	}
+	if n > 0 {
+		// some may be echoes of pushes, claimed instead of pulled
+		out <- NewImportNothing(b.Id(), fmt.Sprintf("would pull up to %d changes from %s", n, issue.URL))
+	}
 }
 
 // issueTags are the metadata of a create operation for its forge issue, as

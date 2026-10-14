@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/git-bug/git-bug/cache"
@@ -76,6 +77,11 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 		}
 	}
 
+	if e.opts.DryRun {
+		e.planPush(b, snap, onRemote, out)
+		return nil
+	}
+
 	var issue Ref
 	if onRemote {
 		issue = Ref{ID: issueID, URL: metadata(createOp, e.key("url")), Number: metadata(createOp, e.key("number"))}
@@ -104,6 +110,69 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 		return nil
 	}
 	return b.Commit()
+}
+
+// planPush reports what pushing a bug would do, without doing it.
+func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, onRemote bool, out chan<- ExportResult) {
+	if !onRemote {
+		if _, _, ok := e.accountFor(snap.Operations[0].Author()); !ok {
+			out <- NewExportNothing(b.Id(), "missing author token")
+			return
+		}
+		comments := 0
+		for _, c := range snap.Comments[1:] {
+			if _, _, ok := e.accountFor(c.Author); ok {
+				comments++
+			}
+		}
+		out <- NewExportNothing(b.Id(), fmt.Sprintf("would create issue: %s, with %d comments", snap.Title, comments))
+		return
+	}
+
+	var changes []string
+	comments, edits := 0, 0
+	for _, op := range snap.Operations {
+		switch op.(type) {
+		case *bug.CreateOperation, *bug.AddCommentOperation:
+		default:
+			continue
+		}
+		if _, gone := op.GetMetadata(e.key("gone")); gone {
+			continue
+		}
+		if _, onRemote := opOnRemote(op, snap, e.remote); !onRemote {
+			if _, _, ok := e.accountFor(op.Author()); ok {
+				comments++
+			}
+			continue
+		}
+		sl := s(slotText, op.Id())
+		_, baseOp, ok := base(snap, e.remote, sl)
+		latest := lastSlotOp(snap, sl)
+		if _, refused := latest.GetMetadata(e.key("refused")); !refused && (!ok || latest.Id() != baseOp.Id()) {
+			edits++
+		}
+	}
+	if comments > 0 {
+		changes = append(changes, fmt.Sprintf("%d comments", comments))
+	}
+	if edits > 0 {
+		changes = append(changes, fmt.Sprintf("%d edits", edits))
+	}
+	for kind, local := range map[slotKind]string{
+		slotTitle:  snap.Title,
+		slotStatus: snap.Status.String(),
+		slotLabels: labelsValue(labelStrings(snap.Labels)),
+	} {
+		baseValue, _, ok := base(snap, e.remote, s(kind, ""))
+		if !ok || baseValue != local {
+			changes = append(changes, string(kind))
+		}
+	}
+	if len(changes) > 0 {
+		slices.Sort(changes)
+		out <- NewExportNothing(b.Id(), "would send: "+strings.Join(changes, ", "))
+	}
 }
 
 // createIssue creates the forge issue of a bug, from its current title and

@@ -43,12 +43,12 @@ type Engine struct {
 
 func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOptions) (*Engine, error) {
 	registerRemote(r)
-	accounts, err := loadAccounts(ctx, repo, r, opts.LoginKey)
+	list, err := r.Accounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{repo: repo, remote: r, opts: opts, accounts: accounts}
-	for _, a := range accounts {
+	e := &Engine{repo: repo, remote: r, opts: opts}
+	for _, a := range list {
 		if a.Login == opts.DefaultLogin {
 			e.defaultAccount = &a
 			break
@@ -57,7 +57,9 @@ func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOp
 	if opts.Foreign && e.defaultAccount == nil {
 		return nil, fmt.Errorf("sync needs a token for the default login %q", opts.DefaultLogin)
 	}
-	return e, nil
+	// a dry run creates no identity
+	e.accounts, err = mapAccounts(repo, r, list, opts.LoginKey, !opts.DryRun)
+	return e, err
 }
 
 func (e *Engine) key(name string) string {

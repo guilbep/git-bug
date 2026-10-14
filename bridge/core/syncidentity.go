@@ -11,7 +11,7 @@ import (
 // identityFor returns the identity of a forge user, created if there's none.
 // See identitiesFor.
 func identityFor(repo *cache.RepoCache, r Remote, u User, loginKey string) (*cache.IdentityCache, error) {
-	ids, err := identitiesFor(repo, r, u, loginKey)
+	ids, err := identitiesFor(repo, r, u, loginKey, true)
 	if err != nil {
 		return nil, err
 	}
@@ -21,8 +21,8 @@ func identityFor(repo *cache.RepoCache, r Remote, u User, loginKey string) (*cac
 // identitiesFor returns the identities of a forge user, found by their user id
 // on the server, then by the bridge's legacy key, then, if loginKey is set, by
 // the login tag `bridge new` writes on token owners. Found identities get
-// tagged with the user id. With none, one is created.
-func identitiesFor(repo *cache.RepoCache, r Remote, u User, loginKey string) ([]entity.Id, error) {
+// tagged with the user id. With none, one is created if create is set.
+func identitiesFor(repo *cache.RepoCache, r Remote, u User, loginKey string, create bool) ([]entity.Id, error) {
 	key := userKey(r.Instance())
 	ids, err := resolveAll(repo, key, u.ID)
 	if err != nil || len(ids) > 0 {
@@ -48,6 +48,9 @@ func identitiesFor(repo *cache.RepoCache, r Remote, u User, loginKey string) ([]
 		if len(ids) == 0 {
 			continue
 		}
+		if !create {
+			return ids, nil
+		}
 		for _, id := range ids {
 			i, err := repo.Identities().Resolve(id)
 			if err != nil {
@@ -61,6 +64,9 @@ func identitiesFor(repo *cache.RepoCache, r Remote, u User, loginKey string) ([]
 		return ids, nil
 	}
 
+	if !create {
+		return nil, nil
+	}
 	name := u.Name
 	if name == "" {
 		name = u.Login
@@ -98,9 +104,13 @@ func loadAccounts(ctx context.Context, repo *cache.RepoCache, r Remote, loginKey
 	if err != nil {
 		return nil, err
 	}
+	return mapAccounts(repo, r, accounts, loginKey, true)
+}
+
+func mapAccounts(repo *cache.RepoCache, r Remote, accounts []Account, loginKey string, create bool) (map[entity.Id]Account, error) {
 	res := make(map[entity.Id]Account)
 	for _, a := range accounts {
-		ids, err := identitiesFor(repo, r, a.User, loginKey)
+		ids, err := identitiesFor(repo, r, a.User, loginKey, create)
 		if err != nil {
 			return nil, err
 		}
