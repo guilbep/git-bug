@@ -2,6 +2,8 @@ package core_test
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -826,4 +828,38 @@ func TestPullIgnoresStrangersMarkers(t *testing.T) {
 	require.NoError(t, err)
 	_, onForge := got.Snapshot().GetCreateMetadata("sync:" + key + ":id")
 	require.False(t, onForge)
+}
+
+// Tools built on the old bridges, such as git-board, find a bug's forge issue
+// through "<kind>-url" on its create operation.
+func TestIssueURLForOtherTools(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	pulled := f.UserAct("alice").CreateIssue("pulled", "body")
+
+	attached, _, err := repo.Bugs().New("attached", "body")
+	require.NoError(t, err)
+	marked, err := f.CreateIssue(context.Background(), bot, "attached", core.Render("body", attached.Id(), nil, nil, nil))
+	require.NoError(t, err)
+	pull(t, repo, f)
+
+	pushed, _, err := repo.Bugs().New("pushed", "body")
+	require.NoError(t, err)
+	push(t, repo, f, true)
+
+	urls := map[entity.Id]string{}
+	for _, id := range repo.Bugs().AllIds() {
+		b, err := repo.Bugs().Resolve(id)
+		require.NoError(t, err)
+		url, ok := b.Snapshot().GetCreateMetadata("sync:" + key + ":url")
+		require.True(t, ok)
+		excerpt, err := repo.Bugs().ResolveExcerpt(id)
+		require.NoError(t, err)
+		require.Equal(t, url, excerpt.CreateMetadata["fake-url"], b.Snapshot().Title)
+		urls[id] = url
+	}
+	require.Len(t, urls, 3)
+	require.Equal(t, marked.URL, urls[attached.Id()])
+	require.NotEmpty(t, urls[pushed.Id()])
+	require.Contains(t, slices.Collect(maps.Values(urls)), pulled.URL)
 }

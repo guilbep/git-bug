@@ -203,6 +203,7 @@ func (e *Engine) createIssue(ctx context.Context, b *cache.BugCache, snap *bug.S
 			e.key("id"):     issue.ID,
 			e.key("number"): issue.Number,
 			e.key("url"):    issue.URL,
+			e.urlKey():      issue.URL,
 			e.key("as"):     as.Login,
 			e.key("status"): common.OpenStatus.String(),
 			e.key("labels"): "",

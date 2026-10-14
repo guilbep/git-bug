@@ -200,11 +200,19 @@ func (e *Engine) issueTags(issue *Issue) map[string]string {
 		e.key("id"):     issue.ID,
 		e.key("number"): issue.Number,
 		e.key("url"):    issue.URL,
+		e.urlKey():      issue.URL,
 		e.key("title"):  cleanTitle(issue.OriginalTitle),
 		e.key("status"): common.OpenStatus.String(),
 		e.key("labels"): "",
 		e.key("text"):   Fingerprint(issue.OriginalBody),
 	}
+}
+
+// urlKey is where the old bridges kept an issue's URL, which tools built on
+// them read. An operation keeps a key's first value, so with two remotes of
+// one kind it's the first one's.
+func (e *Engine) urlKey() string {
+	return e.remote.Kind() + "-url"
 }
 
 func (e *Engine) newBug(issue *Issue) (*cache.BugCache, error) {
