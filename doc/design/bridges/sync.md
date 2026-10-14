@@ -1,7 +1,8 @@
 # Bridge sync
 
 Status: **implemented** for GitHub, GitLab and Gitea on branch `bridge-sync`. The
-working checklist is in [sync-todo.md](sync-todo.md).
+working checklist is in [sync-todo.md](sync-todo.md), and the decisions
+taken while building it in [sync-decisions.md](sync-decisions.md).
 
 ## Goal
 
