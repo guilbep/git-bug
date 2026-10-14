@@ -168,12 +168,7 @@ func (g *Gitlab) ValidateConfig(conf core.Configuration) error {
 }
 
 func promptTokenOptions(repo repository.RepoKeyring, login, baseUrl string) (auth.Credential, error) {
-	creds, err := auth.List(repo,
-		auth.WithTarget(target),
-		auth.WithKind(auth.KindToken),
-		auth.WithMeta(auth.MetaKeyLogin, login),
-		auth.WithMeta(auth.MetaKeyBaseURL, baseUrl),
-	)
+	creds, err := instanceTokens(repo, baseUrl, auth.WithMeta(auth.MetaKeyLogin, login))
 	if err != nil {
 		return nil, err
 	}

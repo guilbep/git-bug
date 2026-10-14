@@ -25,11 +25,7 @@ var _ core.RemoteBridge = &Gitlab{}
 // NewRemote returns the GitLab project of the bridge, for the sync engine,
 // acting with every GitLab token of the instance.
 func (g *Gitlab) NewRemote(ctx context.Context, repo *cache.RepoCache, conf core.Configuration) (core.Remote, error) {
-	creds, err := auth.List(repo,
-		auth.WithTarget(target),
-		auth.WithKind(auth.KindToken),
-		auth.WithMeta(auth.MetaKeyBaseURL, conf[confKeyGitlabBaseUrl]),
-	)
+	creds, err := instanceTokens(repo, conf[confKeyGitlabBaseUrl])
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +358,7 @@ func (r *remote) Legacy(meta, createMeta map[string]string) (string, bool) {
 		return "", false
 	}
 	// older versions exported with an empty base-url
-	if baseURL := createMeta[metaKeyGitlabBaseUrl]; baseURL != "" && baseURL != r.baseURL {
+	if baseURL := createMeta[metaKeyGitlabBaseUrl]; baseURL != "" && !sameBaseURL(baseURL, r.baseURL) {
 		return "", false
 	}
 	return id, true

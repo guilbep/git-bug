@@ -619,3 +619,30 @@ func TestGitlabNotFoundByOutsiderIsNotGone(t *testing.T) {
 	sync()
 	require.Equal(t, "by the bot", g.Issue(ref.Number).Title)
 }
+
+// A base URL is written with or without its trailing slash, by hand or by
+// older versions: tokens and old bugs are found either way.
+func TestGitlabBaseURLTrailingSlash(t *testing.T) {
+	g := newGitlabForge(t)
+	require.True(t, strings.HasSuffix(g.baseURL, "/"))
+	bare := strings.TrimSuffix(g.baseURL, "/")
+
+	id, ok := g.Legacy(map[string]string{metaKeyGitlabId: "7"},
+		map[string]string{metaKeyGitlabProject: "1", metaKeyGitlabBaseUrl: bare})
+	require.True(t, ok)
+	require.Equal(t, "7", id)
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	token := auth.NewToken(target, "token-bot")
+	token.SetMetadata(auth.MetaKeyBaseURL, bare)
+	token.SetMetadata(auth.MetaKeyLogin, "bot")
+	require.NoError(t, auth.Store(repo, token))
+
+	_, err = (&Gitlab{}).NewRemote(context.Background(), backend, core.Configuration{
+		confKeyGitlabBaseUrl: g.baseURL, confKeyProjectID: "1", confKeyDefaultLogin: "bot",
+	})
+	require.NoError(t, err)
+}
