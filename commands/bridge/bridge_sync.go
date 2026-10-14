@@ -1,0 +1,128 @@
+package bridgecmd
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/spf13/cobra"
+
+	"github.com/git-bug/git-bug/bridge/core"
+	"github.com/git-bug/git-bug/commands/completion"
+	"github.com/git-bug/git-bug/commands/execenv"
+	"github.com/git-bug/git-bug/util/interrupt"
+)
+
+type bridgeSyncOptions struct {
+	dryRun bool
+}
+
+func newBridgeSyncCommand(env *execenv.Env) *cobra.Command {
+	options := bridgeSyncOptions{}
+
+	cmd := &cobra.Command{
+		Use:   "sync [NAME]...",
+		Short: "Sync issues two-way with every bridge that has sync enabled",
+		Long: `Sync issues two-way with every bridge that has sync enabled, or the given ones.
+
+Every bridge is pulled first, then git-bug pushes to each of them, so that an
+issue, comment or change made on one forge reaches all the others in one run.
+
+A bridge takes part when sync is enabled for it:
+
+    git config git-bug.bridge.<name>.sync true
+
+With sync, everything is pushed, whichever forge it comes from. What was
+written by someone without a token on a forge is posted there with the
+bridge's default-login token, under a header naming its author.
+
+Run it from a single place, for example a CI job:
+
+    git bug pull && git bug bridge sync && git bug push
+
+The first sync of a repository mirrors every issue. Use --dry-run to see what
+it would do first.`,
+		PreRunE: execenv.LoadBackend(env, execenv.EnsureUser()),
+		RunE: execenv.CloseBackend(env, func(cmd *cobra.Command, args []string) error {
+			return runBridgeSync(env, options, args)
+		}),
+		ValidArgsFunction: completion.Bridge(env),
+	}
+
+	flags := cmd.Flags()
+	flags.SortFlags = false
+	flags.BoolVar(&options.dryRun, "dry-run", false, "Report what would be pulled and pushed, and change nothing")
+
+	return cmd
+}
+
+func runBridgeSync(env *execenv.Env, opts bridgeSyncOptions, args []string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{}, 1)
+	defer close(done)
+	var mu sync.Mutex
+	interruptCount := 0
+	interrupt.RegisterCleaner(func() error {
+		mu.Lock()
+		if interruptCount > 0 {
+			env.Err.Println("Received another interrupt before graceful stop, terminating...")
+			os.Exit(0)
+		}
+		interruptCount++
+		mu.Unlock()
+
+		env.Err.Println("Received interrupt signal, stopping the sync...\n(Hit ctrl-c again to kill the process.)")
+		cancel()
+		<-done
+		return nil
+	})
+
+	results, err := core.SyncAll(ctx, env.Backend, args, opts.dryRun)
+	if err != nil {
+		return err
+	}
+
+	pulled, pushed, errs := 0, 0, 0
+	for r := range results {
+		switch {
+		case r.IsError():
+			errs++
+		case r.Import != nil && r.Import.Event == core.ImportEventBug:
+			pulled++
+		case r.Export != nil && r.Export.Event == core.ExportEventBug:
+			pushed++
+		}
+		if show(r, opts.dryRun) {
+			env.Out.Println(r.String())
+		}
+	}
+
+	if opts.dryRun {
+		return nil
+	}
+	env.Out.Printf("pulled %d issues, pushed %d issues\n", pulled, pushed)
+	if errs > 0 {
+		return fmt.Errorf("sync finished with %d error(s)", errs)
+	}
+	return nil
+}
+
+// show tells whether to print a result: what happened, or in a dry run what
+// would happen.
+func show(r core.SyncResult, dryRun bool) bool {
+	var nothing bool
+	var reason string
+	if r.Import != nil {
+		nothing, reason = r.Import.Event == core.ImportEventNothing, r.Import.Reason
+	} else {
+		nothing, reason = r.Export.Event == core.ExportEventNothing, r.Export.Reason
+	}
+	if !nothing {
+		return true
+	}
+	return dryRun && strings.HasPrefix(reason, "would ")
+}

@@ -23,6 +23,7 @@ func NewBridgeCommand(env *execenv.Env) *cobra.Command {
 	cmd.AddCommand(newBridgePullCommand(env))
 	cmd.AddCommand(newBridgePushCommand(env))
 	cmd.AddCommand(newBridgeRm(env))
+	cmd.AddCommand(newBridgeSyncCommand(env))
 
 	return cmd
 }
