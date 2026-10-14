@@ -82,16 +82,37 @@ GitLab issues #2-#6 deleted; the wiki's own git-bug data pulled (6 bugs,
 - [x] Same person on two forges: `login-<identity>` links in the bridge
       configuration.
 
+## EPFL-ENAC/co2-calculator dry runs, 2026-10-14 evening
+
+The 228 bugs of the local clone (old GitHub bridge, git-board labels) in a
+scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
+
+- [x] First dry run: GitHub refused the first page ("Resource limits for this
+      query exceeded"); the run still pushed, and exited 0. Now the page
+      halves, a forge whose pull failed isn't pushed to, and a dry run with
+      errors fails.
+- [x] The clone's old bridge recorded a last import after 228 issues: sync
+      would have skipped the rest. Sync keeps its own `lastSyncTime`.
+- [x] GitHub's secondary rate limit on writes now reaches the engine, which
+      waits a minute and retries.
+- [x] Second dry run: 203 s, 125 GraphQL points, no error. Would import 836
+      issues, set git-board labels on 182 GitHub issues, and create about
+      1,064 issues on GitLab (the 228, then the 836).
+- [ ] The real first sync, by the user. Creating about 1,064 GitLab issues
+      may notify members watching the project.
+
 ## Next
 
-- [ ] A scheduled CI job as the one runner (`git bug pull && git bug bridge
-      sync && git bug push`), with tokens from secrets.
-- [ ] Binaries of the fork for teammates (a tag on the fork runs
-      release.yml), as `go install` can't fetch a fork of this module.
-- [ ] git-board on the fork: a `replace` for the library; its labels
-      (`status:`, `prio:`, `sprint:`) are pushed to every synced forge.
-- [ ] GitHub end-to-end tests: need a token with `delete_repo`.
-- [ ] Upstream: discuss on #1476 before a PR, given #1223.
+- [x] git-board on the fork: branch `git-bug-fork` of guilbep/git-board,
+      tests green, reads the co2 data. Its labels (`status:`, `prio:`,
+      `sprint:`) are pushed to every synced forge.
+- [x] Installing the fork: INSTALLATION.md, "The bridge-sync fork".
+- [ ] Friendlier setup and help: a sync setup takes 9 commands, and the
+      `-h` and man pages don't explain the flow. Ideas: `bridge new
+      --sync`, reuse a stored token for the same login, a quick start page.
+- [ ] Later: binaries of the fork (a tag runs release.yml); a scheduled CI
+      runner; GitHub end-to-end tests (token with `delete_repo`); upstream
+      (discuss on #1476 first, given #1223).
 
 ## Design (sync.md), approved section by section
 
