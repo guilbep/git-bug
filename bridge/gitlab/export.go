@@ -157,11 +157,20 @@ func (ge *gitlabExporter) getAuthorClient(author identity.Interface) (*gitlab.Cl
 	return client, err
 }
 
-// withAttribution prefixes text with an attribution to the author of textOp
-// (the create or add-comment operation that holds it) when that author has no
-// token, so the text is posted by the default-login client on their behalf.
-func (ge *gitlabExporter) withAttribution(textOp dag.Operation, origin, text string) string {
-	if _, ok := ge.identityClient[textOp.Author().Id()]; ok || !ge.exportForeign {
+// render returns text as posted to gitlab. With export-foreign, mentions are
+// defused, and the text is prefixed with an attribution to the author of
+// textOp (the create or add-comment operation that holds it) when that author
+// has no token, as it's posted by the default-login client on their behalf.
+func (ge *gitlabExporter) render(textOp dag.Operation, origin, text string) string {
+	if !ge.exportForeign {
+		return text
+	}
+	// ponytail: defuses any text of a bug from another forge, including text
+	// written in git-bug. The sync engine only defuses what was written on a forge.
+	if origin != "" && origin != target {
+		text = core.DefuseMentions(text)
+	}
+	if _, ok := ge.identityClient[textOp.Author().Id()]; ok {
 		return text
 	}
 
@@ -181,15 +190,13 @@ func (ge *gitlabExporter) withAttribution(textOp dag.Operation, origin, text str
 // GitLab doesn't render it.
 const attributionMarker = "<!-- git-bug attribution -->"
 
-// stripAttribution removes the header added by withAttribution, after the
-// text went through text.Cleanup.
-func stripAttribution(text string) string {
-	if !strings.HasPrefix(text, attributionMarker) {
-		return text
+// unrender reverts render, after the text went through text.Cleanup.
+func unrender(text string) string {
+	if strings.HasPrefix(text, attributionMarker) {
+		// no separator when the body is empty, as text.Cleanup trims it
+		_, text, _ = strings.Cut(text, "\n\n")
 	}
-	// no separator when the body is empty, as text.Cleanup trims it
-	_, body, _ := strings.Cut(text, "\n\n")
-	return body
+	return core.RestoreMentions(text)
 }
 
 // ExportAll export all event made by the current user to Gitlab
@@ -302,7 +309,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 		}
 
 		// create bug
-		body := ge.withAttribution(createOp, origin, createOp.Message)
+		body := ge.render(createOp, origin, createOp.Message)
 		_, id, url, err := createGitlabIssue(ctx, client, ge.repositoryID, createOp.Title, body)
 		if err != nil {
 			err := fmt.Errorf("exporting gitlab issue: %w", err)
@@ -370,7 +377,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 		case *bug.AddCommentOperation:
 
 			// send operation to gitlab
-			body := ge.withAttribution(op, origin, op.Message)
+			body := ge.render(op, origin, op.Message)
 			id, err = addCommentGitlabIssue(ctx, client, ge.repositoryID, bugGitlabID, body)
 			if err != nil {
 				err := fmt.Errorf("adding comment: %w", err)
@@ -394,7 +401,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 					textOp = o
 				}
 			}
-			body := ge.withAttribution(textOp, origin, op.Message)
+			body := ge.render(textOp, origin, op.Message)
 
 			// Since gitlab doesn't consider the issue body as a comment
 			if targetId == bugCreationId {

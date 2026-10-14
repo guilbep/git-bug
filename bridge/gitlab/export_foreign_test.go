@@ -178,7 +178,7 @@ func TestGitlabExportForeign(t *testing.T) {
 		"github-url": "https://github.com/o/r/issues/1#issuecomment-1",
 	})
 	require.NoError(t, err)
-	_, err = b.EditCommentRaw(alice, created, aliceComment, "alice comment edited", nil)
+	_, err = b.EditCommentRaw(alice, created, aliceComment, "alice comment edited, cc @bob", nil)
 	require.NoError(t, err)
 	_, _, err = b.AddCommentRaw(owner, created, "owner comment", nil, nil)
 	require.NoError(t, err)
@@ -226,12 +226,13 @@ func TestGitlabExportForeign(t *testing.T) {
 		require.Len(t, srv.issues, 1)
 		desc := srv.issues[0].Description
 		require.Contains(t, desc, "*Originally posted by Alice on 2026-01-02, [view on github](https://github.com/o/r/issues/1)*")
-		require.Equal(t, "from github", stripAttribution(text.Cleanup(desc)))
+		require.Equal(t, "from github", unrender(text.Cleanup(desc)))
 
 		notes := srv.notes[1]
 		require.Len(t, notes, 2)
 		require.Contains(t, notes[0].Body, "(https://github.com/o/r/issues/1#issuecomment-1)")
-		require.Equal(t, "alice comment edited", stripAttribution(text.Cleanup(notes[0].Body)))
+		require.Contains(t, notes[0].Body, "cc `@bob`")
+		require.Equal(t, "alice comment edited, cc @bob", unrender(text.Cleanup(notes[0].Body)))
 		require.Equal(t, "owner comment", notes[1].Body)
 
 		baseUrl, _ := b.Snapshot().GetCreateMetadata(metaKeyGitlabBaseUrl)
@@ -296,13 +297,13 @@ func TestAttributionRoundTrip(t *testing.T) {
 
 	for _, body := range []string{"text", "", "first\n\nsecond", "<!-- git-bug attribution -->"} {
 		op := bug.NewAddCommentOp(alice, 0, body, nil)
-		posted := ge.withAttribution(op, "github", body)
+		posted := ge.render(op, "github", body)
 		require.NotEqual(t, body, posted)
 		// as returned by gitlab, possibly with windows new lines
-		require.Equal(t, body, stripAttribution(text.Cleanup(posted)))
-		require.Equal(t, body, stripAttribution(text.Cleanup(strings.ReplaceAll(posted, "\n", "\r\n"))))
+		require.Equal(t, body, unrender(text.Cleanup(posted)))
+		require.Equal(t, body, unrender(text.Cleanup(strings.ReplaceAll(posted, "\n", "\r\n"))))
 	}
 
 	// text without the header is left alone
-	require.Equal(t, "text", stripAttribution("text"))
+	require.Equal(t, "text", unrender("text"))
 }
