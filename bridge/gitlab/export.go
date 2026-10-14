@@ -73,24 +73,40 @@ func (ge *gitlabExporter) cacheAllClient(repo *cache.RepoCache, baseURL string) 
 			continue
 		}
 
-		user, err := repo.Identities().ResolveIdentityImmutableMetadata(metaKeyGitlabLogin, login)
+		ids, err := identitiesWithLogin(repo, login)
 		if entity.IsErrNotFound(err) {
 			continue
 		}
 		if err != nil {
-			return nil
+			return err
 		}
 
-		if _, ok := ge.identityClient[user.Id()]; !ok {
-			client, err := buildClient(ge.conf[confKeyGitlabBaseUrl], creds[0].(*auth.Token))
-			if err != nil {
-				return err
+		client, err := buildClient(ge.conf[confKeyGitlabBaseUrl], cred.(*auth.Token))
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, ok := ge.identityClient[id]; !ok {
+				ge.identityClient[id] = client
 			}
-			ge.identityClient[user.Id()] = client
 		}
 	}
 
 	return nil
+}
+
+// identitiesWithLogin returns the identities tagged with the given gitlab login.
+// The importer matches people on their gitlab id, so a pull creates a second
+// identity for a token owner only tagged with their login.
+func identitiesWithLogin(repo *cache.RepoCache, login string) ([]entity.Id, error) {
+	user, err := repo.Identities().ResolveIdentityImmutableMetadata(metaKeyGitlabLogin, login)
+	if multiple, ok := errors.AsType[*entity.ErrMultipleMatch](err); ok {
+		return multiple.Matching, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []entity.Id{user.Id()}, nil
 }
 
 // getIdentityClient return a gitlab v4 API client configured with the access token of the given identity.
@@ -156,7 +172,6 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 	var err error
 	var bugGitlabID int64
 	var bugGitlabIDString string
-	var GitlabBaseUrl string
 	var bugCreationId string
 
 	// Special case:
@@ -177,8 +192,9 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 	// get gitlab bug ID
 	gitlabID, ok := snapshot.GetCreateMetadata(metaKeyGitlabId)
 	if ok {
+		// older versions exported with an empty base-url
 		gitlabBaseUrl, ok := snapshot.GetCreateMetadata(metaKeyGitlabBaseUrl)
-		if ok && gitlabBaseUrl != ge.conf[confKeyGitlabBaseUrl] {
+		if ok && gitlabBaseUrl != "" && gitlabBaseUrl != ge.conf[confKeyGitlabBaseUrl] {
 			out <- core.NewExportNothing(b.Id(), "skipping issue imported from another Gitlab instance")
 			return
 		}
@@ -229,7 +245,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 				metaKeyGitlabId:      idString,
 				metaKeyGitlabUrl:     url,
 				metaKeyGitlabProject: ge.repositoryID,
-				metaKeyGitlabBaseUrl: GitlabBaseUrl,
+				metaKeyGitlabBaseUrl: ge.conf[confKeyGitlabBaseUrl],
 			},
 		)
 		if err != nil {

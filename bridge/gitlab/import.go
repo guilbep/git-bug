@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -113,11 +114,12 @@ func (gi *gitlabImporter) ensureIssue(repo *cache.RepoCache, issue *gitlab.Issue
 		return nil, err
 	}
 
-	// resolve bug
+	// resolve bug, whether imported from or exported to gitlab, so any origin
 	b, err := repo.Bugs().ResolveMatcher(func(excerpt *cache.BugExcerpt) bool {
-		return excerpt.CreateMetadata[core.MetaKeyOrigin] == target &&
-			excerpt.CreateMetadata[metaKeyGitlabId] == fmt.Sprintf("%d", issue.IID) &&
-			excerpt.CreateMetadata[metaKeyGitlabBaseUrl] == gi.conf[confKeyGitlabBaseUrl] &&
+		baseUrl := excerpt.CreateMetadata[metaKeyGitlabBaseUrl]
+		return excerpt.CreateMetadata[metaKeyGitlabId] == fmt.Sprintf("%d", issue.IID) &&
+			// older versions exported with an empty base-url
+			(baseUrl == gi.conf[confKeyGitlabBaseUrl] || baseUrl == "") &&
 			excerpt.CreateMetadata[metaKeyGitlabProject] == gi.conf[confKeyProjectID]
 	})
 	if err == nil {
@@ -155,6 +157,11 @@ func (gi *gitlabImporter) ensureIssue(repo *cache.RepoCache, issue *gitlab.Issue
 
 func (gi *gitlabImporter) ensureIssueEvent(repo *cache.RepoCache, b *cache.BugCache, issue *gitlab.Issue, event Event) error {
 	id, errResolve := b.ResolveOperationWithMetadata(metaKeyGitlabId, event.ID())
+	// the exporter tags comment editions with the id of the edited note, so the
+	// first match in operation order is the note's own operation
+	if multiple, ok := errors.AsType[*entity.ErrMultipleMatch](errResolve); ok {
+		id, errResolve = multiple.Matching[0], nil
+	}
 	if errResolve != nil && errResolve != cache.ErrNoMatchingOp {
 		return errResolve
 	}
