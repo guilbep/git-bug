@@ -14,6 +14,7 @@ from third-party platforms.
   - [Jira](#jira)
   - [Launchpad](#launchpad)
 - [Interacting with the bridge](#interacting-with-the-bridge)
+- [Syncing several platforms](#syncing-several-platforms)
 
 <!-- mdformat-toc end -->
 
@@ -161,6 +162,43 @@ To pull and integrate updates for issues from the bridge:
 ```bash
 git bug bridge pull [NAME]
 ```
+
+## Syncing several platforms<a name="syncing-several-platforms"></a>
+
+By default, a bridge only pushes what a token owner can post, and never issues
+that came from another platform. To keep several platforms in sync through
+`git-bug`, for example a GitHub repository and a GitLab project, enable `sync`
+on their bridges:
+
+```bash
+git config git-bug.bridge.<name>.sync true
+```
+
+Then, from a single place such as a CI job:
+
+```bash
+git bug pull
+git bug bridge sync --dry-run   # the first time: what would be mirrored
+git bug bridge sync
+git bug push
+```
+
+`git bug bridge sync` pulls every bridge with `sync` enabled, then pushes to
+each of them, so that an issue, comment, edit, status, title or label change
+made on one platform reaches the others in one run. Running it again changes
+nothing until something changes somewhere. GitHub and GitLab support `sync`.
+
+What was written by someone without a token on a platform is posted there with
+the bridge's `default-login` token, under a header naming the author and
+linking to where it was written. Use a dedicated account for that login, with
+the permissions listed above: everything it posts appears as its own. In text
+coming from another platform, `@mentions` are defused so that they don't notify
+whoever has the same name there, and issue references point to the mirrored
+issue, or to the original one when it isn't mirrored yet.
+
+When the same thing changed on two platforms between two syncs, the later
+change wins, and `bridge sync` reports it. Deleting an issue or a comment on a
+platform is never propagated: it just stops syncing there.
 
 > [!TIP]
 > See the [CLI documentation][doc/cli/bridge] for more information on the
