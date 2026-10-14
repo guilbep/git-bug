@@ -138,6 +138,10 @@ func mapProse(text string, f func(string) string) string {
 		for i := 0; i < len(parts); i += 2 {
 			parts[i] = f(parts[i])
 		}
+		// an unpaired backtick starts no code: what follows it is prose
+		if last := len(parts) - 1; last%2 == 1 {
+			parts[last] = f(parts[last])
+		}
 		return strings.Join(parts, "`")
 	})
 }

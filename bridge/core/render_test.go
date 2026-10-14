@@ -24,6 +24,8 @@ func TestDefuseMentions(t *testing.T) {
 		"```\n@nico in a block\n```\n@a": "```\n@nico in a block\n```\n`@a`",
 		"no mention here, nor @":         "no mention here, nor @",
 		"(@nicdub)":                      "(`@nicdub`)",
+		// review: an unpaired backtick doesn't start code
+		"don't use ` here, cc @bob": "don't use ` here, cc `@bob`",
 	} {
 		require.Equal(t, out, DefuseMentions(in), in)
 	}

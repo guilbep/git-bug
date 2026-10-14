@@ -802,3 +802,28 @@ func TestPullLegacyDuplicatePair(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Snapshot().Comments, 2, "the new comment went to the pulled copy")
 }
+
+// Review: only git-bug's accounts post markers. Anyone else's marker is just
+// text: a stranger can't attach their issue or comment to a bug, and then
+// edit it through the forge.
+func TestPullIgnoresStrangersMarkers(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	b, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	_, comment, err := b.AddComment("local comment")
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	mallory := f.UserAct("mallory")
+	issue := mallory.CreateIssue("local", core.Render("body", b.Id(), nil, nil, nil))
+	mallory.Comment(issue, core.Render("local comment", comment.Id(), nil, nil, nil))
+
+	pull(t, repo, f)
+
+	require.Len(t, repo.Bugs().AllIds(), 2, "imported as a bug of its own")
+	got, err := repo.Bugs().Resolve(b.Id())
+	require.NoError(t, err)
+	_, onForge := got.Snapshot().GetCreateMetadata("sync:" + key + ":id")
+	require.False(t, onForge)
+}

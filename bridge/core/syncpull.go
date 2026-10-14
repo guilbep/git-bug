@@ -122,9 +122,10 @@ func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCac
 		return b, false, err
 	}
 
-	// created by a push that died before recording it
+	// created by a push that died before recording it: only git-bug's
+	// accounts post markers, anyone else's is just text
 	id, ok := MarkerID(text.Cleanup(issue.OriginalBody))
-	if !ok {
+	if !ok || !e.isAccount(issue.Author) {
 		return nil, false, nil
 	}
 	b, err = e.repo.Bugs().Resolve(id)
@@ -140,7 +141,9 @@ func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCac
 	if e.opts.DryRun {
 		return b, false, nil
 	}
-	_, err = b.SetMetadata(b.Snapshot().Operations[0].Id(), e.issueTags(issue))
+	tags := e.issueTags(issue)
+	tags[e.key("as")] = issue.Author.Login
+	_, err = b.SetMetadata(b.Snapshot().Operations[0].Id(), tags)
 	return b, false, err
 }
 
@@ -227,8 +230,8 @@ func (e *Engine) pullComment(b *cache.BugCache, c *Comment, out chan<- ImportRes
 		e.key("text"): Fingerprint(c.Original),
 	}
 
-	// posted by a push that died before recording it
-	if id, ok := MarkerID(text.Cleanup(c.Original)); ok {
+	// posted by a push that died before recording it, as for issues
+	if id, ok := MarkerID(text.Cleanup(c.Original)); ok && e.isAccount(c.Author) {
 		if op := opByID(snap, id); op != nil {
 			if _, onRemote := opOnRemote(op, snap, e.remote); !onRemote {
 				tags[e.key("as")] = c.Author.Login
