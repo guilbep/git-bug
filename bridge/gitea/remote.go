@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -306,16 +307,18 @@ func (r *remote) AddComment(ctx context.Context, as core.Account, issue core.Ref
 	var c apiTimeline
 	err := r.write(ctx, as, http.MethodPost, r.repoPath("/issues/"+issue.Number+"/comments"), map[string]any{"body": body}, &c)
 	if err != nil {
-		return core.Ref{}, err
+		return core.Ref{}, r.confirm(ctx, err, issue.Number, "")
 	}
 	return core.Ref{ID: strconv.FormatInt(c.ID, 10), URL: c.HTMLURL}, nil
 }
 
 func (r *remote) EditText(ctx context.Context, as core.Account, issue, target core.Ref, body string) error {
 	if target.ID == issue.ID {
-		return r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/"+issue.Number), map[string]any{"body": body}, nil)
+		err := r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/"+issue.Number), map[string]any{"body": body}, nil)
+		return r.confirm(ctx, err, issue.Number, "")
 	}
-	return r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/comments/"+target.ID), map[string]any{"body": body}, nil)
+	err := r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/comments/"+target.ID), map[string]any{"body": body}, nil)
+	return r.confirm(ctx, err, issue.Number, target.ID)
 }
 
 func (r *remote) SetStatus(ctx context.Context, as core.Account, issue core.Ref, status common.Status) error {
@@ -323,11 +326,13 @@ func (r *remote) SetStatus(ctx context.Context, as core.Account, issue core.Ref,
 	if status == common.ClosedStatus {
 		state = "closed"
 	}
-	return r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/"+issue.Number), map[string]any{"state": state}, nil)
+	err := r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/"+issue.Number), map[string]any{"state": state}, nil)
+	return r.confirm(ctx, err, issue.Number, "")
 }
 
 func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, title string) error {
-	return r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/"+issue.Number), map[string]any{"title": title}, nil)
+	err := r.write(ctx, as, http.MethodPatch, r.repoPath("/issues/"+issue.Number), map[string]any{"title": title}, nil)
+	return r.confirm(ctx, err, issue.Number, "")
 }
 
 // SetLabels sets the labels by id, creating the missing ones: Gitea silently
@@ -341,7 +346,33 @@ func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref,
 		}
 		ids = append(ids, id)
 	}
-	return r.write(ctx, as, http.MethodPut, r.repoPath("/issues/"+issue.Number+"/labels"), map[string]any{"labels": ids}, nil)
+	err := r.write(ctx, as, http.MethodPut, r.repoPath("/issues/"+issue.Number+"/labels"), map[string]any{"labels": ids}, nil)
+	return r.confirm(ctx, err, issue.Number, "")
+}
+
+// confirm checks with the reader that an issue (and a comment, if any) a
+// write didn't find is gone: Gitea answers the same 404 to a token that
+// can't see the repository. The issue still there, the write was refused.
+func (r *remote) confirm(ctx context.Context, err error, number, commentID string) error {
+	if !errors.Is(err, core.ErrGone) {
+		return err
+	}
+	var ignored any
+	if rerr := r.do(ctx, r.reader, http.MethodGet, r.repoPath(""), nil, &ignored); rerr != nil {
+		return fmt.Errorf("checking the repository after %w: %w", err, rerr)
+	}
+	path := r.repoPath("/issues/" + number)
+	gerr := r.do(ctx, r.reader, http.MethodGet, path, nil, &ignored)
+	if gerr == nil && commentID != "" {
+		gerr = r.do(ctx, r.reader, http.MethodGet, r.repoPath("/issues/comments/"+commentID), nil, &ignored)
+	}
+	switch {
+	case errors.Is(gerr, core.ErrGone):
+		return err
+	case gerr != nil:
+		return gerr
+	}
+	return fmt.Errorf("%w: the token can't see it: %w", core.ErrRefused, err)
 }
 
 func (r *remote) labelID(ctx context.Context, as core.Account, name string) (int64, error) {

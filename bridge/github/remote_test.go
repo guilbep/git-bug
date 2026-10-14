@@ -28,6 +28,8 @@ import (
 // changes leave timeline events.
 type fakeGithub struct {
 	owner string
+	// outsiders can't see the repository: GitHub resolves nothing for them
+	outsiders map[string]bool
 
 	mu       sync.Mutex
 	issues   []*ghIssue
@@ -53,7 +55,7 @@ type ghIssue struct {
 }
 
 func newFakeGithub(owner string) *fakeGithub {
-	return &fakeGithub{owner: owner, labels: map[string]string{}}
+	return &fakeGithub{owner: owner, labels: map[string]string{}, outsiders: map[string]bool{}}
 }
 
 // The following are called with f.mu held.
@@ -235,7 +237,25 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 		a := actorOf(login)
 		q.User = user{Login: a.Login, Name: a.User.Name}
 	case *repositoryIDQuery:
+		if f.outsiders[c.login] {
+			return fmt.Errorf("Could not resolve to a Repository with the name '%s/project'", f.owner)
+		}
 		q.Repository.ID = "R_1"
+	case *nodeQuery:
+		id := vars["id"].(githubv4.ID)
+		if _, err := f.find(id); err == nil {
+			q.Node = &struct {
+				Typename githubv4.String `graphql:"__typename"`
+			}{Typename: "Issue"}
+			return nil
+		}
+		if _, _, err := f.findComment(id); err == nil {
+			q.Node = &struct {
+				Typename githubv4.String `graphql:"__typename"`
+			}{Typename: "IssueComment"}
+			return nil
+		}
+		return fmt.Errorf("Could not resolve to a node with the global id of '%v'", id)
 	case *labelsQuery:
 		for id, name := range f.labels {
 			q.Repository.Labels.Nodes = append(q.Repository.Labels.Nodes, struct {
@@ -275,6 +295,9 @@ func (c fakeClient) Mutate(_ context.Context, m interface{}, input githubv4.Inpu
 
 func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 	f := c.f
+	if f.outsiders[c.login] {
+		return fmt.Errorf("Could not resolve to a node with the global id of '%v'", input)
+	}
 	switch m := m.(type) {
 	case *createIssueMutation:
 		in := input.(githubv4.CreateIssueInput)
@@ -569,4 +592,52 @@ func TestGithubPartialTimelineIsAnError(t *testing.T) {
 	closed, err = backend.Bugs().Resolve(closed.Id())
 	require.NoError(t, err)
 	require.Equal(t, common.ClosedStatus, closed.Snapshot().Status, "not reopened from a partial timeline")
+}
+
+// Review I3: GitHub resolves nothing for a token that can't see a private
+// repository, as for a deleted issue. That must not mark the bug as deleted
+// on the forge.
+func TestGithubNotFoundByOutsiderIsNotGone(t *testing.T) {
+	fake := newFakeGithub("owner")
+	fake.outsiders["alice"] = true
+	tokens := []*auth.Token{auth.NewToken(target, "bot"), auth.NewToken(target, "alice")}
+	r, err := newRemote(context.Background(), "owner", "project", "bot", tokens,
+		func(token *auth.Token) Client { return fakeClient{f: fake, login: token.Value} })
+	require.NoError(t, err)
+	g := githubForge{remote: r, fake: fake}
+	ref := g.UserAct("bot").CreateIssue("title", "body")
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	alice, err := backend.Identities().NewRaw("Alice", "", "alice", "", nil, map[string]string{metaKeyGithubLogin: "alice"})
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(alice))
+	bot, err := backend.Identities().NewRaw("Bot", "", "bot", "", nil, map[string]string{metaKeyGithubLogin: "bot"})
+	require.NoError(t, err)
+	sync := func() {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin})
+		require.NoError(t, err)
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+		}
+		for r := range e.Push(context.Background()) {
+			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+		}
+	}
+	sync()
+
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, err = b.SetTitleRaw(alice, time.Now().Unix(), "by alice", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync()
+
+	_, err = b.SetTitleRaw(bot, time.Now().Unix()+1, "by the bot", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync()
+	require.Equal(t, "by the bot", g.Issue(ref.Number).Title)
 }

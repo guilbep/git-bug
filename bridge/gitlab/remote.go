@@ -258,7 +258,7 @@ func (r *remote) AddComment(ctx context.Context, as core.Account, issue core.Ref
 	}
 	note, _, err := c.Notes.CreateIssueNote(r.projectID, iid, &gitlab.CreateIssueNoteOptions{Body: &body}, gitlab.WithContext(ctx))
 	if err != nil {
-		return core.Ref{}, mapErr(err)
+		return core.Ref{}, r.confirm(ctx, mapErr(err), iid, 0)
 	}
 	id := strconv.FormatInt(note.ID, 10)
 	return core.Ref{ID: id, URL: fmt.Sprintf("%s#note_%s", issue.URL, id)}, nil
@@ -277,7 +277,7 @@ func (r *remote) EditText(ctx context.Context, as core.Account, issue, target co
 		return err
 	}
 	_, _, err = c.Notes.UpdateIssueNote(r.projectID, iid, noteID, &gitlab.UpdateIssueNoteOptions{Body: &body}, gitlab.WithContext(ctx))
-	return mapErr(err)
+	return r.confirm(ctx, mapErr(err), iid, noteID)
 }
 
 func (r *remote) SetStatus(ctx context.Context, as core.Account, issue core.Ref, status common.Status) error {
@@ -303,7 +303,30 @@ func (r *remote) update(ctx context.Context, as core.Account, issue core.Ref, op
 		return err
 	}
 	_, _, err = c.Issues.UpdateIssue(r.projectID, iid, opt, gitlab.WithContext(ctx))
-	return mapErr(err)
+	return r.confirm(ctx, mapErr(err), iid, 0)
+}
+
+// confirm checks with the reader that an issue (and a note, if not 0) a
+// write didn't find is gone: GitLab answers the same 404 to a token that
+// can't see the project. The issue still there, the write was refused.
+func (r *remote) confirm(ctx context.Context, err error, iid, noteID int64) error {
+	if !errors.Is(err, core.ErrGone) {
+		return err
+	}
+	if _, _, perr := r.reader.Projects.GetProject(r.projectID, nil, gitlab.WithContext(ctx)); perr != nil {
+		return fmt.Errorf("checking the project after %w: %w", err, perr)
+	}
+	_, _, gerr := r.reader.Issues.GetIssue(r.projectID, iid, gitlab.WithContext(ctx))
+	if gerr == nil && noteID != 0 {
+		_, _, gerr = r.reader.Notes.GetIssueNote(r.projectID, iid, noteID, gitlab.WithContext(ctx))
+	}
+	switch {
+	case errors.Is(gerr, gitlab.ErrNotFound):
+		return err
+	case gerr != nil:
+		return gerr
+	}
+	return fmt.Errorf("%w: the token can't see it: %w", core.ErrRefused, err)
 }
 
 func (r *remote) writer(as core.Account) (*gitlab.Client, error) {

@@ -20,7 +20,9 @@ import (
 
 	"github.com/git-bug/git-bug/bridge/core"
 	"github.com/git-bug/git-bug/bridge/core/synctest"
+	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/repository/repotest"
 )
 
 // fakeGitea serves the part of the Gitea API the adapter and the tests use,
@@ -30,11 +32,13 @@ import (
 type fakeGitea struct {
 	*httptest.Server
 
-	mu     sync.Mutex
-	users  map[string]*apiUser // by token
-	issues []*fakeIssue
-	labels []apiLabel
-	lastID int64
+	mu    sync.Mutex
+	users map[string]*apiUser // by token
+	// outsiders can't see the repository: Gitea answers them 404
+	outsiders map[string]bool
+	issues    []*fakeIssue
+	labels    []apiLabel
+	lastID    int64
 }
 
 type fakeIssue struct {
@@ -44,7 +48,7 @@ type fakeIssue struct {
 }
 
 func newFakeGitea(t *testing.T) *fakeGitea {
-	f := &fakeGitea{users: map[string]*apiUser{}}
+	f := &fakeGitea{users: map[string]*apiUser{}, outsiders: map[string]bool{}}
 	mux := http.NewServeMux()
 	const repo = "/api/v1/repos/{owner}/{repo}"
 
@@ -59,6 +63,14 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 			}
 		}
 		reply(w, map[string]any{"data": data})
+	})
+	mux.HandleFunc("GET "+repo, func(w http.ResponseWriter, r *http.Request) {
+		reply(w, map[string]any{"id": 1})
+	})
+	mux.HandleFunc("GET "+repo+"/issues/{n}", func(w http.ResponseWriter, r *http.Request) {
+		if issue := f.issue(w, r); issue != nil {
+			reply(w, issue.apiIssue)
+		}
 	})
 	mux.HandleFunc("GET "+repo+"/issues", func(w http.ResponseWriter, r *http.Request) {
 		since, _ := time.Parse(time.RFC3339, r.URL.Query().Get("since"))
@@ -155,7 +167,21 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 		}
 		http.NotFound(w, r)
 	})
-	mux.HandleFunc("GET "+repo+"/issues/{n}/timeline", func(w http.ResponseWriter, r *http.Request) {
+	// one route for "issues/<n>/timeline" and "issues/comments/<id>",
+	// which overlap
+	mux.HandleFunc("GET "+repo+"/issues/{n}/{sub}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("n") == "comments" {
+			for _, issue := range f.issues {
+				for _, c := range issue.timeline {
+					if c.Type == "comment" && strconv.FormatInt(c.ID, 10) == r.PathValue("sub") && !issue.deleted {
+						reply(w, c)
+						return
+					}
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		issue := f.issue(w, r)
 		if issue == nil {
 			return
@@ -213,6 +239,10 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.outsiders[f.user(r).Login] && strings.HasPrefix(r.URL.Path, "/api/v1/repos/") {
+			http.NotFound(w, r)
+			return
+		}
 		mux.ServeHTTP(w, r)
 	}))
 	t.Cleanup(f.Close)
@@ -455,4 +485,51 @@ func TestSplitURL(t *testing.T) {
 	require.Error(t, err)
 	_, _, _, err = splitURL("https://example.org/a/b", "https://other.org/")
 	require.Error(t, err)
+}
+
+// Review I3: Gitea answers 404 to a token that can't see a private
+// repository, as to a deleted issue. That must not mark the bug as deleted on
+// the forge.
+func TestGiteaNotFoundByOutsiderIsNotGone(t *testing.T) {
+	fake := newFakeGitea(t)
+	fake.outsiders["alice"] = true
+	r, err := newRemote(context.Background(), http.DefaultClient, fake.URL+"/", "bot", "project", "bot",
+		[]string{"token-bot", "token-alice"})
+	require.NoError(t, err)
+	g := giteaForge{remote: r, h: giteaHarness{baseURL: fake.URL + "/", tokens: map[string]string{"bot": "token-bot"}}, counter: &counter{}}
+	ref := g.UserAct("bot").CreateIssue("title", "body")
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	alice, err := backend.Identities().NewRaw("Alice", "", "alice", "", nil, map[string]string{metaKeyGiteaLogin: "alice"})
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(alice))
+	bot, err := backend.Identities().NewRaw("Bot", "", "bot", "", nil, map[string]string{metaKeyGiteaLogin: "bot"})
+	require.NoError(t, err)
+	sync := func() {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGiteaLogin})
+		require.NoError(t, err)
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+		}
+		for r := range e.Push(context.Background()) {
+			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+		}
+	}
+	sync()
+
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, err = b.SetTitleRaw(alice, time.Now().Unix(), "by alice", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync()
+
+	_, err = b.SetTitleRaw(bot, time.Now().Unix()+1, "by the bot", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync()
+	require.Equal(t, "by the bot", g.Issue(ref.Number).Title)
 }

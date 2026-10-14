@@ -312,7 +312,7 @@ func (r *remote) AddComment(ctx context.Context, as core.Account, issue core.Ref
 	var m addCommentToIssueMutation
 	input := githubv4.AddCommentInput{SubjectID: issue.ID, Body: githubv4.String(body)}
 	if err := r.mutate(ctx, as, &m, input); err != nil {
-		return core.Ref{}, err
+		return core.Ref{}, r.confirm(ctx, err, issue.ID)
 	}
 	node := m.AddComment.CommentEdge.Node
 	return core.Ref{ID: node.ID, URL: node.URL}, nil
@@ -324,7 +324,8 @@ func (r *remote) EditText(ctx context.Context, as core.Account, issue, target co
 		return r.update(ctx, as, githubv4.UpdateIssueInput{ID: issue.ID, Body: &b})
 	}
 	var m updateIssueCommentMutation
-	return r.mutate(ctx, as, &m, githubv4.UpdateIssueCommentInput{ID: target.ID, Body: githubv4.String(body)})
+	err := r.mutate(ctx, as, &m, githubv4.UpdateIssueCommentInput{ID: target.ID, Body: githubv4.String(body)})
+	return r.confirm(ctx, err, target.ID)
 }
 
 func (r *remote) SetStatus(ctx context.Context, as core.Account, issue core.Ref, status common.Status) error {
@@ -354,7 +355,32 @@ func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref,
 
 func (r *remote) update(ctx context.Context, as core.Account, input githubv4.UpdateIssueInput) error {
 	var m updateIssueMutation
-	return r.mutate(ctx, as, &m, input)
+	return r.confirm(ctx, r.mutate(ctx, as, &m, input), input.ID)
+}
+
+// confirm checks with the reader that an issue or comment a write didn't
+// find is gone: GitHub resolves nothing either for a token that can't see the
+// repository. Still there, the write was refused.
+func (r *remote) confirm(ctx context.Context, err error, id githubv4.ID) error {
+	if !errors.Is(err, core.ErrGone) {
+		return err
+	}
+	var repo repositoryIDQuery
+	vars := varmap{"owner": githubv4.String(r.owner), "name": githubv4.String(r.project)}
+	if rerr := r.reader.queryPrintMsgs(ctx, &repo, vars); rerr != nil {
+		return fmt.Errorf("checking the repository after %w: %w", err, rerr)
+	}
+	var q nodeQuery
+	nerr := mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
+		return r.reader.sc.Query(ctx, &q, varmap{"id": id})
+	}, func(string) {}))
+	switch {
+	case errors.Is(nerr, core.ErrGone), nerr == nil && q.Node == nil:
+		return err
+	case nerr != nil:
+		return nerr
+	}
+	return fmt.Errorf("%w: the token can't see it: %w", core.ErrRefused, err)
 }
 
 // mutate writes as an account. It waits out rate limits, but doesn't retry
@@ -369,6 +395,13 @@ func (r *remote) mutate(ctx context.Context, as core.Account, m interface{}, inp
 		return c.sc.Mutate(ctx, m, input, nil)
 	}, func(string) {})
 	return mapErr(err)
+}
+
+// nodeQuery finds an issue or a comment by id.
+type nodeQuery struct {
+	Node *struct {
+		Typename githubv4.String `graphql:"__typename"`
+	} `graphql:"node(id: $id)"`
 }
 
 type repositoryIDQuery struct {

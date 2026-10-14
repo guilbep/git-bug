@@ -31,12 +31,14 @@ import (
 type fakeGitlab struct {
 	*httptest.Server
 
-	mu       sync.Mutex
-	users    map[string]*gitlab.User // by token
-	issues   []*fakeIssue
-	lastID   int64
-	writes   int
-	failNext bool
+	mu    sync.Mutex
+	users map[string]*gitlab.User // by token
+	// outsiders can't see the project: GitLab answers them 404
+	outsiders map[string]bool
+	issues    []*fakeIssue
+	lastID    int64
+	writes    int
+	failNext  bool
 }
 
 type fakeIssue struct {
@@ -49,7 +51,7 @@ type fakeIssue struct {
 
 func newFakeGitlab(t *testing.T) *fakeGitlab {
 	// notes and events ids never collide with issue iids
-	f := &fakeGitlab{users: map[string]*gitlab.User{}, lastID: 10000}
+	f := &fakeGitlab{users: map[string]*gitlab.User{}, outsiders: map[string]bool{}, lastID: 10000}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v4/user", func(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +62,27 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 			if strconv.FormatInt(u.ID, 10) == r.PathValue("id") {
 				reply(w, u)
 				return
+			}
+		}
+		notFound(w)
+	})
+	mux.HandleFunc("GET /api/v4/projects/{pid}", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, gitlab.Project{ID: 1})
+	})
+	mux.HandleFunc("GET /api/v4/projects/{pid}/issues/{iid}", func(w http.ResponseWriter, r *http.Request) {
+		if issue := f.issue(r); issue != nil {
+			reply(w, &issue.Issue)
+			return
+		}
+		notFound(w)
+	})
+	mux.HandleFunc("GET /api/v4/projects/{pid}/issues/{iid}/notes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if issue := f.issue(r); issue != nil {
+			for _, note := range issue.notes {
+				if strconv.FormatInt(note.ID, 10) == r.PathValue("id") {
+					reply(w, note)
+					return
+				}
 			}
 		}
 		notFound(w)
@@ -154,6 +177,10 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if u := f.user(r); u != nil && f.outsiders[u.Username] && strings.HasPrefix(r.URL.Path, "/api/v4/projects/") {
+			notFound(w)
+			return
+		}
 		if r.Method == http.MethodGet {
 			mux.ServeHTTP(w, r)
 			return
@@ -535,4 +562,60 @@ func TestGitlabBodyConflictIgnoresUnrelatedActivity(t *testing.T) {
 	b, err = backend.Bugs().Resolve(b.Id())
 	require.NoError(t, err)
 	require.Equal(t, "local body", b.Snapshot().Comments[0].Message)
+}
+
+// Review I3: GitLab answers 404 to a token that can't see a private project,
+// as to a deleted issue. That must not mark the bug as deleted on the forge.
+func TestGitlabNotFoundByOutsiderIsNotGone(t *testing.T) {
+	fake := newFakeGitlab(t)
+	fake.mu.Lock()
+	fake.userNamed("bot")
+	fake.userNamed("alice")
+	fake.outsiders["alice"] = true
+	fake.mu.Unlock()
+	r, err := newRemote(context.Background(), fake.URL+"/", "1", "bot",
+		[]*auth.Token{auth.NewToken(target, "token-bot"), auth.NewToken(target, "token-alice")})
+	require.NoError(t, err)
+	g := gitlabForge{remote: r, fake: fake}
+	ref := g.UserAct("bot").CreateIssue("title", "body")
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	alice, err := backend.Identities().NewRaw("Alice", "", "alice", "", nil, map[string]string{metaKeyGitlabLogin: "alice"})
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(alice))
+	bot, err := backend.Identities().NewRaw("Bot", "", "bot", "", nil, map[string]string{metaKeyGitlabLogin: "bot"})
+	require.NoError(t, err)
+	sync := func() (warnings int) {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGitlabLogin})
+		require.NoError(t, err)
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+		}
+		for r := range e.Push(context.Background()) {
+			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+			if r.Event == core.ExportEventWarning {
+				warnings++
+			}
+		}
+		return warnings
+	}
+	sync()
+
+	// alice, who can't see the project, renames the bug
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, err = b.SetTitleRaw(alice, time.Now().Unix(), "by alice", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Equal(t, 1, sync(), "the refusal is reported")
+
+	// the bot's next change still reaches the issue: it's not taken for deleted
+	_, err = b.SetTitleRaw(bot, time.Now().Unix()+1, "by the bot", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync()
+	require.Equal(t, "by the bot", g.Issue(ref.Number).Title)
 }
