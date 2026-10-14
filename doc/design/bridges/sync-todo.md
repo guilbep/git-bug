@@ -50,8 +50,8 @@ Failed, as predicted, both local only:
 - [x] Errors and conflicts
 - [x] Migration: legacy metadata, existing bridges, `export-foreign`
 - [x] Testing: fake forge and conformance suite
-- [ ] Full spec reviewed by the user
-- [ ] Implementation plan written (`sync-plan.md`)
+- [x] Full spec: user said to proceed without waiting for review (2026-10-14)
+- [x] Implementation plan written: [sync-plan.md](sync-plan.md). Build tasks are tracked there.
 
 ## Build (order to be fixed by the implementation plan)
 

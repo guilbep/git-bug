@@ -1,6 +1,6 @@
 # Bridge sync
 
-Status: **designed, waiting for review** on branch `bridge-sync`. The
+Status: **designed, being implemented** on branch `bridge-sync`. The
 working checklist is in [sync-todo.md](sync-todo.md).
 
 ## Goal
@@ -320,7 +320,8 @@ Three layers, all running offline:
    - token owners don't get a second identity;
    - a deletion on a forge is not propagated;
    - two projects of the same kind sync with each other.
-3. **Characterization first**: before anything is rewritten, the suite runs
-   against today's GitHub and GitLab bridges, and the known bugs become
-   failing tests the engine must fix. At the end, a run against real scratch
-   projects, and the existing end-to-end tests, which need tokens.
+3. **Real forges**: today's bridges were characterized by a real run
+   (GitHub `EPFL-ENAC/wiki` to gitlab.epfl.ch, see sync-todo.md), as the
+   suite drives the engine and can't run against them. At the end, a two-way
+   run against real scratch projects, and the existing end-to-end tests,
+   which need tokens.
