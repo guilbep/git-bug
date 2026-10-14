@@ -1,6 +1,6 @@
 # Bridge sync
 
-Status: **designed, being implemented** on branch `bridge-sync`. The
+Status: **implemented** for GitHub, GitLab and Gitea on branch `bridge-sync`. The
 working checklist is in [sync-todo.md](sync-todo.md).
 
 ## Goal

@@ -117,9 +117,9 @@ Every bridge has:
 
 | Key                                    | Type      | Description                                                            |
 |----------------------------------------|-----------|------------------------------------------------------------------------|
-| `git-bug.bridge.<name>.target`         | string    | The bridge implementation: `github`, `gitlab`, `jira` or `launchpad`.  |
+| `git-bug.bridge.<name>.target`         | string    | The bridge: `gitea`, `github`, `gitlab`, `jira` or `launchpad`.        |
 | `git-bug.bridge.<name>.lastImportTime` | timestamp | Bookkeeping for incremental imports. Written by `git bug bridge pull`. |
-| `git-bug.bridge.<name>.sync`           | bool      | Set by hand, for GitHub and GitLab. See [Syncing](#syncing).           |
+| `git-bug.bridge.<name>.sync`           | bool      | Set by hand, for Gitea, GitHub and GitLab. See [Syncing](#syncing).    |
 
 ### Syncing<a name="syncing"></a>
 
@@ -142,6 +142,17 @@ references translated. Run it from one place only, such as a CI job:
 `git bug pull && git bug bridge sync && git bug push`.
 
 The remaining keys depend on the target.
+
+#### Gitea<a name="gitea"></a>
+
+For Gitea and Forgejo.
+
+| Key             | Description                                                 |
+| --------------- | ----------------------------------------------------------- |
+| `base-url`      | The instance URL.                                           |
+| `owner`         | The user or organisation owning the repository.             |
+| `project`       | The repository name.                                        |
+| `default-login` | The Gitea login used when no credential matches explicitly. |
 
 #### GitHub<a name="github"></a>
 

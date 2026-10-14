@@ -91,9 +91,13 @@ Known limits it showed:
 - [x] GitLab adapter: conformance passes on an HTTP fake; old importer and
       exporter removed; legacy metadata read; real end-to-end test passes
       on gitlab.epfl.ch
-- [ ] GitHub adapter
-- [ ] Docs: third-party.md, feature-matrix.md
-- [ ] Gitea/Forgejo adapter
+- [x] GitHub adapter: conformance passes on a fake of the GraphQL client;
+      old importer and exporter removed; mock and end-to-end tests ported
+- [x] Docs: configuration.md, third-party.md, feature-matrix.md, CLI help
+- [x] Gitea/Forgejo bridge, born on the engine: conformance passes on an
+      HTTP fake and on a real Gitea 1.22.6 (docker), which found two bugs the
+      fake didn't have: labels need write access, issues of the same second
+      listed newest first
 - [x] Two-way run against real forges (scratch projects), see below
 - [ ] Whole-branch review
 

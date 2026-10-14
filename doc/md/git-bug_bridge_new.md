@@ -9,6 +9,12 @@ You can avoid all the terminal prompts by passing all the necessary flags to con
 
 Authentication tokens and required permissions by target:
 
+Gitea (and Forgejo):
+  Requires an access token created on the target instance
+  ($BASE_URL/user/settings/applications), with the read and write
+  permissions on issues and repositories, and read on users. Pushing
+  labels needs write access to the repository.
+
 GitHub:
   Requires a classic personal access token (https://github.com/settings/tokens;
   fine-grained tokens starting with 'github_pat_' are not supported).
@@ -48,12 +54,13 @@ git-bug bridge new [flags]
 
 ```
 # Interactive example
-[1]: github
-[2]: gitlab
-[3]: jira
-[4]: launchpad-preview
+[1]: gitea
+[2]: github
+[3]: gitlab
+[4]: jira
+[5]: launchpad-preview
 
-target: 1
+target: 2
 name [default]: default
 
 Detected projects:
@@ -87,6 +94,13 @@ git bug bridge new \
     --project=example-repo \
     --token=$TOKEN
 
+# For Gitea or Forgejo
+git bug bridge new \
+    --name=default \
+    --target=gitea \
+    --url=https://gitea.example.com/example-owner/example-repo \
+    --token=$TOKEN
+
 # For GitLab
 git bug bridge new \
     --name=default \
@@ -114,7 +128,7 @@ git bug bridge new \
 
 ```
   -n, --name string         A distinctive name to identify the bridge
-  -t, --target string       The target of the bridge. Valid values are [github,gitlab,jira,launchpad-preview]
+  -t, --target string       The target of the bridge. Valid values are [gitea,github,gitlab,jira,launchpad-preview]
   -u, --url string          The URL of the remote repository
   -b, --base-url string     The base URL of your remote issue tracker
   -l, --login string        The login on your remote issue tracker

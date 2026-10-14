@@ -120,11 +120,11 @@ Board support:
 Two-way sync of every issue, whichever platform it comes from, with
 `git bug bridge sync`. See [Syncing several platforms][doc/usage/sync].
 
-|                                                  | Github | Gitlab | Jira | Launchpad |
-| ------------------------------------------------ | :----: | :----: | :--: | :-------: |
-| **sync**                                         |   ✅   |   ✅   |  ❌  |    ❌     |
-| attribution of what people without a token wrote |   ✅   |   ✅   |  ❌  |    ❌     |
-| mentions defused, issue references translated    |   ✅   |   ✅   |  ❌  |    ❌     |
+|                                                  | Gitea | Github | Gitlab | Jira | Launchpad |
+| ------------------------------------------------ | :---: | :----: | :----: | :--: | :-------: |
+| **sync**                                         |  ✅   |   ✅   |   ✅   |  ❌  |    ❌     |
+| attribution of what people without a token wrote |  ✅   |   ✅   |   ✅   |  ❌  |    ❌     |
+| mentions defused, issue references translated    |  ✅   |   ✅   |   ✅   |  ❌  |    ❌     |
 
 [doc/usage/sync]: ./usage/third-party.md#syncing-several-platforms
 

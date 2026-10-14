@@ -9,6 +9,7 @@ from third-party platforms.
 - [Supported bridges](#supported-bridges)
 - [Getting started](#getting-started)
 - [Tokens and required permissions](#tokens-and-required-permissions)
+  - [Gitea](#gitea)
   - [GitHub](#github)
   - [GitLab](#gitlab)
   - [Jira](#jira)
@@ -49,9 +50,10 @@ This has several benefits:
 
 We support a number of bridges:
 
-- Jira
+- Gitea and Forgejo
 - GitHub
 - GitLab
+- Jira
 - Launchpad
 
 _For a full list of the features enabled for each bridge, see the
@@ -87,6 +89,17 @@ API operations, which determine the minimum permissions a token needs:
   status/title change events
 - **push** (GitHub, GitLab and Jira only): create issues, edit title and body,
   add and edit comments, change labels and toggle the status (open/close)
+
+### Gitea<a name="gitea"></a>
+
+The Gitea bridge works with Forgejo too. Create an access token on the
+instance, at `$BASE_URL/user/settings/applications`:
+
+- **Permissions**: read and write on issues and repositories, and read on
+  users.
+- **Repository access**: read access to pull. Pushing issues and comments
+  needs an account that can open them, and setting labels needs write access
+  to the repository.
 
 ### GitHub<a name="github"></a>
 
@@ -186,7 +199,8 @@ git bug push
 `git bug bridge sync` pulls every bridge with `sync` enabled, then pushes to
 each of them, so that an issue, comment, edit, status, title or label change
 made on one platform reaches the others in one run. Running it again changes
-nothing until something changes somewhere. GitHub and GitLab support `sync`.
+nothing until something changes somewhere. Gitea (and Forgejo), GitHub and
+GitLab support `sync`.
 
 What was written by someone without a token on a platform is posted there with
 the bridge's `default-login` token, under a header naming the author and
