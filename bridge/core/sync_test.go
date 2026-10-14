@@ -469,3 +469,164 @@ func TestPushTranslatesRefs(t *testing.T) {
 	require.Contains(t, second.Body, "*Originally posted by alice on")
 	require.Contains(t, second.Body, "[view on fake](https://src.test/issues/2)")
 }
+
+func sync(t *testing.T, repo *cache.RepoCache, f *synctest.Fake) []core.ExportResult {
+	pull(t, repo, f)
+	return push(t, repo, f, true)
+}
+
+func TestPushUpdates(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	b, _, err := repo.Bugs().NewRaw(me, time.Now().Unix(), "title", "body", nil, nil)
+	require.NoError(t, err)
+	commentId, _, err := b.AddCommentRaw(me, time.Now().Unix(), "comment", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync(t, repo, f)
+	writes := f.Writes()
+
+	_, err = b.SetTitleRaw(me, time.Now().Unix(), "new title", nil)
+	require.NoError(t, err)
+	_, err = b.CloseRaw(me, time.Now().Unix(), nil)
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabelsRaw(me, time.Now().Unix(), []string{"x"}, nil, nil)
+	require.NoError(t, err)
+	_, _, err = b.EditCreateCommentRaw(me, time.Now().Unix(), "new body", nil)
+	require.NoError(t, err)
+	_, err = b.EditCommentRaw(me, time.Now().Unix(), commentId, "new comment", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	sync(t, repo, f)
+	require.Equal(t, writes+5, f.Writes())
+	issue := f.Issue("1")
+	require.Equal(t, "new title", issue.Title)
+	require.Equal(t, common.ClosedStatus, issue.Status)
+	require.Equal(t, []string{"x"}, issue.Labels)
+	require.Equal(t, "new body", core.Unrender(issue.Body))
+	require.Equal(t, "new comment", core.Unrender(issue.Comments[0].Body))
+
+	// the next sync claims the echoes of these writes, then all is stable
+	sync(t, repo, f)
+	ops := len(onlyBug(t, repo).Snapshot().Operations)
+	sync(t, repo, f)
+	require.Equal(t, writes+5, f.Writes())
+	snap := onlyBug(t, repo).Snapshot()
+	require.Equal(t, 1, countOps[*bug.SetStatusOperation](snap))
+	require.Equal(t, 1, countOps[*bug.SetTitleOperation](snap))
+	require.Equal(t, 2, countOps[*bug.EditCommentOperation](snap))
+	require.Len(t, snap.Operations, ops)
+}
+
+func TestPushEditsAsPoster(t *testing.T) {
+	repo := newRepo(t)
+	owner := core.Account{User: core.User{ID: "2", Login: "owner", Name: "Owner"}}
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{AuthorOnlyEdits: true}, bot, owner)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	ownerId, err := repo.Identities().NewRaw("Owner", "", "owner", "", nil, map[string]string{"fake-login": "owner"})
+	require.NoError(t, err)
+
+	b, _, err := repo.Bugs().NewRaw(me, time.Now().Unix(), "title", "body", nil, nil)
+	require.NoError(t, err)
+	// posted by the bot on my behalf
+	commentId, _, err := b.AddCommentRaw(me, time.Now().Unix(), "mine", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync(t, repo, f)
+
+	// the owner edits it in git-bug: the forge only lets the bot edit it
+	_, err = b.EditCommentRaw(ownerId, time.Now().Unix(), commentId, "fixed by the owner", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	sync(t, repo, f)
+
+	got := f.Issue("1").Comments[0].Body
+	require.Equal(t, "fixed by the owner", core.Unrender(got))
+	require.Contains(t, got, "*Posted by Me on", "still attributed to its author")
+}
+
+func TestPushRecoversFromFailedWrite(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{FailAfterWrite: true}, bot)
+	_, _, err := repo.Bugs().New("title", "body")
+	require.NoError(t, err)
+
+	var failed bool
+	for r := range engine(t, repo, f, true).Push(context.Background()) {
+		failed = failed || r.Event == core.ExportEventError
+	}
+	require.True(t, failed, "the write was reported as failed")
+	require.NotNil(t, f.Issue("1"), "but was done")
+
+	sync(t, repo, f)
+	sync(t, repo, f)
+	require.Nil(t, f.Issue("2"), "not created twice")
+	require.Len(t, repo.Bugs().AllIds(), 1, "not imported back")
+}
+
+func TestPushRetriesRateLimit(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{RateLimitOnce: true}, bot)
+	_, _, err := repo.Bugs().New("title", "body")
+	require.NoError(t, err)
+
+	push(t, repo, f, true)
+	require.NotNil(t, f.Issue("1"))
+}
+
+func TestPushDeletedIssue(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	b, _, err := repo.Bugs().New("title", "body")
+	require.NoError(t, err)
+	sync(t, repo, f)
+	f.UserAct("alice").Delete(core.Ref{ID: f.Issue("1").ID})
+
+	_, err = b.SetTitleRaw(b.Snapshot().Author, time.Now().Unix(), "renamed", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	results := sync(t, repo, f)
+	warned := false
+	for _, r := range results {
+		warned = warned || r.Event == core.ExportEventWarning
+	}
+	require.True(t, warned)
+	writes := f.Writes()
+
+	sync(t, repo, f)
+	require.Equal(t, writes, f.Writes(), "not retried")
+	require.Len(t, repo.Bugs().AllIds(), 1, "kept in git-bug")
+}
+
+func TestPushErrorOnOneBugOnly(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{AuthorOnlyEdits: true}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("alice's", "body")
+	alice.Comment(issue, "alice's comment")
+	pull(t, repo, f)
+
+	// an edit of alice's comment the forge refuses
+	b := onlyBug(t, repo)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, err = b.EditCommentRaw(me, time.Now().Unix(), b.Snapshot().Comments[1].CombinedId(), "edited", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix()+1, "other", "body", nil, nil)
+	require.NoError(t, err)
+
+	var errs int
+	for r := range engine(t, repo, f, true).Push(context.Background()) {
+		if r.Event == core.ExportEventError {
+			errs++
+		}
+	}
+	require.Equal(t, 1, errs)
+	require.Equal(t, "other", f.Issue("2").Title, "the other bug is still pushed")
+}

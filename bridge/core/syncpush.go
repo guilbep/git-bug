@@ -168,6 +168,9 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		if _, onRemote := opOnRemote(op, snap, e.remote); onRemote {
 			continue
 		}
+		if _, gone := op.GetMetadata(e.key("gone")); gone {
+			continue
+		}
 		as, attributed, ok := e.accountFor(op.Author())
 		if !ok {
 			continue
@@ -200,6 +203,69 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			return err
 		}
 		out <- NewExportComment(b.Id())
+	}
+
+	// texts edited since the forge last saw them
+	snap = b.Snapshot()
+	for _, owner := range snap.Operations {
+		var target Ref
+		markerID := owner.Id()
+		switch owner.(type) {
+		case *bug.CreateOperation:
+			target, markerID = issue, b.Id()
+		case *bug.AddCommentOperation:
+			id, onRemote := opOnRemote(owner, snap, e.remote)
+			if !onRemote {
+				continue
+			}
+			target = Ref{ID: id, URL: metadata(owner, e.key("url"))}
+		default:
+			continue
+		}
+		if _, gone := owner.GetMetadata(e.key("gone")); gone {
+			continue
+		}
+		sl := s(slotText, owner.Id())
+		_, baseOp, ok := base(snap, e.remote, sl)
+		latest := lastSlotOp(snap, sl)
+		if ok && latest.Id() == baseOp.Id() {
+			continue
+		}
+		// edited with the account that posted it: forges like GitLab only let
+		// a comment's author edit it
+		as, ok := e.accountByLogin(metadata(owner, e.key("as")))
+		if !ok {
+			if as, _, ok = e.accountFor(latest.Author()); !ok {
+				continue
+			}
+		}
+		ownerAccount, hasAccount := e.accounts[owner.Author().Id()]
+		onBehalf := !hasAccount || ownerAccount.ID != as.ID
+
+		comment, err := snap.SearchCommentByOpId(owner.Id())
+		if err != nil {
+			return err
+		}
+		text := e.render(snap, refs, markerID, owner, latest, comment.Message, onBehalf)
+		err = e.call(ctx, func() error { return e.remote.EditText(ctx, as, issue, target, text) })
+		if errors.Is(err, ErrGone) && target.ID != issue.ID {
+			out <- NewExportWarning(fmt.Errorf("comment deleted on the forge, not synced anymore"), b.Id())
+			if _, err := b.SetMetadata(owner.Id(), map[string]string{e.key("gone"): "1"}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		_, err = b.SetMetadata(latest.Id(), map[string]string{
+			e.key("pushed"): now,
+			e.key("text"):   Fingerprint(text),
+		})
+		if err != nil {
+			return err
+		}
+		out <- NewExportCommentEdition(b.Id())
 	}
 
 	// title, status and labels that differ from what the forge last saw
@@ -254,6 +320,15 @@ func (e *Engine) accountFor(author identity.Interface) (as Account, onBehalf boo
 		return *e.defaultAccount, true, true
 	}
 	return Account{}, false, false
+}
+
+func (e *Engine) accountByLogin(login string) (Account, bool) {
+	for _, a := range e.accounts {
+		if login != "" && a.Login == login {
+			return a, true
+		}
+	}
+	return Account{}, false
 }
 
 // render writes the text of owner (a create or add-comment operation), whose
