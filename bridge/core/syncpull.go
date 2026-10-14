@@ -36,6 +36,11 @@ func (e *Engine) Pull(ctx context.Context, since time.Time) <-chan ImportResult 
 				out <- NewImportError(fmt.Errorf("issue %s: %w", issue.URL, err), "")
 			}
 		}
+		// a forge may end its listing quietly when stopped: a pull that
+		// didn't read everything must not look complete
+		if err := ctx.Err(); err != nil {
+			out <- NewImportError(fmt.Errorf("pull stopped: %w", err), "")
+		}
 	}()
 	return out
 }

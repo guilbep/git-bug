@@ -231,3 +231,29 @@ func TestSyncAllSkipsPushAfterFailedPull(t *testing.T) {
 	require.Zero(t, a.Writes())
 	require.Equal(t, "local", b.Issue("1").Title, "b is pushed to")
 }
+
+// A pull stopped early, such as with Ctrl-C, records no time: the next one
+// would skip every issue it didn't read.
+func TestStoppedPullKeepsResumeTime(t *testing.T) {
+	repo := newRepo(t)
+	f := newSyncForge(t, repo, "solo")
+	f.UserAct("alice").CreateIssue("one", "body")
+	b, err := core.LoadBridge(repo, "solo")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events, err := b.ImportAllSince(ctx, time.Time{})
+	require.NoError(t, err)
+	stopped := false
+	for e := range events {
+		stopped = stopped || e.Event == core.ImportEventError
+	}
+	require.True(t, stopped, "reported")
+
+	cfg, err := repo.Config().Read()
+	require.NoError(t, err)
+	last, err := cfg.Int("git-bug.bridge.solo.lastImportTime", 0)
+	require.NoError(t, err)
+	require.Zero(t, last)
+}
