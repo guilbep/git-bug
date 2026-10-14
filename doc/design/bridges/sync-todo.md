@@ -138,8 +138,8 @@ GitLab issues #2-#6 deleted; the wiki's own git-bug data pulled (6 bugs,
 - [ ] Reconcile's title, status and label changes print nothing.
 - [ ] `bridge push` alone, after a write whose answer was lost, creates the
       issue twice: the marker recovers it only on pull. Use `bridge sync`.
-- [ ] GitHub rate limits never reach the engine: big backfills may fail
-      per bug.
+- [x] GitHub rate limits never reach the engine: big backfills may fail
+      per bug. Writes now report them; pages too costly shrink.
 - [ ] Goroutine leaks when a caller stops early (GitLab issue listing, GitHub
       mediator's edit reversal).
 - [ ] The attribution names the raw remote key when bridges are pulled and
@@ -161,5 +161,5 @@ GitLab issues #2-#6 deleted; the wiki's own git-bug data pulled (6 bugs,
 - GitLab: a pull before a push reverts unpushed local comment edits.
 - GitLab: a note can only be edited by its author, so edits must use the
   token that posted it.
-- GitLab and Jira bridges have no rate-limit handling.
+- The Jira bridge has no rate-limit handling.
 - `bridge push` has no `--since` and always walks every bug.

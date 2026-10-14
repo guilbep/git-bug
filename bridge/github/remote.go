@@ -386,15 +386,19 @@ func (r *remote) confirm(ctx context.Context, err error, id githubv4.ID) error {
 // mutate writes as an account. It waits out rate limits, but doesn't retry
 // on errors, as GitHub may have done a write whose answer was lost: the
 // engine recovers from that without writing twice.
+// rateLimitWait is how long the engine waits when GitHub limits writes. Its
+// secondary limit gives no reset time; GitHub asks to wait at least a minute.
+var rateLimitWait = time.Minute
+
 func (r *remote) mutate(ctx context.Context, as core.Account, m interface{}, input githubv4.Input) error {
 	c, ok := r.clients[as.Login]
 	if !ok {
 		return fmt.Errorf("no GitHub token for %s", as.Login)
 	}
-	err := c.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
-		return c.sc.Mutate(ctx, m, input, nil)
-	}, func(string) {})
-	return mapErr(err)
+	// the engine waits when GitHub limits writes
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+	return mapErr(c.sc.Mutate(ctx, m, input, nil))
 }
 
 // nodeQuery finds an issue or a comment by id.
@@ -498,6 +502,8 @@ func mapErr(err error) error {
 	case strings.Contains(msg, "FORBIDDEN"), strings.Contains(msg, "Resource not accessible"),
 		strings.Contains(msg, "does not have permission"):
 		return fmt.Errorf("%w: %w", core.ErrRefused, err)
+	case strings.Contains(msg, "rate limit"), strings.Contains(msg, "was submitted too quickly"):
+		return core.ErrRateLimited{Until: time.Now().Add(rateLimitWait)}
 	}
 	return err
 }

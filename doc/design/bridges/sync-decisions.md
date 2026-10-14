@@ -73,10 +73,18 @@ spec stays the authority.
   comment deleted: forges answer the same to a token that can't see a
   private project.
 - **Writes are never retried by the forge clients** (GitLab `WithoutRetries`,
-  GitHub rate limits only): a write the forge did without answering would be
-  done twice. The engine retries rate limits, and the marker recovers lost
-  answers on the next pull. *If wrong:* a transient 5xx on a write is an
-  error, retried next run.
+  GitHub too): a write the forge did without answering would be done twice.
+  The engine retries rate limits, and the marker recovers lost answers on
+  the next pull. *If wrong:* a transient 5xx on a write is an error,
+  retried next run.
+- **No batching: forges pace writes, the engine waits.** Neither GitHub nor
+  GitLab can create or update several issues in one call. GitLab's 429 and
+  GitHub's secondary limit (no reset time given: one minute) reach the
+  engine, which waits and retries up to three times; a run stopped by a
+  limit goes on where it was at the next run, as every write is recorded
+  when made. Reads are paged, and GitHub's page halves when GitHub finds it
+  too costly. *If wrong:* a first sync of thousands of writes may need
+  several runs.
 - **An unresolvable `#ref` with no known source URL becomes `` `#n` ``**, never
   a link to the wrong issue.
 - **Labels**: GitHub sets the full set with `updateIssue(labelIds)` and

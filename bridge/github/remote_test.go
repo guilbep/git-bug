@@ -678,3 +678,48 @@ func TestGithubPullShrinksCostlyPages(t *testing.T) {
 	require.Equal(t, 2, n)
 	require.Equal(t, 4, calls, "40, 20, 10 refused at once, then 5")
 }
+
+// limitedClient answers the next writes with GitHub's secondary rate limit.
+type limitedClient struct {
+	fakeClient
+	left *int
+}
+
+func (c limitedClient) Mutate(ctx context.Context, m interface{}, input githubv4.Input, vars map[string]interface{}) error {
+	if *c.left > 0 {
+		*c.left--
+		return errors.New("You have exceeded a secondary rate limit. Please wait a few minutes before you try again.")
+	}
+	return c.fakeClient.Mutate(ctx, m, input, vars)
+}
+
+// Many writes in a row, as a first sync makes, hit GitHub's secondary rate
+// limit: the engine waits and goes on, instead of failing each bug.
+func TestGithubSecondaryRateLimitWaits(t *testing.T) {
+	defer func(d time.Duration) { rateLimitWait = d }(rateLimitWait)
+	rateLimitWait = time.Millisecond
+
+	fake := newFakeGithub("owner")
+	left := 2
+	r, err := newRemote(context.Background(), "owner", "project", "bot", []*auth.Token{auth.NewToken(target, "token-bot")},
+		func(*auth.Token) Client { return limitedClient{fakeClient{f: fake, login: "bot"}, &left} })
+	require.NoError(t, err)
+	g := githubForge{remote: r, fake: fake}
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+	_, _, err = backend.Bugs().New("local", "body")
+	require.NoError(t, err)
+
+	e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin})
+	require.NoError(t, err)
+	for r := range e.Push(context.Background()) {
+		require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+	}
+	require.Equal(t, "local", g.Issue("1").Title)
+}
