@@ -101,10 +101,9 @@ func runBridgeSync(env *execenv.Env, opts bridgeSyncOptions, args []string) erro
 		}
 	}
 
-	if opts.dryRun {
-		return nil
+	if !opts.dryRun {
+		env.Out.Printf("pulled %d issues, pushed %d issues\n", pulled, pushed)
 	}
-	env.Out.Printf("pulled %d issues, pushed %d issues\n", pulled, pushed)
 	if errs > 0 {
 		return fmt.Errorf("sync finished with %d error(s)", errs)
 	}

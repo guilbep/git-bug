@@ -89,3 +89,11 @@ func TestBridgeSyncFailsOnErrors(t *testing.T) {
 
 	require.ErrorContains(t, runBridgeSync(env, bridgeSyncOptions{}, nil), "1 error")
 }
+
+func TestBridgeSyncDryRunFailsOnErrors(t *testing.T) {
+	env, _ := testenv.NewTestEnvAndUser(t)
+	a := newFakeForge(t, env, "a")
+	a.FailNextListing()
+
+	require.ErrorContains(t, runBridgeSync(env, bridgeSyncOptions{dryRun: true}, nil), "error")
+}

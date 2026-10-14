@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -78,19 +79,27 @@ func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun 
 		defer close(out)
 		defer unlock()
 
+		pulled := make([]bool, len(bridges))
 		for i, b := range bridges {
 			// a bit before, just to be sure
 			start := time.Now().Add(-5 * time.Second)
-			ok := true
+			pulled[i] = true
 			for r := range engines[i].Pull(ctx, b.configTime(configKeyLastSyncTime)) {
-				ok = ok && r.Event != ImportEventError
+				pulled[i] = pulled[i] && r.Event != ImportEventError
 				out <- SyncResult{Bridge: b.Name, Import: &r}
 			}
-			if ok && !dryRun {
+			if pulled[i] && !dryRun {
 				_ = b.storeConfigTime(configKeyLastSyncTime, start)
 			}
 		}
 		for i, b := range bridges {
+			// what git-bug knows of that forge may be stale: pushing could
+			// undo what changed there since
+			if !pulled[i] {
+				r := NewExportError(errors.New("not pushed, as its pull failed"), "")
+				out <- SyncResult{Bridge: b.Name, Export: &r}
+				continue
+			}
 			for r := range engines[i].Push(ctx) {
 				out <- SyncResult{Bridge: b.Name, Export: &r}
 			}

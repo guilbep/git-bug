@@ -207,3 +207,27 @@ func TestSyncAllIgnoresOldImportTime(t *testing.T) {
 	}
 	require.Equal(t, "never imported", onlyBug(t, repo).Snapshot().Title)
 }
+
+// A forge whose pull failed isn't pushed to: what git-bug knows of it may be
+// stale, and pushing could undo what changed there since.
+func TestSyncAllSkipsPushAfterFailedPull(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	b := newSyncForge(t, repo, "b")
+	_, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	a.FailNextListing()
+
+	results, err := core.SyncAll(context.Background(), repo, []string{"a", "b"}, false)
+	require.NoError(t, err)
+	var errs []string
+	for r := range results {
+		if r.IsError() {
+			errs = append(errs, r.String())
+		}
+	}
+	require.Len(t, errs, 2, "the pull, and the push not done")
+	require.Contains(t, errs[1], "not pushed")
+	require.Zero(t, a.Writes())
+	require.Equal(t, "local", b.Issue("1").Title, "b is pushed to")
+}

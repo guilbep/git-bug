@@ -71,6 +71,8 @@ type Fake struct {
 	issues []*fakeIssue
 	lastID int
 	writes int
+	// failListing fails the next listing of issues
+	failListing bool
 }
 
 type fakeIssue struct {
@@ -109,9 +111,15 @@ func (f *Fake) Issues(_ context.Context, since time.Time) iter.Seq2[*core.Issue,
 			res = append(res, issue.clone())
 		}
 	}
+	fail := f.failListing
+	f.failListing = false
 	f.mu.Unlock()
 
 	return func(yield func(*core.Issue, error) bool) {
+		if fail {
+			yield(nil, errors.New("listing issues failed"))
+			return
+		}
 		for _, issue := range res {
 			if !yield(issue, nil) {
 				return
@@ -204,6 +212,13 @@ func (f *Fake) Writes() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.writes
+}
+
+// FailNextListing makes the next listing of issues fail.
+func (f *Fake) FailNextListing() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failListing = true
 }
 
 func (f *Fake) FailNextWrite() {
