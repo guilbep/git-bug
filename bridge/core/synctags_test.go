@@ -9,7 +9,6 @@ import (
 	"github.com/git-bug/git-bug/entities/bug"
 	"github.com/git-bug/git-bug/entities/common"
 	"github.com/git-bug/git-bug/entity"
-	"github.com/git-bug/git-bug/entity/dag"
 	"github.com/git-bug/git-bug/repository/repotest"
 )
 
@@ -20,8 +19,9 @@ type legacyRemote struct {
 
 func (legacyRemote) Key() string { return "forge.test/1" }
 
-func (legacyRemote) Legacy(op dag.Operation, _ map[string]string) (string, bool) {
-	return op.GetMetadata("old-id")
+func (legacyRemote) Legacy(meta, _ map[string]string) (string, bool) {
+	id, ok := meta["old-id"]
+	return id, ok
 }
 
 func newTestBug(t *testing.T) (*cache.RepoCache, *cache.IdentityCache, *cache.BugCache) {

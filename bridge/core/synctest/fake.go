@@ -15,7 +15,6 @@ import (
 
 	"github.com/git-bug/git-bug/bridge/core"
 	"github.com/git-bug/git-bug/entities/common"
-	"github.com/git-bug/git-bug/entity/dag"
 )
 
 // Forge is a Remote whose people can also act directly on the forge. The
@@ -169,8 +168,8 @@ func (f *Fake) Dialect() core.Dialect {
 	}
 }
 
-func (f *Fake) Legacy(dag.Operation, map[string]string) (string, bool) { return "", false }
-func (f *Fake) LegacyUser() (string, bool)                             { return "", false }
+func (f *Fake) Legacy(_, _ map[string]string) (string, bool) { return "", false }
+func (f *Fake) LegacyUser() (string, bool)                   { return "", false }
 
 func (f *Fake) UserAct(login string) Actor {
 	f.mu.Lock()

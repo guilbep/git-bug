@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/git-bug/git-bug/entities/common"
-	"github.com/git-bug/git-bug/entity/dag"
 )
 
 // ErrNotSupported is returned by a Remote for what its forge can't do, like
@@ -61,8 +60,9 @@ type Remote interface {
 	Dialect() Dialect
 
 	// Legacy returns the remote id an operation carries in the metadata
-	// written before the sync engine (github-id, gitlab-id...), if any.
-	Legacy(op dag.Operation, createMetadata map[string]string) (id string, ok bool)
+	// written before the sync engine (github-id, gitlab-id...), if any, from
+	// the operation's metadata and its bug's create operation's.
+	Legacy(metadata, createMetadata map[string]string) (id string, ok bool)
 	// LegacyUser returns the identity metadata key used before the sync
 	// engine, and whether it holds the login (true) or the user id (false).
 	LegacyUser() (key string, isLogin bool)

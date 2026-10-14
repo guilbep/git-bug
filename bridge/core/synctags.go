@@ -74,7 +74,7 @@ func base(snap *bug.Snapshot, r Remote, s slot) (string, dag.Operation, bool) {
 			continue
 		}
 		// seen by a pre-sync bridge, with the value git-bug has
-		if _, legacy := r.Legacy(op, createMeta); legacy {
+		if _, legacy := r.Legacy(op.AllMetadata(), createMeta); legacy {
 			value, found = own, op
 		}
 	}
@@ -130,5 +130,5 @@ func opOnRemote(op dag.Operation, snap *bug.Snapshot, r Remote) (string, bool) {
 	if id, ok := op.GetMetadata(syncKey(r.Key(), "id")); ok {
 		return id, true
 	}
-	return r.Legacy(op, snap.Operations[0].AllMetadata())
+	return r.Legacy(op.AllMetadata(), snap.Operations[0].AllMetadata())
 }
