@@ -107,11 +107,126 @@ attribution header and translated `#refs` can't be reliably reversed. Pulled
 text that did change is turned back into git-bug text on a best-effort basis
 (header removed, mentions restored).
 
-## Open decision: replay or reconcile on pull
+## Pull replays, then reconciles
 
-TODO: decide with the user.
+Pull replays the forge's timeline, as the importers do today: each event
+becomes its own git-bug operation, with its author and time. History stays
+complete, and `bridge pull` keeps behaving as it does.
+
+Events that git-bug pushed itself come back on the next pull. They are
+recognized by **claiming**: an event matches a pushed operation of the same
+issue, kind and value, not yet claimed, posted by one of the remote's
+accounts, at or after the push. The oldest such operation gets tagged with
+the event's id, and no new operation is created. Authorship alone never
+makes an event an echo, as a token owner also acts on the forge directly.
+
+After replaying, the engine compares the forge's current state with
+git-bug's, three-way as above. A difference that no event explained (for
+example a GitLab comment edit, which has no event) is recorded as one
+operation.
+
+Push sends a value when it differs from the base, never each intermediate
+operation. A local close followed by a reopen, when the base is open,
+sends nothing.
+
+## Adapter interface
+
+A forge plugs in by implementing `Remote`, in `bridge/core`. Everything
+else is the engine's: which bugs and values to send, with which account,
+the attribution header, defusing mentions, translating refs, tagging,
+claiming echoes, identities, dry runs and reporting.
+
+```go
+// Remote is one forge project, as the sync engine sees it.
+type Remote interface {
+	// Who it is
+	Key() string      // stable project id: "gitlab.com/42", "github.com/git-bug/git-bug"
+	Instance() string // the server: "gitlab.com". People are matched per server.
+	Accounts(ctx context.Context) ([]Account, error) // configured tokens, and who each one is
+
+	// Read
+	Issues(ctx context.Context, since time.Time) iter.Seq2[*Issue, error]
+	User(ctx context.Context, id string) (User, error)
+
+	// Write, always as a given account
+	CreateIssue(ctx context.Context, as Account, title, body string) (Ref, error)
+	AddComment(ctx context.Context, as Account, issue Ref, body string) (Ref, error)
+	EditText(ctx context.Context, as Account, issue, target Ref, body string) error
+	SetStatus(ctx context.Context, as Account, issue Ref, status common.Status) error
+	SetTitle(ctx context.Context, as Account, issue Ref, title string) error
+	SetLabels(ctx context.Context, as Account, issue Ref, labels []string) error
+
+	// How @mentions and #refs are written on this forge
+	Dialect() Dialect
+}
+```
+
+- `Ref` is a remote object: its id, URL, and for an issue the number people
+  type in references.
+- `Issue` holds the current title, description, status, labels and comment
+  texts, and the events the forge exposes (comment added or edited, status,
+  title, labels), each with its id, author and time. Events can be
+  partial: what a forge doesn't report is caught by reconciling.
+- A read-only forge (Launchpad) returns `ErrNotSupported` from the write
+  methods.
+- `EditText` targets either the issue's description or a comment. The
+  engine always edits a text with the account that posted it, as GitLab
+  only lets a note's author edit it.
+
+Checked against the forges:
+
+| | GitHub | GitLab | Gitea | Jira |
+|---|---|---|---|---|
+| create issue/comment returns an id | ✅ | ✅ | ✅ | ✅ |
+| timeline events with ids | ✅ | ✅ except comment edits | ✅ `/timeline` | ✅ changelog (made-up ids) |
+| set labels as a full set | ✅ | ✅ | ✅ | ✅ |
+| status | close/reopen | state event | state field | workflow transition, mapped in the adapter |
+| who can edit a comment | author or maintainers | author only | author or writers | per permissions |
+
+## The sync run
+
+`git bug bridge sync [--dry-run] [bridge...]`:
+
+1. Takes the repository's bridge lock, from the unmerged `bridge-lock`
+   commit (`0cae4552`): a lock file created exclusively, so a concurrent run
+   fails at once.
+2. Pulls every sync bridge: replay, then reconcile.
+3. Pushes every sync bridge, for every bug, three-way. What step 2 pulled
+   from one forge reaches the others in step 3, so one run propagates
+   everything. Each bug is committed as soon as it's done.
+4. Leaves git remotes alone. A CI job runs
+   `git bug pull && git bug bridge sync && git bug push`.
+
+A bridge takes part when `git-bug.bridge.<name>.sync` is `true`, which
+replaces `export-foreign`. Sync requires a working token for its
+`default-login`. Without the option, `bridge pull` and `bridge push` behave
+as before: only what a token owner can post, never issues from another
+forge.
+
+`--dry-run` reads every remote and prints what pull would record and push
+would send, and writes nothing, locally or remotely. It can't show that a
+change it would pull from one forge would then be pushed to another in the
+same run. What the first backfill would create, which is what it's for, is
+exact.
+
+## Errors
+
+- A bad token or configuration fails before anything is written.
+- An error on one bug or value is reported, and the run goes on with the
+  next one. A refused write (403) is reported for that value only.
+- Adapters report rate limits. The engine waits and retries.
+- Every issue and comment the engine creates carries an invisible marker,
+  `<!-- git-bug:<id> -->`. If a run dies between the forge accepting a write
+  and git-bug recording it, the next pull matches the remote item to its
+  git-bug item through the marker: it's neither created twice on the forge
+  nor imported back as a duplicate. The forge's dialect decides how the
+  marker is written, for forges that render HTML comments (Jira).
+- When both sides changed a value since the last sync, the later change
+  wins, and the run reports it.
+- Deletions on a forge are not propagated. The item stops syncing to that
+  forge, and the run warns.
 
 ## Still to design
 
-Adapter interface, the sync loop and command, rendering, identities and
-tokens, errors, migration of existing data and bridges, testing.
+Rendering, identities and tokens, migration of existing data and bridges,
+testing.

@@ -15,13 +15,13 @@ merged upstream.
 ## Design (sync.md), approved section by section
 
 - [x] Goal and decisions
-- [ ] Core concept: three-way sync per remote
-- [ ] Pull: replay the remote timeline, or reconcile current state
-- [ ] Adapter interface (checked against Gitea's API too)
-- [ ] Sync loop, `bridge sync` command, `--dry-run`, lock
+- [x] Core concept: three-way sync per remote
+- [x] Pull: replay the remote timeline, claim echoes, then reconcile
+- [x] Adapter interface (checked against Gitea's API too)
+- [x] Sync loop, `bridge sync` command, `--dry-run`, lock
 - [ ] Rendering: attribution, `@mentions`, `#refs`
 - [ ] Identities and tokens
-- [ ] Errors and conflicts
+- [x] Errors and conflicts
 - [ ] Migration: legacy metadata, existing bridges, `export-foreign`
 - [ ] Testing: fake forge and conformance suite
 
