@@ -38,6 +38,33 @@ Failed, as predicted, both local only:
 - [ ] The pull created a second identity for the GitLab token owner (the
       exporter tolerates it since `4ced8cd3`, the importer still creates it).
 
+## Real two-way run, 2026-10-14
+
+`guilbep/git-bug-sync-test` (GitHub, private) and
+`guilbert/git-bug-sync-test` (gitlab.epfl.ch, private, holding the 5 issues of
+the first trial), both bridges with `sync`, the branch's binary:
+
+1. `--dry-run`: would import the 5 GitLab issues, nothing else.
+2. Sync: pulled 5 issues, pushed them to GitHub with their comment and
+   close; mentions defused; posted as `guilbep` since the user's identity
+   holds both logins.
+3. Changes on each forge (`gh`, `glab`): an issue and a comment on GitHub,
+   a comment and a close on GitLab. Sync: each reached the other forge, no
+   echo imported.
+4. Sync again: nothing written, only the claims of the previous run's
+   echoes recorded. Once more: nothing at all.
+
+Both forges then show the same 6 issues, statuses and comment counts.
+
+Known limits it showed:
+
+- [ ] Text mirrored by another git-bug repository loses its attribution on
+      pull: the header is removed with the marker. Only the early
+      export-foreign header exists in the wild (scratch and EPFL projects).
+- [ ] The repository that pushed the 5 EPFL-ENAC/wiki issues to gitlab.epfl.ch
+      is the only one linking them to their GitHub originals: a new hub
+      would import both as different bugs.
+
 ## Design (sync.md), approved section by section
 
 - [x] Goal and decisions
@@ -67,7 +94,7 @@ Failed, as predicted, both local only:
 - [ ] GitHub adapter
 - [ ] Docs: third-party.md, feature-matrix.md
 - [ ] Gitea/Forgejo adapter
-- [ ] Two-way run against real forges (scratch projects)
+- [x] Two-way run against real forges (scratch projects), see below
 - [ ] Whole-branch review
 
 ## Known issues to cover
