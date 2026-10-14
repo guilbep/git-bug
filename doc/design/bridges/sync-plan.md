@@ -163,9 +163,10 @@ type User struct {
 	ID, Login, Name, Email, AvatarURL string
 }
 
+// The Remote keeps the tokens and picks one from the account's ID
+// (bridge/core/auth imports bridge/core, so no token type here).
 type Account struct {
 	User
-	Token *auth.Token
 }
 
 type Issue struct {
