@@ -12,6 +12,32 @@ merged upstream.
 - [x] GitLab `export-foreign` option, attribution header, fake GitLab API
       test (`f258207c`). To be folded into the engine.
 
+- [x] `@mentions` defused in mirrored text, restored on pull (`0da7c526`).
+
+## Real-world trial, 2026-10-14
+
+GitHub `EPFL-ENAC/wiki` (private, 5 issues, 1 comment, 1 closed, edit
+history) → gitlab.epfl.ch, with the branch's binary and `export-foreign`.
+Script: a scratch repository, `bridge pull gh`, `bridge push gl`, then
+`bridge pull gl` and `bridge push gl` again.
+
+- Scratch run: `guilbert/git-bug-sync-test` (project 42400, private, kept
+  for the engine's real-forge test).
+- Real run: `EPFL-ENAC/wiki` (project 41960), issues #2 to #6.
+
+Worked: attribution and source links for the three other authors; your own
+issues posted as you (your identity holds both logins); mentions defused
+(`@nico`, `@pierre`, `@Quentin`, `@nicdub`...), the one in inline code left
+alone; the closed issue closed; three GitHub body edits replayed as
+description updates; pull after push imported no issue, no comment edit,
+and no description edit; the second push sent nothing.
+
+Failed, as predicted, both local only:
+
+- [ ] The pushed close came back as a new status operation (echo).
+- [ ] The pull created a second identity for the GitLab token owner (the
+      exporter tolerates it since `4ced8cd3`, the importer still creates it).
+
 ## Design (sync.md), approved section by section
 
 - [x] Goal and decisions
