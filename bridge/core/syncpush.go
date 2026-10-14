@@ -1,0 +1,405 @@
+package core
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/git-bug/git-bug/cache"
+	"github.com/git-bug/git-bug/entities/bug"
+	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/entities/identity"
+	"github.com/git-bug/git-bug/entity"
+	"github.com/git-bug/git-bug/entity/dag"
+)
+
+// maxRetries is how many times a rate limited write is retried.
+const maxRetries = 3
+
+// Push sends to the forge what changed in git-bug since the forge last saw
+// it, bug by bug, oldest first.
+func (e *Engine) Push(ctx context.Context) <-chan ExportResult {
+	out := make(chan ExportResult)
+	go func() {
+		defer close(out)
+
+		var excerpts []*cache.BugExcerpt
+		for _, id := range e.repo.Bugs().AllIds() {
+			excerpt, err := e.repo.Bugs().ResolveExcerpt(id)
+			if err != nil {
+				out <- NewExportError(err, id)
+				continue
+			}
+			excerpts = append(excerpts, excerpt)
+		}
+		slices.SortFunc(excerpts, func(a, b *cache.BugExcerpt) int {
+			return cmp.Or(cmp.Compare(a.CreateUnixTime, b.CreateUnixTime),
+				cmp.Compare(a.CreateLamportTime, b.CreateLamportTime))
+		})
+		refs := newRefIndex(excerpts)
+
+		for _, excerpt := range excerpts {
+			if ctx.Err() != nil {
+				return
+			}
+			b, err := e.repo.Bugs().Resolve(excerpt.Id())
+			if err != nil {
+				out <- NewExportError(err, excerpt.Id())
+				continue
+			}
+			if err := e.pushBug(ctx, b, refs, out); err != nil {
+				out <- NewExportError(err, b.Id())
+			}
+		}
+	}()
+	return out
+}
+
+func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex, out chan<- ExportResult) error {
+	snap := b.Snapshot()
+	createOp := snap.Operations[0]
+	if _, gone := createOp.GetMetadata(e.key("gone")); gone {
+		return nil
+	}
+
+	issueID, onRemote := remoteIssueID(snap, e.remote)
+	if !e.opts.Foreign && !onRemote {
+		// without sync, a bug from a forge goes back to that forge only
+		if origin, ok := snap.GetCreateMetadata(MetaKeyOrigin); ok {
+			out <- NewExportNothing(b.Id(), fmt.Sprintf("issue tagged with origin: %s", origin))
+			return nil
+		}
+	}
+
+	var issue Ref
+	if onRemote {
+		issue = Ref{ID: issueID, URL: metadata(createOp, e.key("url")), Number: metadata(createOp, e.key("number"))}
+	} else {
+		var ok bool
+		var err error
+		issue, ok, err = e.createIssue(ctx, b, snap, refs, out)
+		if err != nil || !ok {
+			return err
+		}
+	}
+
+	err := e.pushChanges(ctx, b, issue, refs, out)
+	if errors.Is(err, ErrGone) {
+		out <- NewExportWarning(fmt.Errorf("issue deleted on the forge, not synced anymore"), b.Id())
+		if _, err := b.SetMetadata(createOp.Id(), map[string]string{e.key("gone"): "1"}); err != nil {
+			return err
+		}
+		return b.CommitAsNeeded()
+	}
+	if err != nil {
+		return err
+	}
+	if !b.NeedCommit() {
+		out <- NewExportNothing(b.Id(), "nothing has been exported")
+		return nil
+	}
+	return b.Commit()
+}
+
+// createIssue creates the forge issue of a bug, from its current title and
+// body.
+func (e *Engine) createIssue(ctx context.Context, b *cache.BugCache, snap *bug.Snapshot, refs *refIndex, out chan<- ExportResult) (Ref, bool, error) {
+	createOp := snap.Operations[0]
+	as, attributed, ok := e.accountFor(createOp.Author())
+	if !ok {
+		out <- NewExportNothing(b.Id(), "missing author token")
+		return Ref{}, false, nil
+	}
+
+	body := s(slotText, createOp.Id())
+	latest := lastSlotOp(snap, body)
+	text := e.render(snap, refs, b.Id(), createOp, latest, snap.Comments[0].Message, attributed)
+
+	var issue Ref
+	err := e.call(ctx, func() (err error) {
+		issue, err = e.remote.CreateIssue(ctx, as, snap.Title, text)
+		return err
+	})
+	if err != nil {
+		return Ref{}, false, err
+	}
+	refs.created(b.Id(), e.remote.Key(), issue)
+
+	records := map[entity.Id]map[string]string{
+		createOp.Id(): {
+			e.key("id"):     issue.ID,
+			e.key("number"): issue.Number,
+			e.key("url"):    issue.URL,
+			e.key("as"):     as.Login,
+			e.key("status"): common.OpenStatus.String(),
+			e.key("labels"): "",
+		},
+	}
+	addRecord(records, lastSlotOp(snap, s(slotTitle, "")).Id(), e.key("title"), snap.Title)
+	addRecord(records, latest.Id(), e.key("text"), Fingerprint(text))
+	if err := setRecords(b, records); err != nil {
+		return Ref{}, false, err
+	}
+	// a crash from now on must not create the issue again
+	if err := b.Commit(); err != nil {
+		return Ref{}, false, err
+	}
+	out <- NewExportBug(b.Id())
+	return issue, true, nil
+}
+
+// pushChanges sends what differs from what the forge last saw, for a bug on
+// the forge.
+func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, refs *refIndex, out chan<- ExportResult) error {
+	snap := b.Snapshot()
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// comments the forge doesn't have
+	for _, op := range snap.Operations {
+		addComment, ok := op.(*bug.AddCommentOperation)
+		if !ok {
+			continue
+		}
+		if _, onRemote := opOnRemote(op, snap, e.remote); onRemote {
+			continue
+		}
+		as, attributed, ok := e.accountFor(op.Author())
+		if !ok {
+			continue
+		}
+		comment, err := snap.SearchCommentByOpId(op.Id())
+		if err != nil {
+			return err
+		}
+		latest := lastSlotOp(snap, s(slotText, op.Id()))
+		text := e.render(snap, refs, addComment.Id(), op, latest, comment.Message, attributed)
+		var ref Ref
+		err = e.call(ctx, func() (err error) {
+			ref, err = e.remote.AddComment(ctx, as, issue, text)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		records := map[entity.Id]map[string]string{op.Id(): {
+			e.key("id"):  ref.ID,
+			e.key("url"): ref.URL,
+			e.key("as"):  as.Login,
+		}}
+		addRecord(records, latest.Id(), e.key("text"), Fingerprint(text))
+		if err := setRecords(b, records); err != nil {
+			return err
+		}
+		// a crash from now on must not post the comment again
+		if err := b.Commit(); err != nil {
+			return err
+		}
+		out <- NewExportComment(b.Id())
+	}
+
+	// title, status and labels that differ from what the forge last saw
+	snap = b.Snapshot()
+	for _, sc := range []struct {
+		kind  slotKind
+		local string
+		write func(Account) error
+		event func(entity.Id) ExportResult
+	}{
+		{slotTitle, snap.Title, func(as Account) error {
+			return e.remote.SetTitle(ctx, as, issue, snap.Title)
+		}, NewExportTitleEdition},
+		{slotStatus, snap.Status.String(), func(as Account) error {
+			return e.remote.SetStatus(ctx, as, issue, snap.Status)
+		}, NewExportStatusChange},
+		{slotLabels, labelsValue(labelStrings(snap.Labels)), func(as Account) error {
+			return e.remote.SetLabels(ctx, as, issue, labelStrings(snap.Labels))
+		}, NewExportLabelChange},
+	} {
+		baseValue, _, ok := base(snap, e.remote, s(sc.kind, ""))
+		if ok && baseValue == sc.local {
+			continue
+		}
+		local := lastSlotOp(snap, s(sc.kind, ""))
+		as, _, ok := e.accountFor(local.Author())
+		if !ok {
+			continue
+		}
+		if err := e.call(ctx, func() error { return sc.write(as) }); err != nil {
+			return err
+		}
+		_, err := b.SetMetadata(local.Id(), map[string]string{
+			e.key("pushed"):        now,
+			e.key(string(sc.kind)): sc.local,
+		})
+		if err != nil {
+			return err
+		}
+		out <- sc.event(b.Id())
+	}
+	return nil
+}
+
+// accountFor returns the account to act as the author: theirs, or with sync
+// the default one, on their behalf.
+func (e *Engine) accountFor(author identity.Interface) (as Account, onBehalf bool, ok bool) {
+	if a, ok := e.accounts[author.Id()]; ok {
+		return a, false, true
+	}
+	if e.opts.Foreign && e.defaultAccount != nil {
+		return *e.defaultAccount, true, true
+	}
+	return Account{}, false, false
+}
+
+// render writes the text of owner (a create or add-comment operation), whose
+// current version comes from latest, for this remote. markerID is the git-bug
+// id of the bug or comment.
+func (e *Engine) render(snap *bug.Snapshot, refs *refIndex, markerID entity.Id, owner, latest dag.Operation, message string, onBehalf bool) string {
+	var attr *Attribution
+	if onBehalf {
+		name := owner.Author().Name()
+		if name == "" {
+			name = owner.Author().Login()
+		}
+		attr = &Attribution{Name: name, When: owner.Time()}
+		if src, url, ok := sourceOf(owner); ok {
+			attr.Source = displayKind(remoteInfoFor(src).kind)
+			attr.URL = url
+		}
+	}
+
+	src, _, ok := sourceOf(latest)
+	if !ok || src == e.remote.Key() {
+		return Render(message, markerID, attr, nil, nil)
+	}
+	dialect := remoteInfoFor(src).dialect
+	return Render(message, markerID, attr, &dialect, func(n string) string {
+		return refs.translate(src, n, e.remote)
+	})
+}
+
+// call runs a write, waiting and retrying when the forge rate limits.
+func (e *Engine) call(ctx context.Context, write func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := write()
+		var limited ErrRateLimited
+		if !errors.As(err, &limited) || attempt == maxRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Until(limited.Until)):
+		}
+	}
+}
+
+// refIndex finds bugs by their issue number on remotes, to translate
+// references from one forge to another.
+type refIndex struct {
+	byNumber map[string]map[string]entity.Id // remote key → number → bug
+	numbers  map[entity.Id]map[string]string // bug → remote key → number
+	urls     map[string]string               // remote key → an issue URL there
+}
+
+func newRefIndex(excerpts []*cache.BugExcerpt) *refIndex {
+	idx := &refIndex{
+		byNumber: map[string]map[string]entity.Id{},
+		numbers:  map[entity.Id]map[string]string{},
+		urls:     map[string]string{},
+	}
+	for _, excerpt := range excerpts {
+		for k, number := range excerpt.CreateMetadata {
+			key, ok := remoteKeyOf(k, "number")
+			if !ok {
+				continue
+			}
+			idx.add(excerpt.Id(), key, Ref{Number: number, URL: excerpt.CreateMetadata[syncKey(key, "url")]})
+		}
+	}
+	return idx
+}
+
+func (idx *refIndex) add(bugId entity.Id, key string, issue Ref) {
+	if idx.byNumber[key] == nil {
+		idx.byNumber[key] = map[string]entity.Id{}
+	}
+	idx.byNumber[key][issue.Number] = bugId
+	if idx.numbers[bugId] == nil {
+		idx.numbers[bugId] = map[string]string{}
+	}
+	idx.numbers[bugId][key] = issue.Number
+	if issue.URL != "" {
+		idx.urls[key] = issue.URL
+	}
+}
+
+// created records an issue created during this push.
+func (idx *refIndex) created(bugId entity.Id, key string, issue Ref) {
+	idx.add(bugId, key, issue)
+}
+
+var trailingNumber = regexp.MustCompile(`\d+$`)
+
+// translate rewrites a reference to issue number n of remote src for remote
+// to: to its number there, or else a link to it on src.
+func (idx *refIndex) translate(src, n string, to Remote) string {
+	if bugId, ok := idx.byNumber[src][n]; ok {
+		if number, ok := idx.numbers[bugId][to.Key()]; ok {
+			return to.Dialect().FormatRef(number)
+		}
+	}
+	if url, ok := idx.urls[src]; ok && trailingNumber.MatchString(url) {
+		return fmt.Sprintf("[#%s](%s)", n, trailingNumber.ReplaceAllString(url, n))
+	}
+	// not a link to the wrong issue, at least
+	return "`#" + n + "`"
+}
+
+// remoteKeyOf returns the remote key of a "sync:<key>:<name>" metadata key.
+func remoteKeyOf(metaKey, name string) (string, bool) {
+	const prefix = "sync:"
+	suffix := ":" + name
+	if len(metaKey) <= len(prefix)+len(suffix) || metaKey[:len(prefix)] != prefix || metaKey[len(metaKey)-len(suffix):] != suffix {
+		return "", false
+	}
+	return metaKey[len(prefix) : len(metaKey)-len(suffix)], true
+}
+
+func s(kind slotKind, target entity.Id) slot {
+	return slot{kind: kind, target: target}
+}
+
+func metadata(op dag.Operation, key string) string {
+	v, _ := op.GetMetadata(key)
+	return v
+}
+
+func addRecord(records map[entity.Id]map[string]string, target entity.Id, k, v string) {
+	if records[target] == nil {
+		records[target] = map[string]string{}
+	}
+	records[target][k] = v
+}
+
+func setRecords(b *cache.BugCache, records map[entity.Id]map[string]string) error {
+	for target, meta := range records {
+		if _, err := b.SetMetadata(target, meta); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func labelStrings(labels []common.Label) []string {
+	res := make([]string, len(labels))
+	for i, l := range labels {
+		res[i] = l.String()
+	}
+	return res
+}

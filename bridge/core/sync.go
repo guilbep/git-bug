@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
+	"sync"
 
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/bug"
@@ -39,6 +42,7 @@ type Engine struct {
 }
 
 func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOptions) (*Engine, error) {
+	registerRemote(r)
 	accounts, err := loadAccounts(ctx, repo, r, opts.LoginKey)
 	if err != nil {
 		return nil, err
@@ -83,4 +87,71 @@ func opByID(snap *bug.Snapshot, id entity.Id) dag.Operation {
 		}
 	}
 	return nil
+}
+
+// Engines register the remotes they sync, so that text pulled from one is
+// rendered for another with the right dialect.
+var (
+	remotesMu sync.Mutex
+	remotes   = map[string]remoteInfo{}
+)
+
+type remoteInfo struct {
+	kind    string
+	dialect Dialect
+}
+
+// defaultDialect is how GitHub, GitLab and Gitea refer to an issue of the
+// same project, used for remotes not registered.
+var defaultDialect = Dialect{
+	Ref:       regexp.MustCompile(`(?:^|[^\w/#])(#(\d+))\b`),
+	FormatRef: func(n string) string { return "#" + n },
+}
+
+func registerRemote(r Remote) {
+	remotesMu.Lock()
+	defer remotesMu.Unlock()
+	remotes[r.Key()] = remoteInfo{kind: r.Kind(), dialect: r.Dialect()}
+}
+
+func remoteInfoFor(key string) remoteInfo {
+	remotesMu.Lock()
+	defer remotesMu.Unlock()
+	if info, ok := remotes[key]; ok {
+		return info
+	}
+	// pulled by a pre-sync bridge: "legacy:github"
+	return remoteInfo{kind: strings.TrimPrefix(key, "legacy:"), dialect: defaultDialect}
+}
+
+// displayKind names a kind of forge as people do.
+func displayKind(kind string) string {
+	switch kind {
+	case "github":
+		return "GitHub"
+	case "gitlab":
+		return "GitLab"
+	case "gitea":
+		return "Gitea"
+	}
+	return kind
+}
+
+// sourceOf returns the key of the remote an operation was pulled from, and
+// its URL there, if any.
+func sourceOf(op dag.Operation) (key string, url string, ok bool) {
+	own := ownMetadata(op)
+	for k := range own {
+		if strings.HasPrefix(k, "sync:") && strings.HasSuffix(k, ":id") {
+			key = strings.TrimSuffix(strings.TrimPrefix(k, "sync:"), ":id")
+			return key, own[syncKey(key, "url")], true
+		}
+	}
+	// pulled by a pre-sync bridge
+	for _, kind := range []string{"github", "gitlab"} {
+		if _, ok := own[kind+"-id"]; ok {
+			return "legacy:" + kind, own[kind+"-url"], true
+		}
+	}
+	return "", "", false
 }

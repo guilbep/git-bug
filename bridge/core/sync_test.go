@@ -341,3 +341,131 @@ func TestPullMergesLabels(t *testing.T) {
 	pull(t, repo, f)
 	require.Equal(t, []common.Label{"b"}, onlyBug(t, repo).Snapshot().Labels)
 }
+
+func push(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, foreign bool) []core.ExportResult {
+	var res []core.ExportResult
+	for r := range engine(t, repo, f, foreign).Push(context.Background()) {
+		if r.Event == core.ExportEventError {
+			require.NoError(t, r.Err, r.String())
+		}
+		res = append(res, r)
+	}
+	return res
+}
+
+// botIdentity is the identity of the bot account's owner, as `bridge new` tags it.
+func botIdentity(t *testing.T, repo *cache.RepoCache) *cache.IdentityCache {
+	i, err := repo.Identities().NewRaw("Bot", "", "bot", "", nil, map[string]string{"fake-login": "bot"})
+	require.NoError(t, err)
+	return i
+}
+
+func TestPushNewBug(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	botId := botIdentity(t, repo)
+
+	b, _, err := repo.Bugs().NewRaw(me, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC).Unix(), "title", "body @bob #1", nil, nil)
+	require.NoError(t, err)
+	_, _, err = b.AddCommentRaw(me, time.Now().Unix(), "mine", nil, nil)
+	require.NoError(t, err)
+	_, _, err = b.AddCommentRaw(botId, time.Now().Unix(), "the bot's", nil, nil)
+	require.NoError(t, err)
+	_, err = b.CloseRaw(me, time.Now().Unix(), nil)
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabelsRaw(me, time.Now().Unix(), []string{"bug"}, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	push(t, repo, f, true)
+
+	issue := f.Issue("1")
+	require.NotNil(t, issue)
+	require.Equal(t, 5, f.Writes(), "issue, 2 comments, status, labels")
+	require.Equal(t, "title", issue.Title)
+	require.Equal(t, common.ClosedStatus, issue.Status)
+	require.Equal(t, []string{"bug"}, issue.Labels)
+	require.Equal(t, "bot", issue.Author.Login)
+
+	// written in git-bug, by someone without an account: attributed, left as is
+	require.Contains(t, issue.Body, "*Posted by Me on 2026-01-02 via git-bug*")
+	require.Contains(t, issue.Body, "body @bob #1")
+	require.Equal(t, "body @bob #1", core.Unrender(issue.Body))
+	require.Contains(t, issue.Comments[0].Body, "*Posted by Me on")
+	// the bot's own comment: not attributed
+	require.NotContains(t, issue.Comments[1].Body, "Posted by")
+	require.Equal(t, "the bot's", core.Unrender(issue.Comments[1].Body))
+
+	// a second push writes nothing
+	push(t, repo, f, true)
+	require.Equal(t, 5, f.Writes())
+
+	// and a pull brings nothing back
+	pull(t, repo, f)
+	snap := onlyBug(t, repo).Snapshot()
+	require.Equal(t, 1, countOps[*bug.SetStatusOperation](snap))
+	require.Equal(t, 1, countOps[*bug.LabelChangeOperation](snap))
+	require.Equal(t, 1, countOps[*bug.CreateOperation](snap))
+	require.Len(t, snap.Comments, 3)
+	require.Len(t, repo.Bugs().AllIds(), 1)
+}
+
+func TestPushWithoutSync(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	botId := botIdentity(t, repo)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+
+	// from another forge: never pushed without sync
+	_, _, err = repo.Bugs().NewRaw(botId, time.Now().Unix(), "foreign", "body", nil, map[string]string{core.MetaKeyOrigin: "other"})
+	require.NoError(t, err)
+	// by someone without an account: nothing to post as
+	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix(), "not mine", "body", nil, nil)
+	require.NoError(t, err)
+	// by the bot, with a comment from someone without an account
+	b, _, err := repo.Bugs().NewRaw(botId, time.Now().Unix(), "mine", "body", nil, nil)
+	require.NoError(t, err)
+	_, _, err = b.AddCommentRaw(me, time.Now().Unix(), "skipped", nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	push(t, repo, f, false)
+
+	require.Equal(t, 1, f.Writes())
+	require.Equal(t, "mine", f.Issue("1").Title)
+	require.Empty(t, f.Issue("1").Comments)
+}
+
+func TestPushTranslatesRefs(t *testing.T) {
+	repo := newRepo(t)
+	src := synctest.NewFake("src.test/1", "src.test", synctest.Quirks{}, bot)
+	dst := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	alice := src.UserAct("alice")
+	alice.CreateIssue("first", "first issue")
+	alice.CreateIssue("second", "see #1 and #7, cc @carol")
+
+	// pulled from src, pushed to dst
+	var res []core.ImportResult
+	for r := range engine(t, repo, src, true).Pull(context.Background(), time.Time{}) {
+		res = append(res, r)
+	}
+	push(t, repo, dst, true)
+
+	var second *core.Issue
+	for _, n := range []string{"1", "2"} {
+		if i := dst.Issue(n); i.Title == "second" {
+			second = i
+		}
+	}
+	require.NotNil(t, second)
+	first := "1"
+	if dst.Issue("1").Title == "second" {
+		first = "2"
+	}
+	require.Contains(t, second.Body, "see #"+first+" and [#7](https://src.test/issues/7), cc `@carol`")
+	require.Contains(t, second.Body, "*Originally posted by alice on")
+	require.Contains(t, second.Body, "[view on fake](https://src.test/issues/2)")
+}
