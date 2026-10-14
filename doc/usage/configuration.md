@@ -119,6 +119,7 @@ Every bridge has:
 |----------------------------------------|-----------|------------------------------------------------------------------------|
 | `git-bug.bridge.<name>.target`         | string    | The bridge: `gitea`, `github`, `gitlab`, `jira` or `launchpad`.        |
 | `git-bug.bridge.<name>.lastImportTime` | timestamp | Bookkeeping for incremental imports. Written by `git bug bridge pull`. |
+| `git-bug.bridge.<name>.lastSyncTime`   | timestamp | Bookkeeping for incremental syncs. Written by `git bug bridge sync`.   |
 | `git-bug.bridge.<name>.sync`           | bool      | Set by hand, for Gitea, GitHub and GitLab. See [Syncing](#syncing).    |
 | `git-bug.bridge.<name>.login-<id>`     | string    | Set by hand: the login of identity `<id>` on the forge. See [Syncing](#syncing). |
 

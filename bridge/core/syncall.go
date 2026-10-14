@@ -82,12 +82,12 @@ func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun 
 			// a bit before, just to be sure
 			start := time.Now().Add(-5 * time.Second)
 			ok := true
-			for r := range engines[i].Pull(ctx, b.lastImportTime()) {
+			for r := range engines[i].Pull(ctx, b.configTime(configKeyLastSyncTime)) {
 				ok = ok && r.Event != ImportEventError
 				out <- SyncResult{Bridge: b.Name, Import: &r}
 			}
 			if ok && !dryRun {
-				_ = b.storeImportTime(start)
+				_ = b.storeConfigTime(configKeyLastSyncTime, start)
 			}
 		}
 		for i, b := range bridges {

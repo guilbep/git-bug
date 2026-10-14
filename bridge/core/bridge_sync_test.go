@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -189,4 +190,20 @@ func TestSyncLinkErrors(t *testing.T) {
 			require.ErrorContains(t, err, "login-")
 		})
 	}
+}
+
+// An older bridge may have imported part of a project before sync was
+// enabled: the first sync pulls everything, whatever it recorded.
+func TestSyncAllIgnoresOldImportTime(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	a.UserAct("alice").CreateIssue("never imported", "body")
+	require.NoError(t, core.SetBridgeConfig(repo, "a", "lastImportTime", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)))
+
+	results, err := core.SyncAll(context.Background(), repo, []string{"a"}, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+	require.Equal(t, "never imported", onlyBug(t, repo).Snapshot().Title)
 }

@@ -112,6 +112,11 @@ spec stays the authority.
 
 ## The command and the bridges
 
+- **`bridge sync` records its own `lastSyncTime`**, apart from
+  `lastImportTime`: an older bridge may have imported part of a project
+  (co2-calculator: 228 of about 811 issues), and its time would skip the
+  rest. The first sync of a bridge reads every issue. *If wrong:* one full
+  read per bridge.
 - **`SyncAll` lives in core and holds the bridge lock for the whole run**, so
   no other git-bug process runs between the pull and the push phases.
 - **A dry run creates nothing**, identities included. It counts new issues and

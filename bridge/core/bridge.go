@@ -41,6 +41,9 @@ const (
 	bridgeConfigSubsectionPrefix = "bridge."
 
 	configKeyLastImportTime = "lastImportTime"
+	// configKeyLastSyncTime is apart from the import time, as an older bridge
+	// may have imported only part of a project.
+	configKeyLastSyncTime = "lastSyncTime"
 
 	// bridgeLockFile is locked while a bridge imports or exports, so that only
 	// one runs at a time in a repository: concurrent runs would import or export
@@ -468,11 +471,15 @@ func (b *Bridge) IsSync() bool {
 }
 
 func (b *Bridge) lastImportTime() time.Time {
+	return b.configTime(configKeyLastImportTime)
+}
+
+func (b *Bridge) configTime(key string) time.Time {
 	cfg, err := b.repo.Config().Read()
 	if err != nil {
 		return time.Time{}
 	}
-	lastImport, err := cfg.Int(bridgeConfigKey(b.Name, configKeyLastImportTime), 0)
+	lastImport, err := cfg.Int(bridgeConfigKey(b.Name, key), 0)
 	if err != nil || lastImport == 0 {
 		return time.Time{}
 	}
@@ -480,7 +487,11 @@ func (b *Bridge) lastImportTime() time.Time {
 }
 
 func (b *Bridge) storeImportTime(t time.Time) error {
-	return SetBridgeConfig(b.repo, b.Name, configKeyLastImportTime, strconv.FormatInt(t.Unix(), 10))
+	return b.storeConfigTime(configKeyLastImportTime, t)
+}
+
+func (b *Bridge) storeConfigTime(key string, t time.Time) error {
+	return SetBridgeConfig(b.repo, b.Name, key, strconv.FormatInt(t.Unix(), 10))
 }
 
 // SetBridgeConfig sets a configuration key of a bridge.
