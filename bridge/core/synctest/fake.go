@@ -27,6 +27,9 @@ type Forge interface {
 	Issue(number string) *core.Issue
 	// Writes counts the writes received through the Remote interface.
 	Writes() int
+	// FailNextWrite makes the next write through the Remote interface happen,
+	// then report an error, like a connection lost after the forge did it.
+	FailNextWrite()
 }
 
 // Actor is someone acting directly on the forge. Failures panic.
@@ -203,6 +206,12 @@ func (f *Fake) Writes() int {
 	return f.writes
 }
 
+func (f *Fake) FailNextWrite() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quirks.FailAfterWrite = true
+}
+
 // write runs an engine write with the quirks that apply to it.
 func (f *Fake) write(fn func() error) error {
 	f.mu.Lock()
@@ -308,7 +317,7 @@ func (f *Fake) editText(u core.User, ref, target core.Ref, body string) error {
 			return core.ErrGone
 		}
 		if f.quirks.AuthorOnlyEdits && issue.Comments[i].Author.ID != u.ID {
-			return errors.New("403 forbidden: only the author can edit a comment")
+			return fmt.Errorf("403 forbidden, only the author can edit a comment: %w", core.ErrRefused)
 		}
 		issue.Comments[i].Body = body
 		issue.Comments[i].Updated = f.now()

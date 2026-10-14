@@ -605,21 +605,14 @@ func TestPushDeletedIssue(t *testing.T) {
 
 func TestPushErrorOnOneBugOnly(t *testing.T) {
 	repo := newRepo(t)
-	f := synctest.NewFake(key, "fake.test", synctest.Quirks{AuthorOnlyEdits: true}, bot)
-	alice := f.UserAct("alice")
-	issue := alice.CreateIssue("alice's", "body")
-	alice.Comment(issue, "alice's comment")
-	pull(t, repo, f)
-
-	// an edit of alice's comment the forge refuses
-	b := onlyBug(t, repo)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
 	me, err := repo.GetUserIdentity()
 	require.NoError(t, err)
-	_, err = b.EditCommentRaw(me, time.Now().Unix(), b.Snapshot().Comments[1].CombinedId(), "edited", nil)
+	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix(), "first", "body", nil, nil)
 	require.NoError(t, err)
-	require.NoError(t, b.Commit())
-	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix()+1, "other", "body", nil, nil)
+	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix()+1, "second", "body", nil, nil)
 	require.NoError(t, err)
+	f.FailNextWrite()
 
 	var errs int
 	for r := range engine(t, repo, f, true).Push(context.Background()) {
@@ -628,5 +621,35 @@ func TestPushErrorOnOneBugOnly(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, errs)
-	require.Equal(t, "other", f.Issue("2").Title, "the other bug is still pushed")
+	require.Equal(t, "second", f.Issue("2").Title, "the other bug is still pushed")
+}
+
+func TestPushRefusedEditWarnsOnce(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{AuthorOnlyEdits: true}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("alice's", "body")
+	alice.Comment(issue, "alice's comment")
+	pull(t, repo, f)
+
+	// an edit of alice's comment, which only alice can edit on the forge
+	b := onlyBug(t, repo)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, err = b.EditCommentRaw(me, time.Now().Unix(), b.Snapshot().Comments[1].CombinedId(), "edited", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	countWarnings := func(results []core.ExportResult) int {
+		n := 0
+		for _, r := range results {
+			if r.Event == core.ExportEventWarning {
+				n++
+			}
+		}
+		return n
+	}
+	require.Equal(t, 1, countWarnings(push(t, repo, f, true)))
+	require.Zero(t, countWarnings(push(t, repo, f, true)), "not tried again")
+	require.Equal(t, "alice's comment", f.Issue("1").Comments[0].Body)
 }

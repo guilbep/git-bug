@@ -231,6 +231,9 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		if ok && latest.Id() == baseOp.Id() {
 			continue
 		}
+		if _, refused := latest.GetMetadata(e.key("refused")); refused {
+			continue
+		}
 		// edited with the account that posted it: forges like GitLab only let
 		// a comment's author edit it
 		as, ok := e.accountByLogin(metadata(owner, e.key("as")))
@@ -248,6 +251,12 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		}
 		text := e.render(snap, refs, markerID, owner, latest, comment.Message, onBehalf)
 		err = e.call(ctx, func() error { return e.remote.EditText(ctx, as, issue, target, text) })
+		if errors.Is(err, ErrRefused) {
+			if err := e.refused(b, latest.Id(), err, out); err != nil {
+				return err
+			}
+			continue
+		}
 		if errors.Is(err, ErrGone) && target.ID != issue.ID {
 			out <- NewExportWarning(fmt.Errorf("comment deleted on the forge, not synced anymore"), b.Id())
 			if _, err := b.SetMetadata(owner.Id(), map[string]string{e.key("gone"): "1"}); err != nil {
@@ -291,14 +300,24 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			continue
 		}
 		local := lastSlotOp(snap, s(sc.kind, ""))
+		if _, refused := local.GetMetadata(e.key("refused")); refused {
+			continue
+		}
 		as, _, ok := e.accountFor(local.Author())
 		if !ok {
 			continue
 		}
-		if err := e.call(ctx, func() error { return sc.write(as) }); err != nil {
+		err := e.call(ctx, func() error { return sc.write(as) })
+		if errors.Is(err, ErrRefused) {
+			if err := e.refused(b, local.Id(), err, out); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
 			return err
 		}
-		_, err := b.SetMetadata(local.Id(), map[string]string{
+		_, err = b.SetMetadata(local.Id(), map[string]string{
 			e.key("pushed"):        now,
 			e.key(string(sc.kind)): sc.local,
 		})
@@ -320,6 +339,14 @@ func (e *Engine) accountFor(author identity.Interface) (as Account, onBehalf boo
 		return *e.defaultAccount, true, true
 	}
 	return Account{}, false, false
+}
+
+// refused records that the forge refused a value, warns, and doesn't try it
+// again: a later change of the value will be tried.
+func (e *Engine) refused(b *cache.BugCache, opId entity.Id, err error, out chan<- ExportResult) error {
+	out <- NewExportWarning(err, b.Id())
+	_, err = b.SetMetadata(opId, map[string]string{e.key("refused"): "1"})
+	return err
 }
 
 func (e *Engine) accountByLogin(login string) (Account, bool) {

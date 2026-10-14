@@ -190,6 +190,10 @@ func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, out chan<- ImportResult
 	if err != nil || claimed {
 		return err
 	}
+	skip, err := e.replayConflict(b, snap, ev, out)
+	if err != nil || skip {
+		return err
+	}
 
 	author, err := identityFor(e.repo, e.remote, ev.Author, "")
 	if err != nil {
@@ -264,6 +268,64 @@ func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, out chan<- ImportResult
 		return fmt.Errorf("unknown event kind %d", ev.Kind)
 	}
 	return nil
+}
+
+// replayConflict handles an event changing a value that also changed in
+// git-bug since the forge last saw it: the later change wins, as when
+// reconciling. It tells whether to skip replaying the event.
+func (e *Engine) replayConflict(b *cache.BugCache, snap *bug.Snapshot, ev *Event, out chan<- ImportResult) (bool, error) {
+	var s slot
+	var local, value string
+	switch ev.Kind {
+	case EventStatus:
+		s, local, value = slot{kind: slotStatus}, snap.Status.String(), ev.Status.String()
+	case EventTitle:
+		s, local, value = slot{kind: slotTitle}, snap.Title, cleanTitle(ev.Title)
+	case EventTextEdit:
+		target := snap.Operations[0]
+		if ev.Target != "" {
+			if target = e.findOp(snap, ev.Target); target == nil {
+				return false, nil
+			}
+		}
+		comment, err := snap.SearchCommentByOpId(target.Id())
+		if err != nil {
+			return false, err
+		}
+		s, local, value = slot{kind: slotText, target: target.Id()}, comment.Message, Unrender(text.Cleanup(ev.Text))
+	default:
+		// labels merge
+		return false, nil
+	}
+
+	baseValue, baseOp, ok := base(snap, e.remote, s)
+	localOp := lastSlotOp(snap, s)
+	changed := local != baseValue
+	if s.kind == slotText {
+		changed = localOp.Id() != baseOp.Id()
+	}
+	if !ok || !changed {
+		return false, nil
+	}
+
+	seen := map[string]string{e.key("also:" + ev.ID): "replayed"}
+	if local == value {
+		// converged
+		recorded := value
+		if s.kind == slotText {
+			recorded = Fingerprint(ev.Text)
+		}
+		seen[e.key(string(s.kind))] = recorded
+		_, err := b.SetMetadata(localOp.Id(), seen)
+		return true, err
+	}
+	if ev.Time.After(localOp.Time()) {
+		out <- NewImportWarning(fmt.Errorf("%s changed on both sides, kept the forge's change", s.kind), b.Id())
+		return false, nil
+	}
+	out <- NewImportWarning(fmt.Errorf("%s changed on both sides, kept git-bug's change", s.kind), b.Id())
+	_, err := b.SetMetadata(localOp.Id(), seen)
+	return true, err
 }
 
 // claimWindow is how much earlier than a push its echo may be dated, as

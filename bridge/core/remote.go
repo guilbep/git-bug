@@ -18,6 +18,10 @@ var ErrNotSupported = errors.New("not supported by this forge")
 // ErrGone is returned when the issue or comment no longer exists on the forge.
 var ErrGone = errors.New("deleted on the forge")
 
+// ErrRefused is returned when the forge refuses a write for good, like the
+// edit of someone else's comment on GitLab.
+var ErrRefused = errors.New("refused by the forge")
+
 // ErrRateLimited is returned by a Remote when the forge asks to slow down.
 type ErrRateLimited struct {
 	Until time.Time
