@@ -107,8 +107,10 @@ type Issue struct {
 	Title         string
 	OriginalBody  string
 	Body          string
-	// BodyEditor is who last edited the body, when the forge tells.
-	BodyEditor *User
+	// BodyEditor is who last edited the body, and BodyUpdated when, for
+	// forges that tell without an edit event.
+	BodyEditor  *User
+	BodyUpdated time.Time
 	Status     common.Status
 	Labels     []string
 	Comments   []Comment

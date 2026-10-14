@@ -70,8 +70,9 @@ func (e *Engine) key(name string) string {
 // or that claimed the event.
 func (e *Engine) findOp(snap *bug.Snapshot, remoteID string) dag.Operation {
 	also := e.key("also:" + remoteID)
+	createMeta := snap.Operations[0].AllMetadata()
 	for _, op := range snap.Operations {
-		if id, ok := opOnRemote(op, snap, e.remote); ok && id == remoteID {
+		if id, ok := onRemote(op, createMeta, e.remote); ok && id == remoteID {
 			return op
 		}
 		if _, ok := op.GetMetadata(also); ok {

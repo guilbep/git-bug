@@ -496,3 +496,43 @@ func TestGitlabLegacyMetadata(t *testing.T) {
 	require.Len(t, got.Snapshot().Operations, ops, "nothing new")
 	require.Zero(t, g.Writes(), "nothing pushed")
 }
+
+// Review C1, GitLab: a description edit leaves no event with its text, only
+// a system note; its time, not the issue's last update, decides a conflict.
+func TestGitlabBodyConflictIgnoresUnrelatedActivity(t *testing.T) {
+	g := newGitlabForge(t)
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+	pull := func() {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{DefaultLogin: "bot", LoginKey: metaKeyGitlabLogin})
+		require.NoError(t, err)
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+		}
+	}
+	pull()
+
+	// edited on GitLab, then in git-bug, then something unrelated on GitLab
+	alice.EditText(ref, ref, "forge body")
+	time.Sleep(1100 * time.Millisecond)
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.EditCreateCommentRaw(me, time.Now().Unix(), "local body", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	time.Sleep(1100 * time.Millisecond)
+	g.UserAct("bob").Comment(ref, "unrelated")
+
+	pull()
+	b, err = backend.Bugs().Resolve(b.Id())
+	require.NoError(t, err)
+	require.Equal(t, "local body", b.Snapshot().Comments[0].Message)
+}

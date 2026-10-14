@@ -13,6 +13,7 @@ import (
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/bug"
 	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/entities/identity"
 	"github.com/git-bug/git-bug/entity"
 	"github.com/git-bug/git-bug/repository/repotest"
 )
@@ -667,4 +668,93 @@ func TestPullSkipsDuplicateByMarker(t *testing.T) {
 
 	require.Equal(t, 1, warnings(pull(t, repo, f)))
 	require.Len(t, repo.Bugs().AllIds(), 1)
+}
+
+// Review C1: when a value changed on both sides, the later change wins, even
+// if the forge's issue was updated again later for something else.
+func TestPullConflictIgnoresUnrelatedActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		forge func(alice synctest.Actor, issue core.Ref)
+		local func(b *cache.BugCache, me identity.Interface, at int64) error
+		got   func(snap *bug.Snapshot) string
+		want  string
+	}{
+		{
+			name:  "title",
+			forge: func(alice synctest.Actor, issue core.Ref) { alice.SetTitle(issue, "forge title") },
+			local: func(b *cache.BugCache, me identity.Interface, at int64) error {
+				_, err := b.SetTitleRaw(me, at, "local title", nil)
+				return err
+			},
+			got:  func(snap *bug.Snapshot) string { return snap.Title },
+			want: "local title",
+		},
+		{
+			name:  "body",
+			forge: func(alice synctest.Actor, issue core.Ref) { alice.EditText(issue, issue, "forge body") },
+			local: func(b *cache.BugCache, me identity.Interface, at int64) error {
+				_, _, err := b.EditCreateCommentRaw(me, at, "local body", nil)
+				return err
+			},
+			got:  func(snap *bug.Snapshot) string { return snap.Comments[0].Message },
+			want: "local body",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newRepo(t)
+			f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+			t0 := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+			f.Clock = func() time.Time { return t0 }
+			alice := f.UserAct("alice")
+			issue := alice.CreateIssue("title", "body")
+			pull(t, repo, f)
+
+			// changed on the forge at t0+1h, in git-bug at t0+2h
+			f.Clock = func() time.Time { return t0.Add(time.Hour) }
+			tc.forge(alice, issue)
+			b := onlyBug(t, repo)
+			me, err := repo.GetUserIdentity()
+			require.NoError(t, err)
+			require.NoError(t, tc.local(b, me, t0.Add(2*time.Hour).Unix()))
+			require.NoError(t, b.Commit())
+			// then something unrelated on the forge, at t0+3h
+			f.Clock = func() time.Time { return t0.Add(3 * time.Hour) }
+			f.UserAct("bob").Comment(issue, "unrelated")
+
+			results := pull(t, repo, f)
+			require.Equal(t, tc.want, tc.got(onlyBug(t, repo).Snapshot()))
+			require.Equal(t, 1, warnings(results), "one conflict, reported once")
+		})
+	}
+}
+
+// Review C2: without sync, nothing someone without an account wrote reaches
+// the forge, not even through the text of someone who has one.
+func TestPushWithoutSyncKeepsOthersText(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	botId := botIdentity(t, repo)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+
+	b, _, err := repo.Bugs().NewRaw(botId, time.Now().Unix(), "mine", "the bot's body", nil, nil)
+	require.NoError(t, err)
+	commentId, _, err := b.AddCommentRaw(botId, time.Now().Unix(), "the bot's words", nil, nil)
+	require.NoError(t, err)
+	// edited by someone without an account before the first push
+	_, _, err = b.EditCreateCommentRaw(me, time.Now().Unix(), "body by Me", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	push(t, repo, f, false)
+
+	// and after
+	_, err = b.EditCommentRaw(me, time.Now().Unix(), commentId, "words of Me", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	push(t, repo, f, false)
+
+	issue := f.Issue("1")
+	require.Equal(t, "the bot's body", core.Unrender(issue.Body))
+	require.Equal(t, "the bot's words", core.Unrender(issue.Comments[0].Body))
 }

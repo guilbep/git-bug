@@ -165,6 +165,12 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 				})
 				continue
 			}
+			// the only trace of a description edit: when, and by whom
+			if e.Kind() == EventDescriptionChanged && e.CreatedAt().After(issue.BodyUpdated) {
+				issue.BodyUpdated = e.CreatedAt()
+				issue.BodyEditor = &author
+				continue
+			}
 			if e.Kind() == EventTitleChanged {
 				title, err := e.Title()
 				if err != nil {

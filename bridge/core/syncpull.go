@@ -74,18 +74,20 @@ func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportR
 	}
 	slices.SortStableFunc(items, func(a, b item) int { return a.at.Compare(b.at) })
 
+	// values whose conflict the replay decided
+	decided := map[slot]bool{}
 	for _, it := range items {
 		if it.comment != nil {
 			err = e.pullComment(b, it.comment, out)
 		} else {
-			err = e.pullEvent(b, it.event, out)
+			err = e.pullEvent(b, it.event, decided, out)
 		}
 		if err != nil {
 			return err
 		}
 	}
 
-	if err := e.reconcile(ctx, b, issue, out); err != nil {
+	if err := e.reconcile(ctx, b, issue, decided, out); err != nil {
 		return err
 	}
 
@@ -218,7 +220,7 @@ func (e *Engine) pullComment(b *cache.BugCache, c *Comment, out chan<- ImportRes
 	return nil
 }
 
-func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, out chan<- ImportResult) error {
+func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, decided map[slot]bool, out chan<- ImportResult) error {
 	snap := b.Snapshot()
 	if e.findOp(snap, ev.ID) != nil {
 		return nil
@@ -227,7 +229,7 @@ func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, out chan<- ImportResult
 	if err != nil || claimed {
 		return err
 	}
-	skip, err := e.replayConflict(b, snap, ev, out)
+	skip, err := e.replayConflict(b, snap, ev, decided, out)
 	if err != nil || skip {
 		return err
 	}
@@ -310,7 +312,7 @@ func (e *Engine) pullEvent(b *cache.BugCache, ev *Event, out chan<- ImportResult
 // replayConflict handles an event changing a value that also changed in
 // git-bug since the forge last saw it: the later change wins, as when
 // reconciling. It tells whether to skip replaying the event.
-func (e *Engine) replayConflict(b *cache.BugCache, snap *bug.Snapshot, ev *Event, out chan<- ImportResult) (bool, error) {
+func (e *Engine) replayConflict(b *cache.BugCache, snap *bug.Snapshot, ev *Event, decided map[slot]bool, out chan<- ImportResult) (bool, error) {
 	var s slot
 	var local, value string
 	switch ev.Kind {
@@ -345,6 +347,7 @@ func (e *Engine) replayConflict(b *cache.BugCache, snap *bug.Snapshot, ev *Event
 		return false, nil
 	}
 
+	decided[s] = true
 	seen := map[string]string{e.key("also:" + ev.ID): "replayed"}
 	if local == value {
 		// converged
@@ -456,7 +459,7 @@ func (e *Engine) isAccount(u User) bool {
 
 // reconcile records the changes of the forge that no event explained,
 // three-way: see doc/design/bridges/sync.md.
-func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue, out chan<- ImportResult) error {
+func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue, decided map[slot]bool, out chan<- ImportResult) error {
 	// SetMetadata records to write, by target
 	records := map[entity.Id]map[string]string{}
 	record := func(target entity.Id, k, v string) {
@@ -474,7 +477,6 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 	}
 
 	snap := b.Snapshot()
-	at := issue.Updated
 
 	// title and status: the later change wins
 	for _, sc := range []struct {
@@ -483,24 +485,26 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		apply         func(identity.Interface, map[string]string) error
 	}{
 		{slotTitle, cleanTitle(issue.Title), snap.Title, func(a identity.Interface, tags map[string]string) error {
-			_, err := b.SetTitleRaw(a, at.Unix(), cleanTitle(issue.Title), tags)
+			_, err := b.SetTitleRaw(a, changedAt(issue, slot{kind: slotTitle}, issue.Updated).Unix(), cleanTitle(issue.Title), tags)
 			return err
 		}},
 		{slotStatus, issue.Status.String(), snap.Status.String(), func(a identity.Interface, tags map[string]string) error {
+			at := changedAt(issue, slot{kind: slotStatus}, issue.Updated).Unix()
 			var err error
 			if issue.Status == common.ClosedStatus {
-				_, err = b.CloseRaw(a, at.Unix(), tags)
+				_, err = b.CloseRaw(a, at, tags)
 			} else {
-				_, err = b.OpenRaw(a, at.Unix(), tags)
+				_, err = b.OpenRaw(a, at, tags)
 			}
 			return err
 		}},
 	} {
 		s := slot{kind: sc.kind}
 		baseValue, _, ok := base(snap, e.remote, s)
-		if !ok || sc.remote == baseValue {
+		if !ok || sc.remote == baseValue || decided[s] {
 			continue
 		}
+		at := changedAt(issue, s, issue.Updated)
 		local := lastSlotOp(snap, s)
 		switch {
 		case sc.local == sc.remote:
@@ -544,7 +548,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 				if err != nil {
 					return err
 				}
-				_, err = b.ForceChangeLabelsRaw(author, at.Unix(), added, removed,
+				_, err = b.ForceChangeLabelsRaw(author, changedAt(issue, slot{kind: slotLabels}, issue.Updated).Unix(), added, removed,
 					map[string]string{e.key(string(slotLabels)): labelsValue(remote)})
 				if err != nil {
 					return err
@@ -564,7 +568,12 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 	if issue.BodyEditor != nil {
 		editor = *issue.BodyEditor
 	}
-	texts := []remoteText{{snap.Operations[0].Id(), issue.Body, issue.Updated, editor}}
+	bodyAt := issue.Updated
+	if !issue.BodyUpdated.IsZero() {
+		bodyAt = issue.BodyUpdated
+	}
+	createOp := snap.Operations[0]
+	texts := []remoteText{{createOp.Id(), issue.Body, changedAt(issue, slot{kind: slotText}, bodyAt), editor}}
 	for _, c := range issue.Comments {
 		if op := e.findOp(snap, c.ID); op != nil {
 			texts = append(texts, remoteText{op.Id(), c.Body, c.Updated, c.Author})
@@ -574,7 +583,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		s := slot{kind: slotText, target: rt.target}
 		baseValue, baseOp, ok := base(snap, e.remote, s)
 		fingerprint := Fingerprint(rt.text)
-		if !ok || fingerprint == baseValue {
+		if !ok || fingerprint == baseValue || decided[s] {
 			continue
 		}
 		comment, err := snap.SearchCommentByOpId(rt.target)
@@ -611,6 +620,33 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		}
 	}
 	return nil
+}
+
+// changedAt returns when the forge last changed a value: the time of its
+// latest event about it, or def when it reported none. The slot of the body
+// has no target here: forge events name it with an empty Target.
+func changedAt(issue *Issue, s slot, def time.Time) time.Time {
+	var at time.Time
+	for _, ev := range issue.Events {
+		var match bool
+		switch s.kind {
+		case slotTitle:
+			match = ev.Kind == EventTitle
+		case slotStatus:
+			match = ev.Kind == EventStatus
+		case slotLabels:
+			match = ev.Kind == EventLabels
+		case slotText:
+			match = ev.Kind == EventTextEdit && ev.Target == ""
+		}
+		if match && ev.Time.After(at) {
+			at = ev.Time
+		}
+	}
+	if at.IsZero() {
+		return def
+	}
+	return at
 }
 
 func splitLabels(v string) []common.Label {

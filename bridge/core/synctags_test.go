@@ -1,7 +1,9 @@
 package core
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -171,4 +173,47 @@ func TestBaseLaterRecordWins(t *testing.T) {
 	require.Equal(t, "second push", value)
 	require.Equal(t, title.Id(), op.Id())
 	require.Equal(t, title.Id(), lastSlotOp(b.Snapshot(), slot{kind: slotTitle}).Id())
+}
+
+// Review I4: the base of a text slot must not fingerprint the texts of the
+// other slots, or a sync of a long bug does it for every text of the bug, for
+// each of them. Measured in units of fingerprinting all its texts once, to
+// not depend on the machine's speed.
+func TestBaseFingerprintsOnlyItsSlot(t *testing.T) {
+	_, author, b := newTestBug(t)
+	r := legacyRemote{}
+	var texts []string
+	for i := 0; i < 1000; i++ {
+		text := fmt.Sprintf("comment %d, with some words to hash", i)
+		texts = append(texts, text)
+		_, _, err := b.AddCommentRaw(author, int64(1001+i), text, nil, nil)
+		require.NoError(t, err)
+	}
+	snap := b.Snapshot()
+
+	// the fastest of a few runs, without warm-up costs
+	fastest := func(f func()) time.Duration {
+		var best time.Duration
+		for i := 0; i < 5; i++ {
+			start := time.Now()
+			f()
+			if d := time.Since(start); i == 0 || d < best {
+				best = d
+			}
+		}
+		return best
+	}
+	unit := fastest(func() {
+		for _, text := range texts {
+			Fingerprint(text)
+		}
+	})
+	all := fastest(func() {
+		for _, op := range snap.Operations {
+			base(snap, r, slot{kind: slotText, target: op.Id()})
+		}
+	})
+	units := float64(all) / float64(unit)
+	t.Logf("all bases of a 1000 comments bug: %.0f units", units)
+	require.Less(t, units, 100.0)
 }

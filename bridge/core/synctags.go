@@ -142,7 +142,10 @@ func slotValue(op dag.Operation, s slot, labels map[string]struct{}) (string, bo
 		case slotLabels:
 			return "", true
 		case slotText:
-			return Fingerprint(op.Message), op.Id() == s.target
+			if op.Id() != s.target {
+				return "", false
+			}
+			return Fingerprint(op.Message), true
 		}
 	case *bug.SetTitleOperation:
 		return op.Title, s.kind == slotTitle
@@ -160,10 +163,17 @@ func slotValue(op dag.Operation, s slot, labels map[string]struct{}) (string, bo
 			set = append(set, l)
 		}
 		return labelsValue(set), s.kind == slotLabels
+	// fingerprinting only the texts of the slot keeps long bugs fast
 	case *bug.AddCommentOperation:
-		return Fingerprint(op.Message), s.kind == slotText && op.Id() == s.target
+		if s.kind != slotText || op.Id() != s.target {
+			return "", false
+		}
+		return Fingerprint(op.Message), true
 	case *bug.EditCommentOperation:
-		return Fingerprint(op.Message), s.kind == slotText && op.Target == s.target
+		if s.kind != slotText || op.Target != s.target {
+			return "", false
+		}
+		return Fingerprint(op.Message), true
 	}
 	return "", false
 }
@@ -175,8 +185,13 @@ func remoteIssueID(snap *bug.Snapshot, r Remote) (string, bool) {
 
 // opOnRemote returns the id of what op is on remote r.
 func opOnRemote(op dag.Operation, snap *bug.Snapshot, r Remote) (string, bool) {
+	return onRemote(op, snap.Operations[0].AllMetadata(), r)
+}
+
+// onRemote is opOnRemote, with the metadata of the bug's create operation.
+func onRemote(op dag.Operation, createMeta map[string]string, r Remote) (string, bool) {
 	if id, ok := op.GetMetadata(syncKey(r.Key(), "id")); ok {
 		return id, true
 	}
-	return r.Legacy(op.AllMetadata(), snap.Operations[0].AllMetadata())
+	return r.Legacy(op.AllMetadata(), createMeta)
 }

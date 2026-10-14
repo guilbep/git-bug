@@ -185,9 +185,8 @@ func (e *Engine) createIssue(ctx context.Context, b *cache.BugCache, snap *bug.S
 		return Ref{}, false, nil
 	}
 
-	body := s(slotText, createOp.Id())
-	latest := lastSlotOp(snap, body)
-	text := e.render(snap, refs, b.Id(), createOp, latest, snap.Comments[0].Message, attributed)
+	latest, message, _ := e.textToPush(snap, createOp)
+	text := e.render(snap, refs, b.Id(), createOp, latest, message, attributed)
 
 	var issue Ref
 	err := e.call(ctx, func() (err error) {
@@ -244,14 +243,10 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		if !ok {
 			continue
 		}
-		comment, err := snap.SearchCommentByOpId(op.Id())
-		if err != nil {
-			return err
-		}
-		latest := lastSlotOp(snap, s(slotText, op.Id()))
-		text := e.render(snap, refs, addComment.Id(), op, latest, comment.Message, attributed)
+		latest, message, _ := e.textToPush(snap, op)
+		text := e.render(snap, refs, addComment.Id(), op, latest, message, attributed)
 		var ref Ref
-		err = e.call(ctx, func() (err error) {
+		err := e.call(ctx, func() (err error) {
 			ref, err = e.remote.AddComment(ctx, as, issue, text)
 			return err
 		})
@@ -296,8 +291,8 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		}
 		sl := s(slotText, owner.Id())
 		_, baseOp, ok := base(snap, e.remote, sl)
-		latest := lastSlotOp(snap, sl)
-		if ok && latest.Id() == baseOp.Id() {
+		latest, message, toPush := e.textToPush(snap, owner)
+		if !toPush || (ok && latest.Id() == baseOp.Id()) {
 			continue
 		}
 		if _, refused := latest.GetMetadata(e.key("refused")); refused {
@@ -314,12 +309,8 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		ownerAccount, hasAccount := e.accounts[owner.Author().Id()]
 		onBehalf := !hasAccount || ownerAccount.ID != as.ID
 
-		comment, err := snap.SearchCommentByOpId(owner.Id())
-		if err != nil {
-			return err
-		}
-		text := e.render(snap, refs, markerID, owner, latest, comment.Message, onBehalf)
-		err = e.call(ctx, func() error { return e.remote.EditText(ctx, as, issue, target, text) })
+		text := e.render(snap, refs, markerID, owner, latest, message, onBehalf)
+		err := e.call(ctx, func() error { return e.remote.EditText(ctx, as, issue, target, text) })
 		if errors.Is(err, ErrRefused) {
 			if err := e.refused(b, latest.Id(), err, out); err != nil {
 				return err
@@ -416,6 +407,42 @@ func (e *Engine) refused(b *cache.BugCache, opId entity.Id, err error, out chan<
 	out <- NewExportWarning(err, b.Id())
 	_, err = b.SetMetadata(opId, map[string]string{e.key("refused"): "1"})
 	return err
+}
+
+// textToPush returns the version of a text (of a create or add-comment
+// operation) to send, and the operation that wrote it: the current one, or
+// without sync the last one written by someone with an account, as nothing
+// someone without one wrote reaches the forge then.
+func (e *Engine) textToPush(snap *bug.Snapshot, owner dag.Operation) (dag.Operation, string, bool) {
+	var latest dag.Operation
+	var message string
+	for _, op := range snap.Operations {
+		var text string
+		switch op := op.(type) {
+		case *bug.CreateOperation:
+			if op.Id() != owner.Id() {
+				continue
+			}
+			text = op.Message
+		case *bug.AddCommentOperation:
+			if op.Id() != owner.Id() {
+				continue
+			}
+			text = op.Message
+		case *bug.EditCommentOperation:
+			if op.Target != owner.Id() {
+				continue
+			}
+			text = op.Message
+		default:
+			continue
+		}
+		if _, ok := e.accounts[op.Author().Id()]; !ok && !e.opts.Foreign {
+			continue
+		}
+		latest, message = op, text
+	}
+	return latest, message, latest != nil
 }
 
 func (e *Engine) accountByLogin(login string) (Account, bool) {
