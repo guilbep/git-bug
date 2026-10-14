@@ -95,12 +95,20 @@ Operation metadata, each key written once:
 | `sync:K:labels` | create, label ops | full label set, sorted, `\n`-joined |
 | `sync:K:text` | create, comment, edit ops | fingerprint of the text as the forge holds it |
 
+| `sync:K:also:<event id>` | claimed op | id of the push record that claimed the event |
+
 Identity metadata: `sync:I:user` = the forge user id.
 
-**Slots.** A value that syncs: `title`, `status`, `labels`, `body` (text of the
-create op), and `comment:<op id>` (text of an add-comment op). The base of a
-slot for K is the value recorded by the last operation of that slot, in
-snapshot order, that carries the slot's key for K.
+**Records.** git-bug keeps only the first value of a key on an operation, so
+pushes, claims and convergences are written as SetMetadata operations, and
+read back from them: a push record is a SetMetadata operation whose new
+metadata holds `sync:K:pushed` and the value pushed. Pulled operations hold
+their values in their own metadata.
+
+**Slots.** A value that syncs: `title`, `status`, `labels`, and `text` of a
+create or add-comment op. The base of a slot for K is the last record of it,
+in operation order: a pulled op's own metadata, or a SetMetadata operation
+targeting an op of the slot.
 
 ---
 

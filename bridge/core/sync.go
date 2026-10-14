@@ -60,10 +60,15 @@ func (e *Engine) key(name string) string {
 	return syncKey(e.remote.Key(), name)
 }
 
-// findOp returns the operation that is the given remote object or event.
+// findOp returns the operation that is the given remote object or event,
+// or that claimed the event.
 func (e *Engine) findOp(snap *bug.Snapshot, remoteID string) dag.Operation {
+	also := e.key("also:" + remoteID)
 	for _, op := range snap.Operations {
 		if id, ok := opOnRemote(op, snap, e.remote); ok && id == remoteID {
+			return op
+		}
+		if _, ok := op.GetMetadata(also); ok {
 			return op
 		}
 	}

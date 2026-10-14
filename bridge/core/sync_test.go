@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/bug"
 	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/entity"
 	"github.com/git-bug/git-bug/repository/repotest"
 )
 
@@ -44,7 +46,9 @@ func engine(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, foreign bool)
 func pull(t *testing.T, repo *cache.RepoCache, f *synctest.Fake) []core.ImportResult {
 	var res []core.ImportResult
 	for r := range engine(t, repo, f, true).Pull(context.Background(), time.Time{}) {
-		require.NoError(t, r.Err, r.String())
+		if r.Event == core.ImportEventError {
+			require.NoError(t, r.Err, r.String())
+		}
 		res = append(res, r)
 	}
 	return res
@@ -126,5 +130,214 @@ func TestPullUnrendersText(t *testing.T) {
 
 	pull(t, repo, f)
 	require.Equal(t, "hi @bob", onlyBug(t, repo).Snapshot().Comments[0].Message)
-	var _ *bug.Snapshot
+}
+
+// pulled pulls a forge issue created by alice, and returns its bug.
+func pulled(t *testing.T, f *synctest.Fake, repo *cache.RepoCache) (core.Ref, *cache.BugCache) {
+	issue := f.UserAct("alice").CreateIssue("title", "body")
+	pull(t, repo, f)
+	return issue, onlyBug(t, repo)
+}
+
+// markPushed records on op what a push of it does.
+func markPushed(t *testing.T, b *cache.BugCache, opId entity.Id, tags map[string]string) {
+	meta := map[string]string{"sync:" + key + ":pushed": strconv.FormatInt(time.Now().Unix(), 10)}
+	for k, v := range tags {
+		meta["sync:"+key+":"+k] = v
+	}
+	_, err := b.SetMetadata(opId, meta)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+}
+
+func warnings(results []core.ImportResult) int {
+	n := 0
+	for _, r := range results {
+		if r.Event == core.ImportEventWarning {
+			n++
+		}
+	}
+	return n
+}
+
+func TestPullClaimsEcho(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	issue, b := pulled(t, f, repo)
+
+	// a push of a local close
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	closeOp, err := b.CloseRaw(me, time.Now().Unix(), nil)
+	require.NoError(t, err)
+	require.NoError(t, f.SetStatus(context.Background(), bot, issue, common.ClosedStatus))
+	markPushed(t, b, closeOp.Id(), map[string]string{"status": "closed"})
+
+	pull(t, repo, f)
+	ops := len(onlyBug(t, repo).Snapshot().Operations)
+	pull(t, repo, f)
+
+	snap := onlyBug(t, repo).Snapshot()
+	require.Equal(t, 1, countOps[*bug.SetStatusOperation](snap), "the echo is claimed, not imported")
+	require.Len(t, snap.Operations, ops, "and stays claimed")
+}
+
+// countOps counts the operations of a type.
+func countOps[T any](snap *bug.Snapshot) int {
+	n := 0
+	for _, op := range snap.Operations {
+		if _, ok := op.(T); ok {
+			n++
+		}
+	}
+	return n
+}
+
+func TestPullClaimsSeveralLabelEvents(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	issue, b := pulled(t, f, repo)
+
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, op, err := b.ChangeLabelsRaw(me, time.Now().Unix(), []string{"a", "b"}, nil, nil)
+	require.NoError(t, err)
+	// a forge emitting one event per label
+	require.NoError(t, f.SetLabels(context.Background(), bot, issue, []string{"a"}))
+	require.NoError(t, f.SetLabels(context.Background(), bot, issue, []string{"a", "b"}))
+	markPushed(t, b, op.Id(), map[string]string{"labels": "a\nb"})
+
+	pull(t, repo, f)
+	ops := len(onlyBug(t, repo).Snapshot().Operations)
+	pull(t, repo, f)
+
+	snap := onlyBug(t, repo).Snapshot()
+	require.Equal(t, 1, countOps[*bug.LabelChangeOperation](snap))
+	require.Len(t, snap.Operations, ops)
+}
+
+func TestPullImportsTokenOwnerOwnChange(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	issue, _ := pulled(t, f, repo)
+
+	// the bot account's owner closes the issue on the forge, nothing pushed
+	f.UserAct("bot").SetStatus(issue, common.ClosedStatus)
+	pull(t, repo, f)
+
+	require.Equal(t, common.ClosedStatus, onlyBug(t, repo).Snapshot().Status)
+}
+
+func TestPullForgeEditWithoutEvent(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{NoEditEvents: true}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	comment := alice.Comment(issue, "hello")
+	pull(t, repo, f)
+	before := len(onlyBug(t, repo).Snapshot().Operations)
+
+	alice.EditText(issue, comment, "hello, edited")
+	alice.EditText(issue, issue, "body, edited")
+	pull(t, repo, f)
+	pull(t, repo, f)
+
+	snap := onlyBug(t, repo).Snapshot()
+	require.Len(t, snap.Operations, before+2)
+	require.Equal(t, "body, edited", snap.Comments[0].Message)
+	require.Equal(t, "hello, edited", snap.Comments[1].Message)
+	require.Equal(t, "alice", snap.Comments[1].Author.Login())
+}
+
+func TestPullKeepsUnpushedLocalEdit(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{NoEditEvents: true}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.Comment(issue, "hello")
+	pull(t, repo, f)
+
+	b := onlyBug(t, repo)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, err = b.EditCommentRaw(me, time.Now().Unix(), b.Snapshot().Comments[1].CombinedId(), "local edit", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	pull(t, repo, f)
+	require.Equal(t, "local edit", onlyBug(t, repo).Snapshot().Comments[1].Message)
+}
+
+func TestPullConflictLaterWins(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		localTime time.Time
+		want      string
+	}{
+		{"forge later", time.Now().Add(-time.Hour), "forge edit"},
+		{"local later", time.Now().Add(time.Hour), "local edit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newRepo(t)
+			f := synctest.NewFake(key, "fake.test", synctest.Quirks{NoEditEvents: true}, bot)
+			alice := f.UserAct("alice")
+			issue := alice.CreateIssue("title", "body")
+			comment := alice.Comment(issue, "hello")
+			pull(t, repo, f)
+
+			b := onlyBug(t, repo)
+			me, err := repo.GetUserIdentity()
+			require.NoError(t, err)
+			_, err = b.EditCommentRaw(me, tc.localTime.Unix(), b.Snapshot().Comments[1].CombinedId(), "local edit", nil)
+			require.NoError(t, err)
+			require.NoError(t, b.Commit())
+			alice.EditText(issue, comment, "forge edit")
+
+			results := pull(t, repo, f)
+			require.Equal(t, tc.want, onlyBug(t, repo).Snapshot().Comments[1].Message)
+			require.Equal(t, 1, warnings(results), "the conflict is reported")
+		})
+	}
+}
+
+func TestPullConverged(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	issue, b := pulled(t, f, repo)
+
+	// renamed the same way on both sides
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, err = b.SetTitleRaw(me, time.Now().Unix(), "same", nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	f.UserAct("alice").SetTitle(issue, "same")
+	before := len(b.Snapshot().Operations)
+
+	results := pull(t, repo, f)
+	snap := onlyBug(t, repo).Snapshot()
+	require.Equal(t, "same", snap.Title)
+	require.Zero(t, warnings(results))
+	// the forge's event is replayed, nothing else
+	require.Len(t, snap.Operations, before+1)
+}
+
+func TestPullMergesLabels(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.SetLabels(issue, []string{"a"})
+	pull(t, repo, f)
+
+	b := onlyBug(t, repo)
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, err = b.ForceChangeLabelsRaw(me, time.Now().Unix(), nil, []string{"a"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	alice.SetLabels(issue, []string{"a", "b"})
+
+	pull(t, repo, f)
+	require.Equal(t, []common.Label{"b"}, onlyBug(t, repo).Snapshot().Labels)
 }

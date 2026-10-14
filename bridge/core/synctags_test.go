@@ -153,3 +153,22 @@ func TestSyncKeys(t *testing.T) {
 	var _ entity.Id = slot{}.target
 	var _ *bug.Snapshot
 }
+
+func TestBaseLaterRecordWins(t *testing.T) {
+	_, author, b := newTestBug(t)
+	r := legacyRemote{}
+	title, err := b.SetTitleRaw(author, 1001, "local", nil)
+	require.NoError(t, err)
+
+	// pushed twice: the operation keeps the first value, the records both
+	for _, v := range []string{"first push", "second push"} {
+		_, err = b.SetMetadata(title.Id(), map[string]string{syncKey(r.Key(), "title"): v})
+		require.NoError(t, err)
+	}
+
+	value, op, ok := base(b.Snapshot(), r, slot{kind: slotTitle})
+	require.True(t, ok)
+	require.Equal(t, "second push", value)
+	require.Equal(t, title.Id(), op.Id())
+	require.Equal(t, title.Id(), lastSlotOp(b.Snapshot(), slot{kind: slotTitle}).Id())
+}

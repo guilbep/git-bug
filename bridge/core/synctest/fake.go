@@ -171,9 +171,16 @@ func (f *Fake) Dialect() core.Dialect {
 func (f *Fake) Legacy(_, _ map[string]string) (string, bool) { return "", false }
 func (f *Fake) LegacyUser() (string, bool)                   { return "", false }
 
+// UserAct returns someone acting directly on the forge. A token owner's login
+// gives their account's user: they also act on the forge themselves.
 func (f *Fake) UserAct(login string) Actor {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, u := range f.users {
+		if u.Login == login {
+			return actor{f: f, u: u}
+		}
+	}
 	u := core.User{ID: "u-" + login, Login: login, Name: login}
 	f.users[u.ID] = u
 	return actor{f: f, u: u}

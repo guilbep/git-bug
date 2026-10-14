@@ -56,20 +56,36 @@ type slot struct {
 }
 
 // base returns the value of the slot that remote r last saw, and the
-// operation that records it.
+// operation holding the value git-bug had then.
+//
+// What a remote saw is recorded, in operation order, by the operations pulled
+// from it (in their own metadata), and by SetMetadata operations (pushes,
+// convergences) targeting an operation of the slot. The last record wins:
+// git-bug keeps only the first value of a key on an operation, but each
+// SetMetadata operation keeps its own.
 func base(snap *bug.Snapshot, r Remote, s slot) (string, dag.Operation, bool) {
 	createMeta := snap.Operations[0].AllMetadata()
 	key := syncKey(r.Key(), string(s.kind))
 	labels := map[string]struct{}{}
+	inSlot := map[entity.Id]dag.Operation{}
 
 	var value string
 	var found dag.Operation
 	for _, op := range snap.Operations {
+		if sm, ok := op.(*dag.SetMetadataOperation[*bug.Snapshot]); ok {
+			if v, ok := sm.NewMetadata[key]; ok {
+				if target, ok := inSlot[sm.Target]; ok {
+					value, found = v, target
+				}
+			}
+			continue
+		}
 		own, ok := slotValue(op, s, labels)
 		if !ok {
 			continue
 		}
-		if v, tagged := op.GetMetadata(key); tagged {
+		inSlot[op.Id()] = op
+		if v, tagged := ownMetadata(op)[key]; tagged {
 			value, found = v, op
 			continue
 		}
@@ -79,6 +95,38 @@ func base(snap *bug.Snapshot, r Remote, s slot) (string, dag.Operation, bool) {
 		}
 	}
 	return value, found, found != nil
+}
+
+// lastSlotOp returns the operation that set the slot's current value.
+func lastSlotOp(snap *bug.Snapshot, s slot) dag.Operation {
+	labels := map[string]struct{}{}
+	var last dag.Operation
+	for _, op := range snap.Operations {
+		if _, ok := slotValue(op, s, labels); ok {
+			last = op
+		}
+	}
+	return last
+}
+
+// ownMetadata returns the metadata an operation was created with, without
+// what SetMetadata operations added.
+func ownMetadata(op dag.Operation) map[string]string {
+	switch op := op.(type) {
+	case *bug.CreateOperation:
+		return op.Metadata
+	case *bug.SetTitleOperation:
+		return op.Metadata
+	case *bug.SetStatusOperation:
+		return op.Metadata
+	case *bug.LabelChangeOperation:
+		return op.Metadata
+	case *bug.AddCommentOperation:
+		return op.Metadata
+	case *bug.EditCommentOperation:
+		return op.Metadata
+	}
+	return nil
 }
 
 // slotValue returns the slot's value after op, if op changes the slot.
