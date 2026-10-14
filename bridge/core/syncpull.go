@@ -40,9 +40,13 @@ func (e *Engine) Pull(ctx context.Context, since time.Time) <-chan ImportResult 
 }
 
 func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportResult) error {
-	b, err := e.findBug(issue)
+	b, duplicate, err := e.findBug(issue)
 	if err != nil {
 		return err
+	}
+	if duplicate {
+		out <- NewImportWarning(fmt.Errorf("issue %s duplicates the issue of bug %s, as a retried write can do: not imported", issue.URL, b.Id().Human()), b.Id())
+		return nil
 	}
 	if e.opts.DryRun {
 		e.planPull(b, issue, out)
@@ -92,10 +96,12 @@ func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportR
 	return b.Commit()
 }
 
-// findBug returns the bug of a forge issue, nil if there's none.
-func (e *Engine) findBug(issue *Issue) (*cache.BugCache, error) {
+// findBug returns the bug of a forge issue, nil if there's none. duplicate
+// tells that the issue carries the marker of a bug already on the forge
+// with another issue.
+func (e *Engine) findBug(issue *Issue) (b *cache.BugCache, duplicate bool, err error) {
 	idKey := e.key("id")
-	b, err := e.repo.Bugs().ResolveMatcher(func(excerpt *cache.BugExcerpt) bool {
+	b, err = e.repo.Bugs().ResolveMatcher(func(excerpt *cache.BugExcerpt) bool {
 		if excerpt.CreateMetadata[idKey] == issue.ID {
 			return true
 		}
@@ -103,29 +109,29 @@ func (e *Engine) findBug(issue *Issue) (*cache.BugCache, error) {
 		return ok && id == issue.ID
 	})
 	if err == nil || !entity.IsErrNotFound(err) {
-		return b, err
+		return b, false, err
 	}
 
 	// created by a push that died before recording it
 	id, ok := MarkerID(text.Cleanup(issue.OriginalBody))
 	if !ok {
-		return nil, nil
+		return nil, false, nil
 	}
 	b, err = e.repo.Bugs().Resolve(id)
 	if entity.IsErrNotFound(err) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if _, onRemote := remoteIssueID(b.Snapshot(), e.remote); onRemote {
-		return nil, nil
+		return b, true, nil
 	}
 	if e.opts.DryRun {
-		return b, nil
+		return b, false, nil
 	}
 	_, err = b.SetMetadata(b.Snapshot().Operations[0].Id(), e.issueTags(issue))
-	return b, err
+	return b, false, err
 }
 
 // planPull reports what pulling an issue would do, without doing it.

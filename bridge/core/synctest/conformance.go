@@ -163,7 +163,7 @@ func mirrorThenStable(w *world) {
 	got := w.issue(w.b, "renamed")
 	require.Equal(w.t, common.ClosedStatus, got.Status)
 	require.Equal(w.t, []string{"bug"}, got.Labels)
-	require.Contains(w.t, got.Body, "Originally posted by alice")
+	require.Contains(w.t, strings.ToLower(got.Body), "originally posted by alice", "attributed")
 	require.Contains(w.t, got.Body, "`@carol`", "mention defused")
 	require.Contains(w.t, got.Body, "see #"+w.issue(w.b, "first").Number, "the ref is the mirrored issue")
 	require.Len(w.t, got.Comments, 1)
@@ -179,8 +179,8 @@ func openedOnEachSide(w *world) {
 
 	w.sync()
 
-	require.Contains(w.t, w.issue(w.a, "from b").Body, "Originally posted by carol")
-	require.Contains(w.t, w.issue(w.b, "from a").Body, "Originally posted by alice")
+	require.Contains(w.t, strings.ToLower(w.issue(w.a, "from b").Body), "originally posted by carol")
+	require.Contains(w.t, strings.ToLower(w.issue(w.b, "from a").Body), "originally posted by alice")
 	require.Equal(w.t, 2, w.bugCount())
 	w.stable()
 }

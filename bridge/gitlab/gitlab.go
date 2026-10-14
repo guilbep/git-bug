@@ -1,6 +1,7 @@
 package gitlab
 
 import (
+	"errors"
 	"time"
 
 	"gitlab.com/gitlab-org/api/client-go"
@@ -21,11 +22,12 @@ const (
 	confKeyProjectID     = "project-id"
 	confKeyGitlabBaseUrl = "base-url"
 	confKeyDefaultLogin  = "default-login"
-	confKeyExportForeign = "export-foreign"
 
 	defaultBaseURL = "https://gitlab.com/"
 	defaultTimeout = 60 * time.Second
 )
+
+var ErrMissingIdentityToken = errors.New("missing identity token")
 
 var _ core.BridgeImpl = &Gitlab{}
 
@@ -39,12 +41,16 @@ func (g *Gitlab) LoginMetaKey() string {
 	return metaKeyGitlabLogin
 }
 
+// NewImporter returns nothing: the bridge imports with the sync engine, see
+// NewRemote.
 func (Gitlab) NewImporter() core.Importer {
-	return &gitlabImporter{}
+	return nil
 }
 
+// NewExporter returns nothing: the bridge exports with the sync engine, see
+// NewRemote.
 func (Gitlab) NewExporter() core.Exporter {
-	return &gitlabExporter{}
+	return nil
 }
 
 func buildClient(baseURL string, token *auth.Token) (*gitlab.Client, error) {

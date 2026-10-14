@@ -119,6 +119,27 @@ Every bridge has:
 |----------------------------------------|-----------|------------------------------------------------------------------------|
 | `git-bug.bridge.<name>.target`         | string    | The bridge implementation: `github`, `gitlab`, `jira` or `launchpad`.  |
 | `git-bug.bridge.<name>.lastImportTime` | timestamp | Bookkeeping for incremental imports. Written by `git bug bridge pull`. |
+| `git-bug.bridge.<name>.sync`           | bool      | Set by hand, for GitHub and GitLab. See [Syncing](#syncing).           |
+
+### Syncing<a name="syncing"></a>
+
+By default, pushing to a forge skips issues imported from another one, and
+anything written by someone without a token there. With `sync`, a bridge
+mirrors everything, both ways, whichever forge it comes from:
+
+```bash
+git config git-bug.bridge.<name>.sync true
+git bug bridge sync --dry-run
+git bug bridge sync
+```
+
+`git bug bridge sync` pulls every bridge with `sync` enabled, then pushes to
+each of them. What was written by someone without a token on a forge is
+posted there with the bridge's `default-login` token (preferably a bot
+account), under a header naming its author, with a link to where it was
+written. Mentions in text from another forge are defused, and issue
+references translated. Run it from one place only, such as a CI job:
+`git bug pull && git bug bridge sync && git bug push`.
 
 The remaining keys depend on the target.
 
@@ -132,26 +153,11 @@ The remaining keys depend on the target.
 
 #### GitLab<a name="gitlab"></a>
 
-| Key              | Description                                                                                      |
-| ---------------- | ------------------------------------------------------------------------------------------------ |
-| `project-id`     | The numeric GitLab project id.                                                                   |
-| `base-url`       | The GitLab instance URL, for self-hosted instances.                                              |
-| `default-login`  | The GitLab login used when no credential matches explicitly.                                     |
-| `export-foreign` | Set by hand. If `true`, `git bug bridge push` also exports what it skips by default (see below). |
-
-By default, pushing to GitLab skips issues imported from another bridge, and
-anything written by an author without a GitLab token. To push them anyway, for
-example to mirror issues pulled from GitHub:
-
-```bash
-git config git-bug.bridge.<name>.export-foreign true
-```
-
-Issues and comments by authors without a token are then posted with the
-`default-login` token, under a header naming the original author and date,
-with a link to the source issue or comment when there is one. Status, title
-and label changes are applied without attribution. Pulling from GitLab ignores
-that header, so a pull after a push records no spurious edits.
+| Key             | Description                                                  |
+| --------------- | ------------------------------------------------------------ |
+| `project-id`    | The numeric GitLab project id.                               |
+| `base-url`      | The GitLab instance URL, for self-hosted instances.          |
+| `default-login` | The GitLab login used when no credential matches explicitly. |
 
 #### Jira<a name="jira"></a>
 

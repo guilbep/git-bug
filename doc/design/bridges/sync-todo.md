@@ -53,19 +53,22 @@ Failed, as predicted, both local only:
 - [x] Full spec: user said to proceed without waiting for review (2026-10-14)
 - [x] Implementation plan written: [sync-plan.md](sync-plan.md). Build tasks are tracked there.
 
-## Build (order to be fixed by the implementation plan)
+## Build (tasks in [sync-plan.md](sync-plan.md))
 
-- [ ] Fake forge and conformance suite. Run it against today's GitHub and
-      GitLab bridges first, and record what fails.
-- [ ] Engine in `bridge/core`
-- [ ] GitLab adapter
+- [x] Bridge lock (maintainer's `0cae4552`, cherry-picked)
+- [x] Engine in `bridge/core`: Remote interface, tags and bases, rendering,
+      identities, pull (replay, claim, reconcile), push, errors
+- [x] Fake forge and conformance suite (`bridge/core/synctest`). Today's
+      bridges were characterized by the real-world trial instead.
+- [x] `git bug bridge sync`, `--dry-run`, lock for the whole run
+- [x] GitLab adapter: conformance passes on an HTTP fake; old importer and
+      exporter removed; legacy metadata read; real end-to-end test passes
+      on gitlab.epfl.ch
 - [ ] GitHub adapter
-- [ ] `git bug bridge sync`, `--dry-run`, lock
-- [ ] Rendering: mentions and refs
-- [ ] Legacy metadata migration
-- [ ] Docs: configuration.md, third-party.md, feature-matrix.md
+- [ ] Docs: third-party.md, feature-matrix.md
 - [ ] Gitea/Forgejo adapter
-- [ ] Run against real forges (scratch projects)
+- [ ] Two-way run against real forges (scratch projects)
+- [ ] Whole-branch review
 
 ## Known issues to cover
 

@@ -653,3 +653,18 @@ func TestPushRefusedEditWarnsOnce(t *testing.T) {
 	require.Zero(t, countWarnings(push(t, repo, f, true)), "not tried again")
 	require.Equal(t, "alice's comment", f.Issue("1").Comments[0].Body)
 }
+
+func TestPullSkipsDuplicateByMarker(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	b, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	push(t, repo, f, true)
+
+	// a retried write created the issue twice on the forge
+	_, err = f.CreateIssue(context.Background(), bot, "local", core.Render("body", b.Id(), nil, nil, nil))
+	require.NoError(t, err)
+
+	require.Equal(t, 1, warnings(pull(t, repo, f)))
+	require.Len(t, repo.Bugs().AllIds(), 1)
+}
