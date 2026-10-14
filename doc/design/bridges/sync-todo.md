@@ -19,11 +19,13 @@ merged upstream.
 - [x] Pull: replay the remote timeline, claim echoes, then reconcile
 - [x] Adapter interface (checked against Gitea's API too)
 - [x] Sync loop, `bridge sync` command, `--dry-run`, lock
-- [ ] Rendering: attribution, `@mentions`, `#refs`
-- [ ] Identities and tokens
+- [x] Rendering: attribution, `@mentions`, `#refs`
+- [x] Identities and tokens
 - [x] Errors and conflicts
-- [ ] Migration: legacy metadata, existing bridges, `export-foreign`
-- [ ] Testing: fake forge and conformance suite
+- [x] Migration: legacy metadata, existing bridges, `export-foreign`
+- [x] Testing: fake forge and conformance suite
+- [ ] Full spec reviewed by the user
+- [ ] Implementation plan written (`sync-plan.md`)
 
 ## Build (order to be fixed by the implementation plan)
 

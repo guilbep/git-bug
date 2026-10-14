@@ -1,7 +1,7 @@
 # Bridge sync
 
-Status: **draft, being designed** on branch `bridge-sync`. The working
-checklist is in [sync-todo.md](sync-todo.md).
+Status: **designed, waiting for review** on branch `bridge-sync`. The
+working checklist is in [sync-todo.md](sync-todo.md).
 
 ## Goal
 
@@ -33,10 +33,11 @@ Taken on 2026-10-14:
    history. `git bug bridge sync --dry-run` lists what would be created or
    changed, so the notifications that follow are a deliberate choice.
 4. **Text posted on someone else's behalf** carries an attribution header
-   (author, date, link to the source). In it, `@alice` is defused to
-   `` `@alice` `` so it doesn't ping whoever is alice on the target, and
-   `#123` is translated to the mirrored issue's number on the target when
-   git-bug knows it, or to a link to the source otherwise.
+   (author, date, link to the source). **Text written on another forge**,
+   whoever posts it, gets `@alice` defused to `` `@alice` `` so it doesn't
+   ping whoever is alice on the target, and `#123` translated to the
+   mirrored issue's number on the target when git-bug knows it, or to a link
+   to the source otherwise. See [Rendering](#rendering).
 5. **Architecture**: one sync engine in `bridge/core`, and thin adapters per
    forge. All sync rules live in the engine once.
 6. **Remote ids are kept per remote project**, so any number of remotes can
@@ -93,14 +94,18 @@ versions:
 | changed | same | push the local value to R |
 | same | changed | pull: record R's change as a git-bug operation |
 | changed | changed, equal to local | converged: record the base, no write |
-| changed | changed, different | conflict: the later change wins |
+| changed | changed, different | conflict: the later change wins (see below) |
 
 The **base is derived from the git data**, not kept on the side. Every
 operation R has seen, because it was pulled from R or pushed to R, is
-tagged with write-once metadata for R: the remote id, and for text a
-fingerprint of the normalized text as R holds it. The base for R is the
-state built from R's tagged operations only. It travels with the git data,
-so any machine can run the sync.
+tagged with write-once metadata for R: the remote id, and the value R holds
+after it. For text, that value is a fingerprint (SHA-256) of the text as R
+holds it, after `text.Cleanup`; for labels, the full label set. The base
+for a value is what the latest R-tagged operation for it records. It
+travels with the git data, so any machine can run the sync.
+
+"Later" compares the time of the git-bug operation with the time of the
+forge's event, or the forge's last update time when it reports no event.
 
 Text is compared by **fingerprint**, not by undoing the rendering: the
 attribution header and translated `#refs` can't be reliably reversed. Pulled
@@ -116,9 +121,10 @@ complete, and `bridge pull` keeps behaving as it does.
 Events that git-bug pushed itself come back on the next pull. They are
 recognized by **claiming**: an event matches a pushed operation of the same
 issue, kind and value, not yet claimed, posted by one of the remote's
-accounts, at or after the push. The oldest such operation gets tagged with
-the event's id, and no new operation is created. Authorship alone never
-makes an event an echo, as a token owner also acts on the forge directly.
+accounts, no earlier than 5 minutes before the push (clocks differ). The
+oldest such operation gets tagged with the event's id, and no new operation
+is created. Authorship alone never makes an event an echo, as a token owner
+also acts on the forge directly.
 
 After replaying, the engine compares the forge's current state with
 git-bug's, three-way as above. A difference that no event explained (for
@@ -226,7 +232,95 @@ exact.
 - Deletions on a forge are not propagated. The item stops syncing to that
   forge, and the run warns.
 
-## Still to design
+## Rendering
 
-Rendering, identities and tokens, migration of existing data and bridges,
-testing.
+Every text in git-bug knows where it was written: on a forge, if it was
+pulled from one, or in git-bug itself. Rendering for a target forge
+depends on that, and on who posts:
+
+- **Attribution header**, only when the author has no token on the target
+  and the text is posted with the bot account:
+  - written on a forge: `*Originally posted by Alice on 2026-01-02, [view on GitHub](url)*`
+  - written in git-bug: `*Posted by Alice on 2026-01-02 via git-bug*`
+- **Mentions and refs** are rewritten by where the text was written,
+  whoever posts it. Text written on forge A and posted to forge B gets its
+  `@bob` defused to `` `@bob` ``, and its `#123` translated to B's number
+  for the same bug, or to a link to A's issue when that bug isn't on B yet.
+  Text written in git-bug is left alone: git-bug has no issue numbers.
+- Code blocks, inline code, emails and URLs are never rewritten. A text is
+  rendered once, when posted: a ref posted as a link isn't edited later when
+  its bug gets mirrored.
+- Every issue and comment created carries the marker described in
+  [Errors](#errors).
+
+When a forge's copy of a text really changed, the pull turns it back into
+git-bug text: marker and header removed, defused mentions restored. Refs are
+kept as they are: the edit was written on that forge, so they are its refs.
+
+## Identities and tokens
+
+- People are matched per server: an identity is tagged with each server's
+  user id (`Instance()` + user id). The legacy `github-login` and
+  `gitlab-id` tags are still read.
+- For each account (token), the engine finds its identity by user id, then
+  by login (which `bridge new` tags today), and adds the user id when
+  missing. A pull never creates a second identity for a token owner.
+- Text is posted with the author's own account on the target when they have
+  a token there, and otherwise with the `default-login` account and the
+  attribution header. Status, title and label changes without a token are
+  made with the `default-login` account, without attribution.
+- A text is always edited with the account that posted it, recorded on the
+  operation when pushed.
+- The same person on two forges is two git-bug identities. They are not
+  merged automatically, as matching people by email or name is risky, and
+  git-bug has no way to link identities yet (see #642, #351). Alice's GitHub
+  comments reach GitLab through the bot, with the header, even if she has a
+  GitLab token. Linking identities can come later without changing the
+  engine.
+
+## Migration
+
+Existing repositories keep working, and nothing changes for users who don't
+enable `sync`.
+
+- **Data is not rewritten.** Each adapter reads its legacy tags
+  (`github-id` and `github-url`; `gitlab-id`, `gitlab-project-id` and
+  `gitlab-base-url`), so bugs pulled or pushed by today's bridges count as
+  seen by that forge. New tags use the per-project format. Duplicates
+  created by today's bridges stay.
+- **The GitHub and GitLab bridges become adapters.** `bridge pull` and
+  `bridge push` run the engine for that one bridge. Without `sync`, push
+  keeps today's limits: never issues from another forge, and only content
+  someone has a token for.
+- **Jira and Launchpad keep their importer and exporter.** Only a bridge with
+  an adapter can be set to `sync`; configuring it on another fails with an
+  error.
+- **`export-foreign` is removed**, as it was never released, and replaced by
+  `sync`. Its attribution code moves into the engine.
+
+## Testing
+
+Three layers, all running offline:
+
+1. **A fake forge**: an in-memory `Remote` with switchable quirks (no event
+   ids on writes, author-only edits, partial timelines), to test the engine.
+2. **A conformance suite** every adapter runs, against the fake forge, and
+   for each real adapter against an HTTP fake of its API (like the GitLab
+   one on this branch; GitHub's answers the few GraphQL operations its
+   adapter uses). A forge is supported when it passes. Scenarios:
+   - a second sync changes nothing, on any side;
+   - an issue from A reaches B with its comments, edits, status, title and
+     labels, attributed, mentions defused, refs translated;
+   - echoes are claimed, never duplicated;
+   - a local edit made after a push survives the next sync;
+   - an edit made on a forge is pulled;
+   - a conflict keeps the later change and is reported;
+   - a run that dies after a write and before recording it recovers through
+     the marker;
+   - token owners don't get a second identity;
+   - a deletion on a forge is not propagated;
+   - two projects of the same kind sync with each other.
+3. **Characterization first**: before anything is rewritten, the suite runs
+   against today's GitHub and GitLab bridges, and the known bugs become
+   failing tests the engine must fix. At the end, a run against real scratch
+   projects, and the existing end-to-end tests, which need tokens.
