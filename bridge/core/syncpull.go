@@ -3,6 +3,7 @@ package core
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -40,7 +41,7 @@ func (e *Engine) Pull(ctx context.Context, since time.Time) <-chan ImportResult 
 }
 
 func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportResult) error {
-	b, duplicate, err := e.findBug(issue)
+	b, duplicate, err := e.findBug(issue, out)
 	if err != nil {
 		return err
 	}
@@ -101,7 +102,7 @@ func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportR
 // findBug returns the bug of a forge issue, nil if there's none. duplicate
 // tells that the issue carries the marker of a bug already on the forge
 // with another issue.
-func (e *Engine) findBug(issue *Issue) (b *cache.BugCache, duplicate bool, err error) {
+func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCache, duplicate bool, err error) {
 	idKey := e.key("id")
 	b, err = e.repo.Bugs().ResolveMatcher(func(excerpt *cache.BugExcerpt) bool {
 		if excerpt.CreateMetadata[idKey] == issue.ID {
@@ -110,6 +111,13 @@ func (e *Engine) findBug(issue *Issue) (b *cache.BugCache, duplicate bool, err e
 		id, ok := e.remote.Legacy(excerpt.CreateMetadata, excerpt.CreateMetadata)
 		return ok && id == issue.ID
 	})
+	if multiple, ok := errors.AsType[*entity.ErrMultipleMatch](err); ok {
+		// the old bridges could import an issue they had exported
+		b, err = e.pickDuplicate(multiple.Matching)
+		if err == nil {
+			out <- NewImportWarning(fmt.Errorf("%d bugs are issue %s, left by an older bridge: syncing %s", len(multiple.Matching), issue.URL, b.Id().Human()), b.Id())
+		}
+	}
 	if err == nil || !entity.IsErrNotFound(err) {
 		return b, false, err
 	}
@@ -158,6 +166,28 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 		// some may be echoes of pushes, claimed instead of pulled
 		out <- NewImportNothing(b.Id(), fmt.Sprintf("would pull up to %d changes from %s", n, issue.URL))
 	}
+}
+
+// pickDuplicate returns, of bugs that are the same forge issue, the one
+// pulled from this forge, then the oldest.
+func (e *Engine) pickDuplicate(ids []entity.Id) (*cache.BugCache, error) {
+	var best *cache.BugExcerpt
+	for _, id := range ids {
+		excerpt, err := e.repo.Bugs().ResolveExcerpt(id)
+		if err != nil {
+			return nil, err
+		}
+		pulled := excerpt.CreateMetadata[MetaKeyOrigin] == e.remote.Kind()
+		if best == nil {
+			best = excerpt
+			continue
+		}
+		bestPulled := best.CreateMetadata[MetaKeyOrigin] == e.remote.Kind()
+		if pulled && !bestPulled || pulled == bestPulled && excerpt.CreateLamportTime < best.CreateLamportTime {
+			best = excerpt
+		}
+	}
+	return e.repo.Bugs().Resolve(best.Id())
 }
 
 // issueTags are the metadata of a create operation for its forge issue, as

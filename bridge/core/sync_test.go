@@ -758,3 +758,47 @@ func TestPushWithoutSyncKeepsOthersText(t *testing.T) {
 	require.Equal(t, "the bot's body", core.Unrender(issue.Body))
 	require.Equal(t, "the bot's words", core.Unrender(issue.Comments[0].Body))
 }
+
+// legacyFake is a forge whose pre-sync bridge tagged operations "fake-id".
+type legacyFake struct {
+	*synctest.Fake
+}
+
+func (legacyFake) Legacy(meta, _ map[string]string) (string, bool) {
+	id, ok := meta["fake-id"]
+	return id, ok
+}
+
+// Review I2: the old bridges could leave two bugs for one issue, one pushed
+// and one pulled. Pull picks one, the one pulled from this forge, warns, and
+// goes on.
+func TestPullLegacyDuplicatePair(t *testing.T) {
+	repo := newRepo(t)
+	f := legacyFake{synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)}
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+
+	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix(), "title", "body", nil, map[string]string{"fake-id": issue.ID})
+	require.NoError(t, err)
+	pulled, _, err := repo.Bugs().NewRaw(me, time.Now().Unix()+1, "title", "body", nil,
+		map[string]string{"fake-id": issue.ID, core.MetaKeyOrigin: "fake"})
+	require.NoError(t, err)
+
+	alice.Comment(issue, "new on the forge")
+	e, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login"})
+	require.NoError(t, err)
+	warned := 0
+	for r := range e.Pull(context.Background(), time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+		if r.Event == core.ImportEventWarning {
+			warned++
+		}
+	}
+
+	require.Equal(t, 1, warned)
+	got, err := repo.Bugs().Resolve(pulled.Id())
+	require.NoError(t, err)
+	require.Len(t, got.Snapshot().Comments, 2, "the new comment went to the pulled copy")
+}
