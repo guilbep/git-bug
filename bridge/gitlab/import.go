@@ -215,8 +215,9 @@ func (gi *gitlabImporter) ensureIssueEvent(repo *cache.RepoCache, b *cache.BugCa
 		// since gitlab doesn't provide the issue history
 		// we should check for "changed the description" notes and compare issue texts
 		// TODO: Check only one time and ignore next 'description change' within one issue
-		cleanedDesc := text.Cleanup(issue.Description)
-		if errResolve == cache.ErrNoMatchingOp && cleanedDesc != firstComment.Message {
+		// ignore the attribution header added by export-foreign
+		cleanedDesc := stripAttribution(text.Cleanup(issue.Description))
+		if errResolve == cache.ErrNoMatchingOp && cleanedDesc != stripAttribution(firstComment.Message) {
 			// comment edition
 			op, err := b.EditCommentRaw(
 				author,
@@ -265,14 +266,15 @@ func (gi *gitlabImporter) ensureIssueEvent(repo *cache.RepoCache, b *cache.BugCa
 			return err
 		}
 
-		// compare local bug comment with the new event body
-		if comment.Message != cleanText {
+		// compare local bug comment with the new event body, ignoring the
+		// attribution header added by export-foreign
+		if editedText := stripAttribution(cleanText); stripAttribution(comment.Message) != editedText {
 			// comment edition
 			_, err := b.EditCommentRaw(
 				author,
 				event.(NoteEvent).UpdatedAt.Unix(),
 				comment.CombinedId(),
-				cleanText,
+				editedText,
 				nil,
 			)
 

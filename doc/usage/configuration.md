@@ -132,11 +132,26 @@ The remaining keys depend on the target.
 
 #### GitLab<a name="gitlab"></a>
 
-| Key             | Description                                                                 |
-| --------------- | --------------------------------------------------------------------------- |
-| `project-id`    | The numeric GitLab project id.                                              |
-| `base-url`      | The GitLab instance URL, for self-hosted instances.                         |
-| `default-login` | The GitLab login used when no credential matches explicitly.                |
+| Key              | Description                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------ |
+| `project-id`     | The numeric GitLab project id.                                                                   |
+| `base-url`       | The GitLab instance URL, for self-hosted instances.                                              |
+| `default-login`  | The GitLab login used when no credential matches explicitly.                                     |
+| `export-foreign` | Set by hand. If `true`, `git bug bridge push` also exports what it skips by default (see below). |
+
+By default, pushing to GitLab skips issues imported from another bridge, and
+anything written by an author without a GitLab token. To push them anyway, for
+example to mirror issues pulled from GitHub:
+
+```bash
+git config git-bug.bridge.<name>.export-foreign true
+```
+
+Issues and comments by authors without a token are then posted with the
+`default-login` token, under a header naming the original author and date,
+with a link to the source issue or comment when there is one. Status, title
+and label changes are applied without attribution. Pulling from GitLab ignores
+that header, so a pull after a push records no spurious edits.
 
 #### Jira<a name="jira"></a>
 

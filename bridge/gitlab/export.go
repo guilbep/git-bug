@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gitlab.com/gitlab-org/api/client-go"
@@ -15,6 +16,7 @@ import (
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/bug"
 	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/entities/identity"
 	"github.com/git-bug/git-bug/entity"
 	"github.com/git-bug/git-bug/entity/dag"
 )
@@ -36,6 +38,11 @@ type gitlabExporter struct {
 	// cache identifiers used to speed up exporting operations
 	// cleared for each bug
 	cachedOperationIDs map[string]string
+
+	// export-foreign: also export bugs from other bridges, posting for authors
+	// without a token with the default-login client and an attribution header
+	exportForeign bool
+	defaultClient *gitlab.Client
 }
 
 // Init .
@@ -47,10 +54,31 @@ func (ge *gitlabExporter) Init(_ context.Context, repo *cache.RepoCache, conf co
 	// get repository node id
 	ge.repositoryID = ge.conf[confKeyProjectID]
 
+	if v, ok := conf[confKeyExportForeign]; ok {
+		var err error
+		ge.exportForeign, err = strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("%s: %w", confKeyExportForeign, err)
+		}
+	}
+
 	// preload all clients
 	err := ge.cacheAllClient(repo, ge.conf[confKeyGitlabBaseUrl])
 	if err != nil {
 		return err
+	}
+
+	if ge.exportForeign {
+		login := conf[confKeyDefaultLogin]
+		ids, err := identitiesWithLogin(repo, login)
+		if err != nil {
+			return fmt.Errorf("%s: identity for %s %q: %w", confKeyExportForeign, confKeyDefaultLogin, login, err)
+		}
+		// all of them have the same client
+		ge.defaultClient, err = ge.getIdentityClient(ids[0])
+		if err != nil {
+			return fmt.Errorf("%s: token for %s %q: %w", confKeyExportForeign, confKeyDefaultLogin, login, err)
+		}
 	}
 
 	return nil
@@ -119,6 +147,51 @@ func (ge *gitlabExporter) getIdentityClient(userId entity.Id) (*gitlab.Client, e
 	return nil, ErrMissingIdentityToken
 }
 
+// getAuthorClient returns the client to act as the given author, falling back
+// to the default-login client with export-foreign.
+func (ge *gitlabExporter) getAuthorClient(author identity.Interface) (*gitlab.Client, error) {
+	client, err := ge.getIdentityClient(author.Id())
+	if err != nil && ge.exportForeign {
+		return ge.defaultClient, nil
+	}
+	return client, err
+}
+
+// withAttribution prefixes text with an attribution to the author of textOp
+// (the create or add-comment operation that holds it) when that author has no
+// token, so the text is posted by the default-login client on their behalf.
+func (ge *gitlabExporter) withAttribution(textOp dag.Operation, origin, text string) string {
+	if _, ok := ge.identityClient[textOp.Author().Id()]; ok || !ge.exportForeign {
+		return text
+	}
+
+	name := textOp.Author().Name()
+	if name == "" {
+		name = textOp.Author().Login()
+	}
+	header := fmt.Sprintf("%s\n*Originally posted by %s on %s", attributionMarker, name,
+		textOp.Time().UTC().Format(time.DateOnly))
+	if url, ok := textOp.GetMetadata(origin + "-url"); ok {
+		header += fmt.Sprintf(", [view on %s](%s)", origin, url)
+	}
+	return header + "*\n\n" + text
+}
+
+// attributionMarker starts an attribution header. Being an HTML comment,
+// GitLab doesn't render it.
+const attributionMarker = "<!-- git-bug attribution -->"
+
+// stripAttribution removes the header added by withAttribution, after the
+// text went through text.Cleanup.
+func stripAttribution(text string) string {
+	if !strings.HasPrefix(text, attributionMarker) {
+		return text
+	}
+	// no separator when the body is empty, as text.Cleanup trims it
+	_, body, _ := strings.Cut(text, "\n\n")
+	return body
+}
+
 // ExportAll export all event made by the current user to Gitlab
 func (ge *gitlabExporter) ExportAll(ctx context.Context, repo *cache.RepoCache, since time.Time) (<-chan core.ExportResult, error) {
 	out := make(chan core.ExportResult)
@@ -153,7 +226,7 @@ func (ge *gitlabExporter) ExportAll(ctx context.Context, repo *cache.RepoCache, 
 					continue
 				}
 
-				if snapshot.HasAnyActor(allIdentitiesIds...) {
+				if ge.exportForeign || snapshot.HasAnyActor(allIdentitiesIds...) {
 					// try to export the bug and it associated events
 					ge.exportBug(ctx, b, out)
 				}
@@ -180,7 +253,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 
 	// skip bug if origin is not allowed
 	origin, ok := snapshot.GetCreateMetadata(core.MetaKeyOrigin)
-	if ok && origin != target {
+	if ok && origin != target && !ge.exportForeign {
 		out <- core.NewExportNothing(b.Id(), fmt.Sprintf("issue tagged with origin: %s", origin))
 		return
 	}
@@ -221,7 +294,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 
 	} else {
 		// check that we have a token for operation author
-		client, err := ge.getIdentityClient(author.Id())
+		client, err := ge.getAuthorClient(author)
 		if err != nil {
 			// if bug is still not exported and we do not have the author stop the execution
 			out <- core.NewExportNothing(b.Id(), fmt.Sprintf("missing author token"))
@@ -229,7 +302,8 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 		}
 
 		// create bug
-		_, id, url, err := createGitlabIssue(ctx, client, ge.repositoryID, createOp.Title, createOp.Message)
+		body := ge.withAttribution(createOp, origin, createOp.Message)
+		_, id, url, err := createGitlabIssue(ctx, client, ge.repositoryID, createOp.Title, body)
 		if err != nil {
 			err := fmt.Errorf("exporting gitlab issue: %w", err)
 			out <- core.NewExportError(err, b.Id())
@@ -285,7 +359,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 		}
 
 		opAuthor := op.Author()
-		client, err := ge.getIdentityClient(opAuthor.Id())
+		client, err := ge.getAuthorClient(opAuthor)
 		if err != nil {
 			continue
 		}
@@ -296,7 +370,8 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 		case *bug.AddCommentOperation:
 
 			// send operation to gitlab
-			id, err = addCommentGitlabIssue(ctx, client, ge.repositoryID, bugGitlabID, op.Message)
+			body := ge.withAttribution(op, origin, op.Message)
+			id, err = addCommentGitlabIssue(ctx, client, ge.repositoryID, bugGitlabID, body)
 			if err != nil {
 				err := fmt.Errorf("adding comment: %w", err)
 				out <- core.NewExportError(err, b.Id())
@@ -312,11 +387,20 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 		case *bug.EditCommentOperation:
 			targetId := op.Target.String()
 
+			// attribute the text to who posted it, not to who edited it
+			textOp := dag.Operation(op)
+			for _, o := range snapshot.Operations {
+				if o.Id() == op.Target {
+					textOp = o
+				}
+			}
+			body := ge.withAttribution(textOp, origin, op.Message)
+
 			// Since gitlab doesn't consider the issue body as a comment
 			if targetId == bugCreationId {
 
 				// case bug creation operation: we need to edit the Gitlab issue
-				if err := updateGitlabIssueBody(ctx, client, ge.repositoryID, bugGitlabID, op.Message); err != nil {
+				if err := updateGitlabIssueBody(ctx, client, ge.repositoryID, bugGitlabID, body); err != nil {
 					err := fmt.Errorf("editing issue: %w", err)
 					out <- core.NewExportError(err, b.Id())
 					return
@@ -340,7 +424,7 @@ func (ge *gitlabExporter) exportBug(ctx context.Context, b *cache.BugCache, out 
 					return
 				}
 
-				if err := editCommentGitlabIssue(ctx, client, ge.repositoryID, bugGitlabID, commentIDint, op.Message); err != nil {
+				if err := editCommentGitlabIssue(ctx, client, ge.repositoryID, bugGitlabID, commentIDint, body); err != nil {
 					err := fmt.Errorf("editing comment: %w", err)
 					out <- core.NewExportError(err, b.Id())
 					return
