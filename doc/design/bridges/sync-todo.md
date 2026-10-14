@@ -99,7 +99,31 @@ Known limits it showed:
       fake didn't have: labels need write access, issues of the same second
       listed newest first
 - [x] Two-way run against real forges (scratch projects), see below
-- [ ] Whole-branch review
+- [x] Whole-branch review: fixed two critical issues (conflicts decided by
+      the issue's last update; text of people without a token pushed
+      without sync), four important ones (partial GitHub timelines, legacy
+      duplicate pairs, not found taken for deleted, quadratic fingerprints)
+      and two re-graded ones (stray backtick, strangers' markers)
+
+## Deferred from the review (minor)
+
+- [ ] Reconcile's title, status and label changes print nothing.
+- [ ] `bridge push` alone, after a write whose answer was lost, creates the
+      issue twice: the marker recovers it only on pull. Use `bridge sync`.
+- [ ] GitHub rate limits never reach the engine: big backfills may fail
+      per bug.
+- [ ] Goroutine leaks when a caller stops early (GitLab issue listing, GitHub
+      mediator's edit reversal).
+- [ ] The attribution names the raw remote key when bridges are pulled and
+      pushed in separate processes instead of `bridge sync`.
+- [ ] The header links to the issue itself when a git-bug edit goes back to
+      the forge the text came from.
+- [ ] A label's case can flip once (GitHub and Gitea ignore it, the engine
+      doesn't).
+- [ ] `sync=false` is refused on Jira and Launchpad.
+- [ ] The 5 s import-time margin is smaller than the 5 min claim window.
+- [ ] Gitea lists issues newest first across pages.
+- [ ] `Remote.User` has no caller.
 
 ## Known issues to cover
 
