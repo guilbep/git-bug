@@ -15,6 +15,7 @@ from third-party platforms.
   - [Jira](#jira)
   - [Launchpad](#launchpad)
 - [Interacting with the bridge](#interacting-with-the-bridge)
+- [Quick start: sync a repository with GitHub and GitLab](#quick-start-sync-a-repository-with-github-and-gitlab)
 - [Syncing several platforms](#syncing-several-platforms)
 
 <!-- mdformat-toc end -->
@@ -176,12 +177,43 @@ To pull and integrate updates for issues from the bridge:
 git bug bridge pull [NAME]
 ```
 
+## Quick start: sync a repository with GitHub and GitLab<a name="quick-start-sync-a-repository-with-github-and-gitlab"></a>
+
+```bash
+# in a repository already holding git-bug issues: get them, and adopt your
+# identity so that the bridges tag it with your logins
+git bug pull origin
+git bug user adopt <your-identity-id>
+
+# one bridge per forge, with sync
+git bug bridge new --name gh --url https://github.com/<owner>/<repo> --sync
+git bug bridge new --name gl --target gitlab --url https://gitlab.example.com/<group>/<project> --sync
+
+git bug bridge sync --dry-run   # what would be pulled and pushed; changes nothing
+git bug bridge sync
+git bug push origin
+```
+
+`bridge new` takes the target from a github.com or gitlab.com URL, and the
+GitLab instance from the project URL (`--base-url` is only needed for an
+instance served under a path). It uses the forge's stored token when only one
+fits (`git bug bridge auth` lists them); otherwise pass `--credential <id>`, or
+a new token with `--token-stdin`, which is then stored for the next bridges.
+
+The same person on both forges is two identities, except token owners. Link
+their login on each bridge to one identity:
+
+```bash
+git config git-bug.bridge.gh.login-<identity-id> alice
+git config git-bug.bridge.gl.login-<identity-id> alice-ex
+```
+
 ## Syncing several platforms<a name="syncing-several-platforms"></a>
 
 By default, a bridge only pushes what a token owner can post, and never issues
 that came from another platform. To keep several platforms in sync through
 `git-bug`, for example a GitHub repository and a GitLab project, enable `sync`
-on their bridges:
+on their bridges, with `git bug bridge new --sync` or later:
 
 ```bash
 git config git-bug.bridge.<name>.sync true

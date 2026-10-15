@@ -107,9 +107,10 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       tests green, reads the co2 data. Its labels (`status:`, `prio:`,
       `sprint:`) are pushed to every synced forge.
 - [x] Installing the fork: INSTALLATION.md, "The bridge-sync fork".
-- [ ] Friendlier setup and help: a sync setup takes 9 commands, and the
-      `-h` and man pages don't explain the flow. Ideas: `bridge new
-      --sync`, reuse a stored token for the same login, a quick start page.
+- [x] Friendlier setup and help: `bridge new --sync`, the target guessed
+      from a github.com or gitlab.com URL, GitLab's base URL from the
+      project URL, the only stored credential that fits used; the flow in
+      `bridge sync -h`; a quick start in third-party.md.
 - [ ] Later: binaries of the fork (a tag runs release.yml); a scheduled CI
       runner; GitHub end-to-end tests (token with `delete_repo`); upstream
       (discuss on #1476 first, given #1223).

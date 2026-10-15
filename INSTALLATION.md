@@ -49,12 +49,14 @@ go install -ldflags "-X main.version=$(git describe --tags)" .
 Both install into `$(go env GOBIN)`, else `$(go env GOPATH)/bin`: put it on
 your `PATH` before any other `git-bug`. `git bug version` then shows
 `v0.11.0-<n>-g<commit>`, and `git bug bridge sync --help` works. To update,
-`git pull` in the clone and install again.
+`git pull` in the clone and install again. To set up a sync, see the
+[quick start][quick-start].
 
 Everyone running bridges on a repository synced with this version needs it
 too: an older `git-bug`'s `bridge pull` imports synced issues again.
 
 [fork]: https://github.com/guilbep/git-bug/tree/bridge-sync
+[quick-start]: doc/usage/third-party.md#quick-start-sync-a-repository-with-github-and-gitlab
 
 ## Download a pre-compiled release binary<a name="download-a-pre-compiled-release-binary"></a>
 
