@@ -191,13 +191,17 @@ func TestBaseFingerprintsOnlyItsSlot(t *testing.T) {
 	}
 	snap := b.Snapshot()
 
-	// the fastest of a few runs, without warm-up costs
+	// the time of one call, the fastest of a few rounds of at least 50ms:
+	// Windows' clock ticks too coarsely to time one call of microseconds
 	fastest := func(f func()) time.Duration {
 		var best time.Duration
-		for i := 0; i < 5; i++ {
-			start := time.Now()
-			f()
-			if d := time.Since(start); i == 0 || d < best {
+		for i := 0; i < 3; i++ {
+			n, start := 0, time.Now()
+			for time.Since(start) < 50*time.Millisecond {
+				f()
+				n++
+			}
+			if d := time.Since(start) / time.Duration(n); i == 0 || d < best {
 				best = d
 			}
 		}
