@@ -151,7 +151,7 @@ func LoadBridge(repo *cache.RepoCache, name string) (*Bridge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
-	if _, ported := bridge.impl.(RemoteBridge); !ported && conf[ConfigKeySync] != "" {
+	if !bridge.SupportsSync() && conf[ConfigKeySync] != "" {
 		return nil, fmt.Errorf("invalid configuration: the %s bridge doesn't support %s", target, ConfigKeySync)
 	}
 
@@ -462,6 +462,19 @@ func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
 		LoginKey:     b.impl.LoginMetaKey(),
 		Links:        links,
 	})
+}
+
+// SupportsSync tells whether the bridge can take part in `bridge sync`.
+func (b *Bridge) SupportsSync() bool {
+	_, ported := b.impl.(RemoteBridge)
+	return ported
+}
+
+// HasInstances tells whether the target runs on several instances, given by
+// --base-url, whose credentials record their instance.
+func (b *Bridge) HasInstances() bool {
+	_, ok := b.impl.ValidParams()["BaseURL"]
+	return ok
 }
 
 // IsSync tells whether the bridge takes part in `bridge sync`.

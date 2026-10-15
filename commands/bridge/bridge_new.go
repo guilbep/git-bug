@@ -2,8 +2,12 @@ package bridgecmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -24,6 +28,7 @@ type bridgeNewOptions struct {
 	token          string
 	tokenStdin     bool
 	nonInteractive bool
+	sync           bool
 }
 
 func newBridgeNewCommand(env *execenv.Env) *cobra.Command {
@@ -164,6 +169,7 @@ git bug bridge new \
 	flags.StringVarP(&options.params.Owner, "owner", "o", "", "The owner of the remote repository")
 	flags.StringVarP(&options.params.Project, "project", "p", "", "The name of the remote repository")
 	flags.BoolVar(&options.nonInteractive, "non-interactive", false, "Do not ask for user input")
+	flags.BoolVar(&options.sync, "sync", false, "Take part in \"git-bug bridge sync\" (sets git-bug.bridge.<name>.sync)")
 
 	return cmd
 }
@@ -171,10 +177,16 @@ git bug bridge new \
 func runBridgeNew(env *execenv.Env, opts bridgeNewOptions) error {
 	var err error
 
+	if opts.target == "" {
+		opts.target = targetOf(opts.params.URL)
+	}
+
 	if (opts.tokenStdin || opts.token != "" || opts.params.CredPrefix != "") &&
 		(opts.name == "" || opts.target == "") {
 		return fmt.Errorf("you must provide a bridge name and target to configure a bridge with a credential")
 	}
+	// set up with flags, a bridge can use a stored credential
+	byFlags := opts.name != "" && opts.target != ""
 
 	// early fail
 	if opts.params.CredPrefix != "" {
@@ -213,14 +225,89 @@ func runBridgeNew(env *execenv.Env, opts bridgeNewOptions) error {
 	if err != nil {
 		return err
 	}
+	if opts.sync && !b.SupportsSync() {
+		return fmt.Errorf("the %s bridge doesn't support sync", opts.target)
+	}
+
+	if byFlags && opts.params.CredPrefix == "" && opts.params.TokenRaw == "" {
+		opts.params.CredPrefix, err = pickCredential(env, opts.target, b.HasInstances(), opts.params, opts.nonInteractive)
+		if err != nil {
+			return err
+		}
+	}
 
 	err = b.Configure(opts.params, !opts.nonInteractive)
 	if err != nil {
 		return err
 	}
 
+	if opts.sync {
+		err = core.SetBridgeConfig(env.Backend, opts.name, core.ConfigKeySync, "true")
+		if err != nil {
+			return err
+		}
+	}
+
 	env.Out.Printf("Successfully configured bridge: %s\n", opts.name)
 	return nil
+}
+
+// targetOf returns the target of a repository URL on github.com or gitlab.com.
+func targetOf(repoURL string) string {
+	// the host of https://, ssh:// and git@host: URLs
+	m := regexp.MustCompile(`^(?:[a-z+]+://)?(?:[^@/]+@)?([^/:]+)`).FindStringSubmatch(repoURL)
+	if m == nil {
+		return ""
+	}
+	switch m[1] {
+	case "github.com":
+		return "github"
+	case "gitlab.com":
+		return "gitlab"
+	}
+	return ""
+}
+
+// pickCredential returns the id of the only stored credential of the target
+// that fits the bridge, if any: for a target with instances, a credential of
+// the instance given by --base-url, or else holding --url. When several fit,
+// the prompts choose, or --credential.
+func pickCredential(env *execenv.Env, target string, instances bool, params core.BridgeParams, nonInteractive bool) (string, error) {
+	creds, err := auth.List(env.Backend, auth.WithTarget(target))
+	if err != nil {
+		return "", err
+	}
+	if instances {
+		creds = slices.DeleteFunc(creds, func(c auth.Credential) bool {
+			base, ok := c.GetMetadata(auth.MetaKeyBaseURL)
+			base = strings.TrimSuffix(base, "/")
+			switch {
+			case !ok:
+				// the bridges of an instance only use its credentials
+				return true
+			case params.BaseURL != "":
+				return base != strings.TrimSuffix(params.BaseURL, "/")
+			default:
+				return !strings.HasPrefix(params.URL, base+"/")
+			}
+		})
+	}
+
+	switch {
+	case len(creds) == 1:
+		login, _ := creds[0].GetMetadata(auth.MetaKeyLogin)
+		env.Out.Printf("Using the stored credential %s (%s), see \"git-bug bridge auth\"\n", creds[0].ID().Human(), login)
+		return creds[0].ID().String(), nil
+	case len(creds) > 1 && nonInteractive:
+		sort.Sort(auth.ById(creds))
+		msg := fmt.Sprintf("%d stored %s credentials fit, choose one with --credential <id>:", len(creds), target)
+		for _, c := range creds {
+			login, _ := c.GetMetadata(auth.MetaKeyLogin)
+			msg += fmt.Sprintf("\n  %s %s", c.ID().Human(), login)
+		}
+		return "", errors.New(msg)
+	}
+	return "", nil
 }
 
 func promptTarget() (string, error) {

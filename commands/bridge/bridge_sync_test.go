@@ -17,19 +17,26 @@ import (
 // fakeForges are the forges of the fakecmd bridges, by project name.
 var fakeForges = map[string]*synctest.Fake{}
 
-// fakeBridge is a bridge ported to the sync engine, on a fake forge.
+// fakeParams are the parameters of the last fakecmd bridge configured.
+var fakeParams core.BridgeParams
+
+// fakeBridge is a bridge ported to the sync engine, on a fake forge. Like
+// GitLab, it has instances.
 type fakeBridge struct{}
 
-func (fakeBridge) Target() string                      { return "fakecmd" }
-func (fakeBridge) LoginMetaKey() string                { return "fakecmd-login" }
-func (fakeBridge) NewImporter() core.Importer          { return nil }
-func (fakeBridge) NewExporter() core.Exporter          { return nil }
-func (fakeBridge) ValidParams() map[string]interface{} { return nil }
+func (fakeBridge) Target() string             { return "fakecmd" }
+func (fakeBridge) LoginMetaKey() string       { return "fakecmd-login" }
+func (fakeBridge) NewImporter() core.Importer { return nil }
+func (fakeBridge) NewExporter() core.Exporter { return nil }
+func (fakeBridge) ValidParams() map[string]interface{} {
+	return map[string]interface{}{"URL": nil, "BaseURL": nil, "CredPrefix": nil}
+}
 func (fakeBridge) ValidateConfig(core.Configuration) error {
 	return nil
 }
-func (fakeBridge) Configure(*cache.RepoCache, core.BridgeParams, bool) (core.Configuration, error) {
-	return nil, nil
+func (fakeBridge) Configure(_ *cache.RepoCache, params core.BridgeParams, _ bool) (core.Configuration, error) {
+	fakeParams = params
+	return core.Configuration{core.ConfigKeyTarget: "fakecmd"}, nil
 }
 func (fakeBridge) NewRemote(_ context.Context, _ *cache.RepoCache, conf core.Configuration) (core.Remote, error) {
 	return fakeForges[conf["project"]], nil
