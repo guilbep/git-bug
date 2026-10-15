@@ -33,12 +33,11 @@ func (g *Gitlab) ValidParams() map[string]interface{} {
 
 func (g *Gitlab) Configure(repo *cache.RepoCache, params core.BridgeParams, interactive bool) (core.Configuration, error) {
 	var err error
-	var baseUrl string
-
-	switch {
-	case params.BaseURL != "":
-		baseUrl = params.BaseURL
-	default:
+	baseUrl := params.BaseURL
+	if baseUrl == "" {
+		baseUrl = instanceURL(params.URL)
+	}
+	if baseUrl == "" {
 		if !interactive {
 			return nil, fmt.Errorf("Non-interactive-mode is active. Please specify the gitlab instance URL via the --base-url option.")
 		}
@@ -229,6 +228,16 @@ func promptProjectURL(repo repository.RepoConfig, baseUrl string) (string, error
 	}
 
 	return input.PromptURLWithRemote("Gitlab project URL", "URL", validRemotes, input.Required)
+}
+
+// instanceURL returns the root of the instance of a project URL, or nothing
+// for an SSH URL. An instance served under a path needs --base-url.
+func instanceURL(projectURL string) string {
+	u, err := url.Parse(projectURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + "/"
 }
 
 func getProjectPath(baseUrl, projectUrl string) (string, error) {
