@@ -111,8 +111,18 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       from a github.com or gitlab.com URL, GitLab's base URL from the
       project URL, the only stored credential that fits used; the flow in
       `bridge sync -h`; a quick start in third-party.md.
-- [ ] Later: binaries of the fork (a tag runs release.yml); a scheduled CI
-      runner; GitHub end-to-end tests (token with `delete_repo`); upstream
+- [x] A dry run reports the issues a pull would find by their git-bug
+      marker ("would sync with …") instead of planning to create them
+      again. Seen on the wiki: from a clone without the links of the first
+      real sync (2026-10-14, GitLab #7–#11, GitHub #29), it announced five
+      duplicates the real run wouldn't make.
+- [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
+      fork's `trunk`, never merged) runs build-and-test.yml on every push,
+      once Actions are enabled on the fork (a one-time click in its Actions
+      tab; no API for it).
+- [ ] Binaries of the fork: after that click, a `v0.11.1-sync.N` tag runs
+      release.yml, which makes a *draft* release to publish by hand.
+- [ ] Later: GitHub end-to-end tests (token with `delete_repo`); upstream
       (discuss on #1476 first, given #1223).
 
 ## Design (sync.md), approved section by section
