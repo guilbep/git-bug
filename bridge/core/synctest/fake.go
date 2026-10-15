@@ -128,6 +128,16 @@ func (f *Fake) Issues(_ context.Context, since time.Time) iter.Seq2[*core.Issue,
 	}
 }
 
+func (f *Fake) Fetch(_ context.Context, ref core.Ref) (*core.Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	issue, err := f.find(ref)
+	if err != nil {
+		return nil, err
+	}
+	return issue.clone(), nil
+}
+
 func (f *Fake) User(_ context.Context, id string) (core.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

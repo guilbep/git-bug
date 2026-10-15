@@ -104,3 +104,19 @@ func TestBridgeSyncDryRunFailsOnErrors(t *testing.T) {
 
 	require.ErrorContains(t, runBridgeSync(env, bridgeSyncOptions{dryRun: true}, nil), "error")
 }
+
+func TestBridgeSyncOneIssue(t *testing.T) {
+	env, _ := testenv.NewTestEnvAndUser(t)
+	a := newFakeForge(t, env, "a")
+	mine, _, err := env.Backend.Bugs().New("mine", "body")
+	require.NoError(t, err)
+	_, _, err = env.Backend.Bugs().New("not mine", "body")
+	require.NoError(t, err)
+
+	require.NoError(t, runBridgeSync(env, bridgeSyncOptions{issue: mine.Id().Human()}, nil))
+	require.Equal(t, "mine", a.Issue("1").Title)
+	require.Nil(t, a.Issue("2"), "only that issue")
+	require.Contains(t, output(env), "pulled 0 issues, pushed 1 issues")
+
+	require.Error(t, runBridgeSync(env, bridgeSyncOptions{issue: "deadbeef"}, nil))
+}

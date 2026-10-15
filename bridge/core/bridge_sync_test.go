@@ -257,3 +257,71 @@ func TestStoppedPullKeepsResumeTime(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, last)
 }
+
+// SyncIssue syncs one bug with every sync bridge: its changes go out,
+// its issue's changes come in, and nothing else moves.
+func TestSyncIssue(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	b := newSyncForge(t, repo, "b")
+	alice := a.UserAct("alice")
+	ref := alice.CreateIssue("from a", "body")
+	results, err := core.SyncAll(context.Background(), repo, []string{"a", "b"}, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+	bug := onlyBug(t, repo)
+
+	// a local comment, a forge comment on it, and changes elsewhere
+	_, _, err = bug.AddComment("from git-bug")
+	require.NoError(t, err)
+	require.NoError(t, bug.Commit())
+	alice.Comment(ref, "from the forge")
+	other := alice.CreateIssue("not synced", "body")
+	_, _, err = repo.Bugs().New("local, not synced", "body")
+	require.NoError(t, err)
+
+	results, err = core.SyncIssue(context.Background(), repo, bug.Id().Human(), nil, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+
+	var texts []string
+	for _, c := range bug.Snapshot().Comments {
+		texts = append(texts, c.Message)
+	}
+	require.Contains(t, texts, "from the forge", "its issue's comment came in")
+	require.Len(t, a.Issue(ref.Number).Comments, 2, "the local comment went out to a")
+	require.Len(t, b.Issue("1").Comments, 2, "and to b")
+	require.Nil(t, b.Issue("2"), "the other local bug stayed local")
+	require.Len(t, repo.Bugs().AllIds(), 2, "the other forge issue wasn't pulled")
+	require.NotNil(t, a.Issue(other.Number))
+}
+
+func TestSyncIssueDryRun(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	bug, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+
+	results, err := core.SyncIssue(context.Background(), repo, bug.Id().Human(), []string{"a"}, true)
+	require.NoError(t, err)
+	var report []string
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+		report = append(report, r.String())
+	}
+	require.Zero(t, a.Writes())
+	all := strings.Join(report, "\n")
+	require.Contains(t, all, "not on this forge yet")
+	require.Contains(t, all, "would create issue: local")
+}
+
+func TestSyncIssueUnknownBug(t *testing.T) {
+	repo := newRepo(t)
+	newSyncForge(t, repo, "a")
+	_, err := core.SyncIssue(context.Background(), repo, "deadbeef", nil, false)
+	require.Error(t, err)
+}

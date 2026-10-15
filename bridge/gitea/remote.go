@@ -195,6 +195,15 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 	}
 }
 
+func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
+	number := cmp.Or(ref.Number, strings.TrimPrefix(ref.ID, "issue-"))
+	var gi apiIssue
+	if err := r.do(ctx, r.reader, http.MethodGet, r.repoPath("/issues/"+url.PathEscape(number)), nil, &gi); err != nil {
+		return nil, err
+	}
+	return r.convert(ctx, gi)
+}
+
 // convert returns a Gitea issue and its timeline as the engine wants it.
 // Gitea keeps no history of texts: the original ones are the current ones,
 // and text edits come without event.

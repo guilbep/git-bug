@@ -40,6 +40,12 @@ type issueQuery struct {
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
+type oneIssueQuery struct {
+	Repository struct {
+		Issue *issueNode `graphql:"issue(number: $issueNumber)"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
 type issueEditQuery struct {
 	Node struct {
 		Typename githubv4.String `graphql:"__typename"`

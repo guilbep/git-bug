@@ -119,6 +119,9 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 - [x] `git bug push` reaches every push URL of a remote, as git push does.
       The wiki's origin mirrors to GitHub and GitLab (two pushurls): the
       sync's links had reached GitLab only.
+- [x] One issue at a time: `bridge sync --issue <id>` (core `SyncIssue`,
+      `Remote.Fetch` on GitHub, GitLab, Gitea and the fake, a conformance
+      scenario). git-board's issue panel calls it: Send now, Refresh.
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
       fork's `trunk`, never merged) runs build-and-test.yml on every push,
       once Actions are enabled on the fork (a one-time click in its Actions

@@ -17,6 +17,7 @@ import (
 
 type bridgeSyncOptions struct {
 	dryRun bool
+	issue  string
 }
 
 func newBridgeSyncCommand(env *execenv.Env) *cobra.Command {
@@ -51,7 +52,12 @@ Run it from a single place, for example a CI job:
 
 The first sync of a repository mirrors every issue. --dry-run reads every
 forge and lists what would be pulled and pushed, and changes nothing, locally
-or on the forges.`,
+or on the forges.
+
+--issue syncs one issue only: its changes on each forge it is on are
+pulled, then its changes pushed to every forge, creating it where a sync
+would. Nothing else is read or written, and the next full sync still
+reads everything changed since the last one.`,
 		Example: `# In a repository already holding git-bug issues, get them and adopt your
 # identity first, so that the bridges tag it with your logins
 git bug pull origin
@@ -67,7 +73,10 @@ git config git-bug.bridge.gl.login-22ea975 alice-ex
 
 git bug bridge sync --dry-run
 git bug bridge sync
-git bug push origin`,
+git bug push origin
+
+# Only one issue, right now
+git bug bridge sync --issue 4f2a1c9`,
 		PreRunE: execenv.LoadBackend(env, execenv.EnsureUser()),
 		RunE: execenv.CloseBackend(env, func(cmd *cobra.Command, args []string) error {
 			return runBridgeSync(env, options, args)
@@ -78,6 +87,7 @@ git bug push origin`,
 	flags := cmd.Flags()
 	flags.SortFlags = false
 	flags.BoolVar(&options.dryRun, "dry-run", false, "Report what would be pulled and pushed, and change nothing")
+	flags.StringVar(&options.issue, "issue", "", "Sync only this issue (an id prefix)")
 
 	return cmd
 }
@@ -105,7 +115,13 @@ func runBridgeSync(env *execenv.Env, opts bridgeSyncOptions, args []string) erro
 		return nil
 	})
 
-	results, err := core.SyncAll(ctx, env.Backend, args, opts.dryRun)
+	var results <-chan core.SyncResult
+	var err error
+	if opts.issue != "" {
+		results, err = core.SyncIssue(ctx, env.Backend, opts.issue, args, opts.dryRun)
+	} else {
+		results, err = core.SyncAll(ctx, env.Backend, args, opts.dryRun)
+	}
 	if err != nil {
 		return err
 	}

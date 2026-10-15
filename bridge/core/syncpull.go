@@ -45,6 +45,33 @@ func (e *Engine) Pull(ctx context.Context, since time.Time) <-chan ImportResult 
 	return out
 }
 
+// PullIssue brings one bug's issue into git-bug, as Pull does every issue
+// changed since a time: nothing when the bug isn't on the forge.
+func (e *Engine) PullIssue(ctx context.Context, b *cache.BugCache) <-chan ImportResult {
+	out := make(chan ImportResult)
+	go func() {
+		defer close(out)
+		snap := b.Snapshot()
+		ref, ok := e.issueRef(snap)
+		if _, gone := snap.Operations[0].GetMetadata(e.key("gone")); !ok || gone {
+			out <- NewImportNothing(b.Id(), "not on this forge yet")
+			return
+		}
+		issue, err := e.remote.Fetch(ctx, ref)
+		if errors.Is(err, ErrGone) {
+			out <- NewImportWarning(fmt.Errorf("issue %s deleted on the forge", ref.URL), b.Id())
+			return
+		}
+		if err == nil {
+			err = e.pullIssue(ctx, issue, out)
+		}
+		if err != nil {
+			out <- NewImportError(fmt.Errorf("issue %s: %w", ref.URL, err), b.Id())
+		}
+	}()
+	return out
+}
+
 func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportResult) error {
 	b, duplicate, err := e.findBug(issue, out)
 	if err != nil {

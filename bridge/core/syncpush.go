@@ -29,19 +29,7 @@ func (e *Engine) Push(ctx context.Context) <-chan ExportResult {
 	go func() {
 		defer close(out)
 
-		var excerpts []*cache.BugExcerpt
-		for _, id := range e.repo.Bugs().AllIds() {
-			excerpt, err := e.repo.Bugs().ResolveExcerpt(id)
-			if err != nil {
-				out <- NewExportError(err, id)
-				continue
-			}
-			excerpts = append(excerpts, excerpt)
-		}
-		slices.SortFunc(excerpts, func(a, b *cache.BugExcerpt) int {
-			return cmp.Or(cmp.Compare(a.CreateUnixTime, b.CreateUnixTime),
-				cmp.Compare(a.CreateLamportTime, b.CreateLamportTime))
-		})
+		excerpts := e.excerpts(out)
 		refs := newRefIndex(excerpts)
 
 		for _, excerpt := range excerpts {
@@ -61,6 +49,56 @@ func (e *Engine) Push(ctx context.Context) <-chan ExportResult {
 	return out
 }
 
+// PushBug sends one bug to the forge, as Push does every bug.
+func (e *Engine) PushBug(ctx context.Context, b *cache.BugCache) <-chan ExportResult {
+	out := make(chan ExportResult)
+	go func() {
+		defer close(out)
+		// every bug's issues: references in its texts are translated
+		refs := newRefIndex(e.excerpts(out))
+		if err := e.pushBug(ctx, b, refs, out); err != nil {
+			out <- NewExportError(err, b.Id())
+		}
+	}()
+	return out
+}
+
+// excerpts are every bug's, oldest first.
+func (e *Engine) excerpts(out chan<- ExportResult) []*cache.BugExcerpt {
+	var excerpts []*cache.BugExcerpt
+	for _, id := range e.repo.Bugs().AllIds() {
+		excerpt, err := e.repo.Bugs().ResolveExcerpt(id)
+		if err != nil {
+			out <- NewExportError(err, id)
+			continue
+		}
+		excerpts = append(excerpts, excerpt)
+	}
+	slices.SortFunc(excerpts, func(a, b *cache.BugExcerpt) int {
+		return cmp.Or(cmp.Compare(a.CreateUnixTime, b.CreateUnixTime),
+			cmp.Compare(a.CreateLamportTime, b.CreateLamportTime))
+	})
+	return excerpts
+}
+
+// issueRef is a bug's issue on the forge, if it is there.
+func (e *Engine) issueRef(snap *bug.Snapshot) (Ref, bool) {
+	id, ok := remoteIssueID(snap, e.remote)
+	if !ok {
+		return Ref{}, false
+	}
+	create := snap.Operations[0]
+	ref := Ref{ID: id, URL: metadata(create, e.key("url")), Number: metadata(create, e.key("number"))}
+	if ref.URL == "" {
+		// pulled by a pre-sync bridge
+		ref.URL = metadata(create, e.remote.Kind()+"-url")
+	}
+	if ref.Number == "" {
+		ref.Number = trailingNumber.FindString(ref.URL)
+	}
+	return ref, true
+}
+
 func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex, out chan<- ExportResult) error {
 	snap := b.Snapshot()
 	createOp := snap.Operations[0]
@@ -68,7 +106,7 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 		return nil
 	}
 
-	issueID, onRemote := remoteIssueID(snap, e.remote)
+	_, onRemote := remoteIssueID(snap, e.remote)
 	if !e.opts.Foreign && !onRemote {
 		// without sync, a bug from a forge goes back to that forge only
 		if origin, ok := snap.GetCreateMetadata(MetaKeyOrigin); ok {
@@ -88,7 +126,7 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 
 	var issue Ref
 	if onRemote {
-		issue = Ref{ID: issueID, URL: metadata(createOp, e.key("url")), Number: metadata(createOp, e.key("number"))}
+		issue, _ = e.issueRef(snap)
 	} else {
 		var ok bool
 		var err error

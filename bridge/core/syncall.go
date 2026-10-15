@@ -32,6 +32,23 @@ func (r SyncResult) String() string {
 // pushes to each of them, under the repository's bridge lock. What one
 // bridge pulls reaches the others in the same run.
 func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun bool) (<-chan SyncResult, error) {
+	return syncRun(ctx, repo, names, dryRun, nil)
+}
+
+// SyncIssue syncs one bug, by id prefix, as SyncAll does every bug: its
+// issue is pulled from each forge it is on, then the bug pushed to each,
+// its issue created where a push would create it. The bridges' sync times
+// stay as they were: no other issue was read.
+func SyncIssue(ctx context.Context, repo *cache.RepoCache, prefix string, names []string, dryRun bool) (<-chan SyncResult, error) {
+	b, err := repo.Bugs().ResolvePrefix(prefix)
+	if err != nil {
+		return nil, err
+	}
+	return syncRun(ctx, repo, names, dryRun, b)
+}
+
+// syncRun is SyncAll, or SyncIssue when only is set.
+func syncRun(ctx context.Context, repo *cache.RepoCache, names []string, dryRun bool, only *cache.BugCache) (<-chan SyncResult, error) {
 	if len(names) == 0 {
 		all, err := ConfiguredBridges(repo)
 		if err != nil {
@@ -84,11 +101,17 @@ func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun 
 			// a bit before, just to be sure
 			start := time.Now().Add(-5 * time.Second)
 			pulled[i] = true
-			for r := range engines[i].Pull(ctx, b.configTime(configKeyLastSyncTime)) {
+			var pulls <-chan ImportResult
+			if only != nil {
+				pulls = engines[i].PullIssue(ctx, only)
+			} else {
+				pulls = engines[i].Pull(ctx, b.configTime(configKeyLastSyncTime))
+			}
+			for r := range pulls {
 				pulled[i] = pulled[i] && r.Event != ImportEventError
 				out <- SyncResult{Bridge: b.Name, Import: &r}
 			}
-			if pulled[i] && !dryRun {
+			if pulled[i] && !dryRun && only == nil {
 				_ = b.storeConfigTime(configKeyLastSyncTime, start)
 			}
 		}
@@ -100,7 +123,13 @@ func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun 
 				out <- SyncResult{Bridge: b.Name, Export: &r}
 				continue
 			}
-			for r := range engines[i].Push(ctx) {
+			var pushes <-chan ExportResult
+			if only != nil {
+				pushes = engines[i].PushBug(ctx, only)
+			} else {
+				pushes = engines[i].Push(ctx)
+			}
+			for r := range pushes {
 				out <- SyncResult{Bridge: b.Name, Export: &r}
 			}
 		}

@@ -38,6 +38,9 @@ type importMediator struct {
 	// finds a page too costly.
 	issueFirst int
 
+	// number, when set, is the one issue to read instead (Fetch).
+	number int
+
 	// importEvents holds events representing issues, comments, edits, ...
 	// In this channel issues are immediately followed by their issue edits and comments are
 	// immediately followed by their comment edits.
@@ -61,6 +64,20 @@ func NewImportMediator(ctx context.Context, client *rateLimitHandlerClient, owne
 
 	go mm.start(ctx)
 
+	return &mm
+}
+
+// newIssueMediator reads one issue, by number, as NewImportMediator reads
+// every issue changed since a time.
+func newIssueMediator(ctx context.Context, client *rateLimitHandlerClient, owner, project string, number int) *importMediator {
+	mm := importMediator{
+		gh:           client,
+		owner:        owner,
+		project:      project,
+		number:       number,
+		importEvents: make(chan ImportEvent, ChanCapacity),
+	}
+	go mm.start(ctx)
 	return &mm
 }
 
@@ -100,6 +117,10 @@ func (mm *importMediator) User(ctx context.Context, loginName string) (*user, er
 }
 
 func (mm *importMediator) fillImportEvents(ctx context.Context) {
+	if mm.number > 0 {
+		mm.fillOneIssue(ctx)
+		return
+	}
 	initialCursor := githubv4.String("")
 	issues, hasIssues := mm.queryIssue(ctx, initialCursor)
 	for hasIssues {
@@ -120,6 +141,38 @@ func (mm *importMediator) fillImportEvents(ctx context.Context) {
 		}
 		issues, hasIssues = mm.queryIssue(ctx, issues.PageInfo.EndCursor)
 	}
+}
+
+// fillOneIssue reads issue number mm.number, its edits and its timeline;
+// nothing when the repository has no such issue.
+func (mm *importMediator) fillOneIssue(ctx context.Context) {
+	vars := varmap{
+		"owner":             githubv4.String(mm.owner),
+		"name":              githubv4.String(mm.project),
+		"issueNumber":       githubv4.Int(mm.number),
+		"issueEditLast":     githubv4.Int(NumIssueEdits),
+		"issueEditBefore":   (*githubv4.String)(nil),
+		"timelineFirst":     githubv4.Int(NumTimelineItems),
+		"timelineAfter":     (*githubv4.String)(nil),
+		"commentEditLast":   githubv4.Int(NumCommentEdits),
+		"commentEditBefore": (*githubv4.String)(nil),
+	}
+	query := oneIssueQuery{}
+	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
+		mm.setErr(err)
+		return
+	}
+	node := query.Repository.Issue
+	if node == nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case mm.importEvents <- IssueEvent{node.issue}:
+	}
+	mm.fillIssueEditEvents(ctx, node)
+	mm.fillTimelineEvents(ctx, node)
 }
 
 func (mm *importMediator) fillIssueEditEvents(ctx context.Context, issueNode *issueNode) {

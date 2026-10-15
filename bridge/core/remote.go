@@ -47,6 +47,10 @@ type Remote interface {
 
 	// Issues lists the issues updated since the given time, oldest first.
 	Issues(ctx context.Context, since time.Time) iter.Seq2[*Issue, error]
+	// Fetch returns one issue as Issues lists them, ErrGone when it no
+	// longer exists. The Ref is what git-bug knows of it: its ID, and its
+	// URL and Number when recorded.
+	Fetch(ctx context.Context, issue Ref) (*Issue, error)
 	// User returns a forge user's profile.
 	User(ctx context.Context, id string) (User, error)
 

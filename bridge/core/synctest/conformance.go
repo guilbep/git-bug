@@ -40,6 +40,7 @@ func Run(t *testing.T, h Harness) {
 		"token owner acts directly":  tokenOwnerActsDirectly,
 		"refs never mirrored":        refsNeverMirrored,
 		"deletion is not propagated": deletionNotPropagated,
+		"one issue syncs alone":      oneIssueAlone,
 	} {
 		t.Run(name, func(t *testing.T) {
 			scenario(newWorld(t, h))
@@ -328,4 +329,38 @@ func deletionNotPropagated(w *world) {
 	require.Equal(w.t, common.OpenStatus, got.Status)
 	require.False(w.t, strings.Contains(got.Body, "deleted"))
 	w.stable()
+}
+
+// oneIssueAlone syncs one issue (Fetch, PullIssue, PushBug): its changes
+// come and go, no other issue is read.
+func oneIssueAlone(w *world) {
+	ctx := context.Background()
+	alice := w.a.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	w.sync()
+	alice.Comment(ref, "from a")
+	alice.CreateIssue("another", "body")
+
+	got, err := w.a.Fetch(ctx, ref)
+	require.NoError(w.t, err)
+	require.Equal(w.t, "title", got.Title)
+	require.Len(w.t, got.Comments, 1)
+
+	b := w.onlyBug()
+	for _, f := range []Forge{w.a, w.b} {
+		for r := range w.engine(f).PullIssue(ctx, b) {
+			require.NotEqual(w.t, core.ImportEventError, r.Event, r.String())
+		}
+	}
+	for _, f := range []Forge{w.a, w.b} {
+		for r := range w.engine(f).PushBug(ctx, b) {
+			require.NotEqual(w.t, core.ExportEventError, r.Event, r.String())
+		}
+	}
+	require.Equal(w.t, 1, w.bugCount(), "the other issue wasn't read")
+	require.Len(w.t, w.issue(w.b, "title").Comments, 1, "a's comment reached b")
+
+	alice.Delete(ref)
+	_, err = w.a.Fetch(ctx, ref)
+	require.ErrorIs(w.t, err, core.ErrGone)
 }

@@ -272,6 +272,16 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 				q.Repository.Issues.Nodes = append(q.Repository.Issues.Nodes, f.node(issue))
 			}
 		}
+	case *oneIssueQuery:
+		number := int(vars["issueNumber"].(githubv4.Int))
+		for _, issue := range f.issues {
+			if issue.number == number && !issue.deleted {
+				node := f.node(issue)
+				q.Repository.Issue = &node
+				return nil
+			}
+		}
+		return fmt.Errorf("Could not resolve to an Issue with the number of %d", number)
 	default:
 		return fmt.Errorf("fake GitHub doesn't answer %T", q)
 	}

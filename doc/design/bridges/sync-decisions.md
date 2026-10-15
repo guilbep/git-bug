@@ -146,6 +146,16 @@ spec stays the authority.
   instead of the old exporters' operation counts, and `GITLAB_BASE_URL`
   selects the instance. GitLab's passed on gitlab.epfl.ch; GitHub's and
   `TestGitlabImport` couldn't run here.
+- **One issue syncs alone: `SyncIssue` (`bridge sync --issue`) runs
+  `SyncAll`'s rules on one bug** — same bridges, lock, and no push to a
+  forge whose pull failed. Its issue is fetched by its recorded id and
+  number from each forge it is on (`Remote.Fetch`, a GraphQL
+  `issue(number:)` on GitHub, `GET …/issues/:iid` on GitLab and Gitea),
+  then the bug is pushed to every forge, created where a full sync would
+  create it. The bridges' `lastSyncTime` stays: no other issue was read,
+  so the next full sync still reads everything changed since the last one.
+  For a person who wants one comment out now, without a run over every
+  issue (a minute and more on co2). *If wrong:* a full sync does it all.
 
 ## Set aside
 

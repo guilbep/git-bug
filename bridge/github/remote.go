@@ -2,6 +2,7 @@ package github
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	neturl "net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,41 +111,68 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 		// stops the mediator if the caller stops early
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		build(NewImportMediator(ctx, r.reader, r.owner, r.project, since), yield)
+	}
+}
 
-		mm := NewImportMediator(ctx, r.reader, r.owner, r.project, since)
-		var cur *issueBuilder
-		for {
-			ev := mm.NextImportEvent()
-			if ev == nil {
-				break
+func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
+	number, err := strconv.Atoi(cmp.Or(ref.Number, trailingNumber.FindString(ref.URL)))
+	if err != nil {
+		return nil, fmt.Errorf("issue %s: no number to fetch it by", cmp.Or(ref.URL, ref.ID))
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var issue *core.Issue
+	build(newIssueMediator(ctx, r.reader, r.owner, r.project, number), func(i *core.Issue, e error) bool {
+		issue, err = i, e
+		return false
+	})
+	switch {
+	case err != nil:
+		return nil, mapErr(err)
+	case issue == nil:
+		return nil, fmt.Errorf("%w: issue #%d", core.ErrGone, number)
+	}
+	return issue, nil
+}
+
+var trailingNumber = regexp.MustCompile(`\d+$`)
+
+// build yields the issues the mediator reads, each with its edits and
+// timeline.
+func build(mm *importMediator, yield func(*core.Issue, error) bool) {
+	var cur *issueBuilder
+	for {
+		ev := mm.NextImportEvent()
+		if ev == nil {
+			break
+		}
+		switch ev := ev.(type) {
+		case IssueEvent:
+			// a failure reading the previous issue leaves it partial: the
+			// mediator records it before going on with this one
+			if err := mm.Error(); err != nil {
+				yield(nil, err)
+				return
 			}
-			switch ev := ev.(type) {
-			case IssueEvent:
-				// a failure reading the previous issue leaves it partial: the
-				// mediator records it before going on with this one
-				if err := mm.Error(); err != nil {
-					yield(nil, err)
-					return
-				}
-				if cur != nil && !yield(cur.finish(), nil) {
-					return
-				}
-				cur = newIssueBuilder(ev.issue)
-			case IssueEditEvent:
-				cur.edit("", ev.userContentEdit)
-			case TimelineEvent:
-				cur.timeline(ev.timelineItem)
-			case CommentEditEvent:
-				cur.edit(fmt.Sprint(ev.commentId), ev.userContentEdit)
+			if cur != nil && !yield(cur.finish(), nil) {
+				return
 			}
+			cur = newIssueBuilder(ev.issue)
+		case IssueEditEvent:
+			cur.edit("", ev.userContentEdit)
+		case TimelineEvent:
+			cur.timeline(ev.timelineItem)
+		case CommentEditEvent:
+			cur.edit(fmt.Sprint(ev.commentId), ev.userContentEdit)
 		}
-		if err := mm.Error(); err != nil {
-			yield(nil, err)
-			return
-		}
-		if cur != nil {
-			yield(cur.finish(), nil)
-		}
+	}
+	if err := mm.Error(); err != nil {
+		yield(nil, err)
+		return
+	}
+	if cur != nil {
+		yield(cur.finish(), nil)
 	}
 }
 
@@ -497,7 +526,8 @@ func mapErr(err error) error {
 	}
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "Could not resolve to a node"), strings.Contains(msg, "NOT_FOUND"):
+	case strings.Contains(msg, "Could not resolve to a node"), strings.Contains(msg, "Could not resolve to an Issue"),
+		strings.Contains(msg, "NOT_FOUND"):
 		return fmt.Errorf("%w: %w", core.ErrGone, err)
 	case strings.Contains(msg, "FORBIDDEN"), strings.Contains(msg, "Resource not accessible"),
 		strings.Contains(msg, "does not have permission"):
