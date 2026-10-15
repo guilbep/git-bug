@@ -77,6 +77,10 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 		}
 	}
 
+	if url, ok := e.attached[b.Id()]; ok && !onRemote {
+		out <- NewExportNothing(b.Id(), "would sync with "+url+", found by its git-bug marker")
+		return nil
+	}
 	if e.opts.DryRun {
 		e.planPush(b, snap, onRemote, out)
 		return nil

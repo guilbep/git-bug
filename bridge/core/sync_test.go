@@ -122,6 +122,33 @@ func TestPullAttachesByMarker(t *testing.T) {
 	require.Equal(t, issue.ID, id)
 }
 
+// A dry run that would attach an issue by its marker doesn't plan to
+// create another: the real run records the link before pushing.
+func TestDryRunKnowsWhatPullWouldAttach(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	b, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	issue, err := f.CreateIssue(context.Background(), bot, "local", core.Render("body", b.Id(), nil, nil, nil))
+	require.NoError(t, err)
+
+	e, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
+		Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
+	})
+	require.NoError(t, err)
+	for r := range e.Pull(context.Background(), time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+	}
+	var planned []string
+	for r := range e.Push(context.Background()) {
+		require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+		planned = append(planned, r.String())
+	}
+	require.Len(t, planned, 1)
+	require.NotContains(t, planned[0], "would create")
+	require.Contains(t, planned[0], issue.URL)
+}
+
 func TestPullUnrendersText(t *testing.T) {
 	repo := newRepo(t)
 	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)

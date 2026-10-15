@@ -40,10 +40,17 @@ type Engine struct {
 
 	// accounts maps the identities of token owners to their account.
 	accounts map[entity.Id]Account
+	// tokens are the accounts with a token, identity or not yet (a dry
+	// run creates none).
+	tokens []Account
 	// defaultAccount posts for people without an account, with Foreign.
 	defaultAccount *Account
 	// links are the identities of forge users, by lowercased login.
 	links map[string]entity.Id
+	// attached are, in a dry run, the bugs a pull would attach to an issue
+	// by its marker, with the issue's URL: the real run records the link,
+	// so its push doesn't create another.
+	attached map[entity.Id]string
 }
 
 func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOptions) (*Engine, error) {
@@ -52,7 +59,7 @@ func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOp
 	if err != nil {
 		return nil, err
 	}
-	e := &Engine{repo: repo, remote: r, opts: opts, links: map[string]entity.Id{}}
+	e := &Engine{repo: repo, remote: r, opts: opts, tokens: list, links: map[string]entity.Id{}, attached: map[entity.Id]string{}}
 	for login, prefix := range opts.Links {
 		i, err := repo.Identities().ResolvePrefix(prefix)
 		if err != nil {

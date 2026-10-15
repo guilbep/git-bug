@@ -144,6 +144,7 @@ func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCac
 		return b, true, nil
 	}
 	if e.opts.DryRun {
+		e.attached[b.Id()] = issue.URL
 		return b, false, nil
 	}
 	tags := e.issueTags(issue)
@@ -494,8 +495,10 @@ func (e *Engine) pushedAs(push map[string]string, ev *Event) bool {
 	return false
 }
 
+// isAccount tells whether a forge user owns one of the tokens: only their
+// markers are git-bug's.
 func (e *Engine) isAccount(u User) bool {
-	for _, a := range e.accounts {
+	for _, a := range e.tokens {
 		if a.ID == u.ID {
 			return true
 		}
