@@ -40,6 +40,14 @@ func newBridgeNewCommand(env *execenv.Env) *cobra.Command {
 		Long: `Configure a new bridge by passing flags or/and using interactive terminal prompts.
 You can avoid all the terminal prompts by passing all the necessary flags to configure your bridge.
 
+A github.com or gitlab.com --url gives the target. Given a name and a target,
+and no --credential or --token, the bridge uses the stored credential of its
+target (see "git-bug bridge auth"), of its instance for Gitea, GitLab and Jira,
+if only one fits. When several fit, choose one with --credential.
+
+--sync makes the bridge take part in "git-bug bridge sync", which mirrors the
+issues of every such bridge to the others, both ways.
+
 Authentication tokens and required permissions by target:
 
 Gitea (and Forgejo):
@@ -78,7 +86,11 @@ Jira:
 Launchpad:
   No token required: the Launchpad bridge is read-only and currently uses
   the public Launchpad API without any authentication.`,
-		Example: `# Interactive example
+		Example: `# Sync with GitHub and GitLab, with a token of each stored (see "git bug bridge sync")
+git bug bridge new --name gh --url https://github.com/example-owner/example-repo --sync
+git bug bridge new --name gl --target gitlab --url https://gitlab.example.com/example-org/example-repo --sync
+
+# Interactive example
 [1]: gitea
 [2]: github
 [3]: gitlab
@@ -163,13 +175,13 @@ git bug bridge new \
 	flags.StringVarP(&options.params.URL, "url", "u", "", "The URL of the remote repository")
 	flags.StringVarP(&options.params.BaseURL, "base-url", "b", "", "The base URL of your remote issue tracker")
 	flags.StringVarP(&options.params.Login, "login", "l", "", "The login on your remote issue tracker")
-	flags.StringVarP(&options.params.CredPrefix, "credential", "c", "", "The identifier or prefix of an already known credential for your remote issue tracker (see \"git-bug bridge auth\")")
+	flags.StringVarP(&options.params.CredPrefix, "credential", "c", "", "The identifier or prefix of an already known credential for your remote issue tracker (see \"git-bug bridge auth\"). Defaults to the only one that fits")
 	flags.StringVar(&options.token, "token", "", "A raw authentication token for the remote issue tracker")
 	flags.BoolVar(&options.tokenStdin, "token-stdin", false, "Will read the token from stdin and ignore --token")
 	flags.StringVarP(&options.params.Owner, "owner", "o", "", "The owner of the remote repository")
 	flags.StringVarP(&options.params.Project, "project", "p", "", "The name of the remote repository")
 	flags.BoolVar(&options.nonInteractive, "non-interactive", false, "Do not ask for user input")
-	flags.BoolVar(&options.sync, "sync", false, "Take part in \"git-bug bridge sync\" (sets git-bug.bridge.<name>.sync)")
+	flags.BoolVar(&options.sync, "sync", false, "Enable two-way sync with \"git-bug bridge sync\" (sets git-bug.bridge.<name>.sync)")
 
 	return cmd
 }
