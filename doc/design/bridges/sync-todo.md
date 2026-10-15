@@ -116,6 +116,9 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       again. Seen on the wiki: from a clone without the links of the first
       real sync (2026-10-14, GitLab #7–#11, GitHub #29), it announced five
       duplicates the real run wouldn't make.
+- [x] `git bug push` reaches every push URL of a remote, as git push does.
+      The wiki's origin mirrors to GitHub and GitLab (two pushurls): the
+      sync's links had reached GitLab only.
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
       fork's `trunk`, never merged) runs build-and-test.yml on every push,
       once Actions are enabled on the fork (a one-time click in its Actions
