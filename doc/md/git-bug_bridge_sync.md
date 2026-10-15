@@ -42,7 +42,7 @@ git-bug bridge sync [NAME]... [flags]
 # In a repository already holding git-bug issues, get them and adopt your
 # identity first, so that the bridges tag it with your logins
 git bug pull origin
-git bug user adopt 2fc4daa
+git bug user adopt <your-identity-id>
 
 # One bridge per forge, with sync, each using its stored token
 git bug bridge new --name gh --url https://github.com/example-owner/example-repo --sync
