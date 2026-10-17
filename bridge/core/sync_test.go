@@ -849,6 +849,43 @@ func TestPullLegacyDuplicatePair(t *testing.T) {
 	require.Len(t, got.Snapshot().Comments, 2, "the new comment went to the pulled copy")
 }
 
+// githubFake is a forge whose pre-sync bridge was GitHub's, which tagged
+// operations with github-id and bugs with github-url.
+type githubFake struct {
+	*synctest.Fake
+}
+
+func (githubFake) Legacy(meta, _ map[string]string) (string, bool) {
+	id, ok := meta["github-id"]
+	return id, ok
+}
+
+// A title pulled by the old GitHub bridge goes back to GitHub as it is, and
+// to another forge with its refs translated, the issue's own number too.
+func TestPushLegacyTitleRefs(t *testing.T) {
+	repo := newRepo(t)
+	gh := githubFake{synctest.NewFake("github.com/o/r", "github.com", synctest.Quirks{}, bot)}
+	dst := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	dst.UserAct("bob").CreateIssue("already there", "body")
+	issue := gh.UserAct("alice").CreateIssue("wrong example (#1)", "body")
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	_, _, err = repo.Bugs().NewRaw(me, time.Now().Unix(), "wrong example (#1)", "body", nil,
+		map[string]string{"github-id": issue.ID, "github-url": issue.URL, core.MetaKeyOrigin: "github"})
+	require.NoError(t, err)
+	opts := core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login"}
+
+	ghEngine, err := core.NewEngine(context.Background(), repo, gh, opts)
+	require.NoError(t, err)
+	for r := range ghEngine.Push(context.Background()) {
+		require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+	}
+	require.Zero(t, gh.Writes(), "nothing to send to GitHub")
+
+	push(t, repo, dst, true)
+	require.Equal(t, "wrong example (#2)", dst.Issue("2").Title)
+}
+
 // Review: only git-bug's accounts post markers. Anyone else's marker is just
 // text: a stranger can't attach their issue or comment to a bug, and then
 // edit it through the forge.

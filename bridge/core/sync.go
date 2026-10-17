@@ -163,6 +163,10 @@ func displayKind(kind string) string {
 	return kind
 }
 
+// legacyKinds are the forges whose pre-sync bridges tagged what they pulled
+// with "<kind>-id" and "<kind>-url".
+var legacyKinds = []string{"github", "gitlab"}
+
 // sourceOf returns the key of the remote an operation was pulled from, and
 // its URL there, if any.
 func sourceOf(op dag.Operation) (key string, url string, ok bool) {
@@ -182,7 +186,7 @@ func sourceOf(op dag.Operation) (key string, url string, ok bool) {
 		}
 	}
 	// pulled by a pre-sync bridge
-	for _, kind := range []string{"github", "gitlab"} {
+	for _, kind := range legacyKinds {
 		if _, ok := own[kind+"-id"]; ok {
 			return "legacy:" + kind, own[kind+"-url"], true
 		}

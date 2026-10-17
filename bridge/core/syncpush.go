@@ -518,8 +518,8 @@ func (e *Engine) render(snap *bug.Snapshot, refs *refIndex, markerID entity.Id, 
 		}
 	}
 
-	src, _, ok := sourceOf(latest)
-	if !ok || src == e.remote.Key() {
+	src, ok := e.foreignSource(snap, latest)
+	if !ok {
 		return Render(message, markerID, attr, nil, nil)
 	}
 	dialect := remoteInfoFor(src).dialect
@@ -532,8 +532,8 @@ func (e *Engine) render(snap *bug.Snapshot, refs *refIndex, markerID entity.Id, 
 // when it was written on another forge. Unlike a text, it is rendered again
 // when a ref gets known, such as to the issue itself once created.
 func (e *Engine) title(snap *bug.Snapshot, refs *refIndex) string {
-	src, _, ok := sourceOf(lastSlotOp(snap, s(slotTitle, "")))
-	if !ok || src == e.remote.Key() {
+	src, ok := e.foreignSource(snap, lastSlotOp(snap, s(slotTitle, "")))
+	if !ok {
 		return snap.Title
 	}
 	re := remoteInfoFor(src).dialect.Ref
@@ -542,6 +542,20 @@ func (e *Engine) title(snap *bug.Snapshot, refs *refIndex) string {
 			return refs.translateTitle(src, n, e.remote)
 		})
 	})
+}
+
+// foreignSource returns the remote an operation was pulled from, unless it
+// is this one, where what it wrote goes back as it is.
+func (e *Engine) foreignSource(snap *bug.Snapshot, op dag.Operation) (string, bool) {
+	src, _, ok := sourceOf(op)
+	if !ok || src == e.remote.Key() {
+		return "", false
+	}
+	// pulled from this project by its pre-sync bridge
+	if _, legacy := e.remote.Legacy(op.AllMetadata(), snap.Operations[0].AllMetadata()); legacy {
+		return "", false
+	}
+	return src, true
 }
 
 // call runs a write, waiting and retrying when the forge rate limits.
@@ -582,6 +596,14 @@ func newRefIndex(excerpts []*cache.BugExcerpt) *refIndex {
 				continue
 			}
 			idx.add(excerpt.Id(), key, Ref{Number: number, URL: excerpt.CreateMetadata[syncKey(key, "url")]})
+		}
+		// on a forge through its pre-sync bridge: text it pulled is from
+		// "legacy:<kind>"
+		for _, kind := range legacyKinds {
+			url := excerpt.CreateMetadata[kind+"-url"]
+			if _, ok := excerpt.CreateMetadata[kind+"-id"]; ok && trailingNumber.MatchString(url) {
+				idx.add(excerpt.Id(), "legacy:"+kind, Ref{Number: trailingNumber.FindString(url), URL: url})
+			}
 		}
 	}
 	return idx

@@ -98,6 +98,15 @@ spec stays the authority.
   Mentions in titles are left alone. *If wrong:* one title write when an
   issue a title names reaches the forge; a mention in a title may notify
   someone on another forge.
+- **What a pre-sync bridge pulled goes back to its own project as it is**,
+  and its `#refs` translate elsewhere: bugs with `<kind>-id` are indexed by
+  the number of their `<kind>-url`, as references from `legacy:<kind>`.
+  Without it, co2's 228 bugs of the old GitHub bridge had their titles'
+  `#n` turned into `` `#n` `` on GitHub itself. *If wrong:* nothing.
+- **Titles already mirrored without translation are set once again** at
+  the first sync after this change, where they hold a `#n`: one write per
+  issue, its echo claimed by the next pull. That fixes their refs, and is a
+  burst of writes on a project like co2's GitLab mirror.
 - **A value reconciled from a forge, without event, was written on that
   forge**: GitLab's and Gitea's text edits (they have no events) were
   pushed elsewhere as git-bug text, their mentions live (one would notify
