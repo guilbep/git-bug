@@ -122,6 +122,9 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 - [x] One issue at a time: `bridge sync --issue <id>` (core `SyncIssue`,
       `Remote.Fetch` on GitHub, GitLab, Gitea and the fake, a conformance
       scenario). git-board's issue panel calls it: Send now, Refresh.
+- [x] Titles carry translated `#refs` too (co2's `… (#2518)` named another
+      issue on GitLab), and a reconciled GitLab or Gitea edit is rendered
+      as written there (its mentions were posted live).
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
       fork's `trunk`, never merged) runs build-and-test.yml on every push,
       once Actions are enabled on the fork (a one-time click in its Actions
@@ -173,7 +176,7 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 
 ## Deferred from the review (minor)
 
-- [ ] Reconcile's title, status and label changes print nothing.
+- [x] Reconcile's title, status and label changes print nothing.
 - [ ] `bridge push` alone, after a write whose answer was lost, creates the
       issue twice: the marker recovers it only on pull. Use `bridge sync`.
 - [x] GitHub rate limits never reach the engine: big backfills may fail

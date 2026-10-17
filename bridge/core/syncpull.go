@@ -412,12 +412,11 @@ func (e *Engine) replayConflict(b *cache.BugCache, snap *bug.Snapshot, ev *Event
 	}
 
 	baseValue, baseOp, ok := base(snap, e.remote, s)
-	localOp := lastSlotOp(snap, s)
-	changed := local != baseValue
-	if s.kind == slotText {
-		changed = localOp.Id() != baseOp.Id()
+	if !ok {
+		return false, nil
 	}
-	if !ok || !changed {
+	localOp := lastSlotOp(snap, s)
+	if !localChanged(s, local, baseValue, localOp, baseOp) {
 		return false, nil
 	}
 
@@ -552,84 +551,97 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		out <- NewImportWarning(fmt.Errorf("%s changed on both sides, kept %s change", what, kept), b.Id())
 	}
 
+	// who and when sets a value taken from the forge
+	by := func(u User, at time.Time, forgeChanged bool) (identity.Interface, int64, error) {
+		author, err := e.identityFor(u)
+		return author, at.Unix(), err
+	}
+	// skip tells whether to leave a value alone: the forge didn't change it
+	skip := func(s slot, forgeChanged, changed bool) bool {
+		return decided[s] || !forgeChanged
+	}
+
 	snap := b.Snapshot()
 
 	// title and status: the later change wins
 	for _, sc := range []struct {
 		kind          slotKind
 		remote, local string
-		apply         func(identity.Interface, map[string]string) error
+		apply         func(identity.Interface, int64, map[string]string) (dag.Operation, error)
+		event         func(entity.Id, entity.Id) ImportResult
 	}{
-		{slotTitle, cleanTitle(issue.Title), snap.Title, func(a identity.Interface, tags map[string]string) error {
-			_, err := b.SetTitleRaw(a, changedAt(issue, slot{kind: slotTitle}, issue.Updated).Unix(), cleanTitle(issue.Title), tags)
-			return err
-		}},
-		{slotStatus, issue.Status.String(), snap.Status.String(), func(a identity.Interface, tags map[string]string) error {
-			at := changedAt(issue, slot{kind: slotStatus}, issue.Updated).Unix()
-			var err error
+		{slotTitle, cleanTitle(issue.Title), snap.Title, func(a identity.Interface, at int64, tags map[string]string) (dag.Operation, error) {
+			return b.SetTitleRaw(a, at, cleanTitle(issue.Title), tags)
+		}, NewImportTitleEdition},
+		{slotStatus, issue.Status.String(), snap.Status.String(), func(a identity.Interface, at int64, tags map[string]string) (dag.Operation, error) {
 			if issue.Status == common.ClosedStatus {
-				_, err = b.CloseRaw(a, at, tags)
-			} else {
-				_, err = b.OpenRaw(a, at, tags)
+				return b.CloseRaw(a, at, tags)
 			}
-			return err
-		}},
+			return b.OpenRaw(a, at, tags)
+		}, NewImportStatusChange},
 	} {
 		s := slot{kind: sc.kind}
-		baseValue, _, ok := base(snap, e.remote, s)
-		if !ok || sc.remote == baseValue || decided[s] {
+		baseValue, baseOp, ok := base(snap, e.remote, s)
+		local := lastSlotOp(snap, s)
+		forgeChanged := ok && sc.remote != baseValue
+		changed := !ok || localChanged(s, sc.local, baseValue, local, baseOp)
+		if skip(s, forgeChanged, changed) {
 			continue
 		}
 		at := changedAt(issue, s, issue.Updated)
-		local := lastSlotOp(snap, s)
 		switch {
 		case sc.local == sc.remote:
 			record(local.Id(), string(sc.kind), sc.remote)
-		case sc.local == baseValue || at.After(local.Time()):
-			if sc.local != baseValue {
+		case !changed || at.After(local.Time()):
+			if changed && forgeChanged {
 				conflict(string(sc.kind), true)
 			}
-			author, err := e.identityFor(issue.Author)
+			author, unix, err := by(issue.Author, at, forgeChanged)
 			if err != nil {
 				return err
 			}
-			if err := sc.apply(author, map[string]string{e.key(string(sc.kind)): sc.remote}); err != nil {
+			op, err := sc.apply(author, unix, map[string]string{e.key(string(sc.kind)): sc.remote})
+			if err != nil {
 				return err
 			}
+			out <- sc.event(b.Id(), op.Id())
 		default:
 			conflict(string(sc.kind), false)
 		}
 	}
 
 	// labels: both sides' changes merge
-	if baseValue, _, ok := base(snap, e.remote, slot{kind: slotLabels}); ok {
-		remote := cleanLabels(issue.Labels)
-		if labelsValue(remote) != baseValue {
-			was := splitLabels(baseValue)
-			var added, removed []string
-			for _, l := range remote {
-				if !slices.Contains(was, common.Label(l)) && !slices.Contains(snap.Labels, common.Label(l)) {
-					added = append(added, l)
-				}
+	ls := slot{kind: slotLabels}
+	baseValue, _, ok := base(snap, e.remote, ls)
+	remote := cleanLabels(issue.Labels)
+	forgeChanged := ok && labelsValue(remote) != baseValue
+	changed := !ok || labelsValue(labelStrings(snap.Labels)) != baseValue
+	if !skip(ls, forgeChanged, changed) {
+		was := splitLabels(baseValue)
+		var added, removed []string
+		for _, l := range remote {
+			if !slices.Contains(was, common.Label(l)) && !slices.Contains(snap.Labels, common.Label(l)) {
+				added = append(added, l)
 			}
-			for _, l := range was {
-				if !slices.Contains(remote, l.String()) && slices.Contains(snap.Labels, l) {
-					removed = append(removed, l.String())
-				}
+		}
+		for _, l := range was {
+			if !slices.Contains(remote, l.String()) && slices.Contains(snap.Labels, l) {
+				removed = append(removed, l.String())
 			}
-			if len(added) == 0 && len(removed) == 0 {
-				record(lastSlotOp(snap, slot{kind: slotLabels}).Id(), string(slotLabels), labelsValue(remote))
-			} else {
-				author, err := e.identityFor(issue.Author)
-				if err != nil {
-					return err
-				}
-				_, err = b.ForceChangeLabelsRaw(author, changedAt(issue, slot{kind: slotLabels}, issue.Updated).Unix(), added, removed,
-					map[string]string{e.key(string(slotLabels)): labelsValue(remote)})
-				if err != nil {
-					return err
-				}
+		}
+		if len(added) == 0 && len(removed) == 0 {
+			record(lastSlotOp(snap, ls).Id(), string(slotLabels), labelsValue(remote))
+		} else {
+			author, unix, err := by(issue.Author, changedAt(issue, ls, issue.Updated), forgeChanged)
+			if err != nil {
+				return err
 			}
+			op, err := b.ForceChangeLabelsRaw(author, unix, added, removed,
+				map[string]string{e.key(string(slotLabels)): labelsValue(remote)})
+			if err != nil {
+				return err
+			}
+			out <- NewImportLabelChange(b.Id(), op.Id())
 		}
 	}
 
@@ -659,27 +671,29 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		s := slot{kind: slotText, target: rt.target}
 		baseValue, baseOp, ok := base(snap, e.remote, s)
 		fingerprint := Fingerprint(rt.text)
-		if !ok || fingerprint == baseValue || decided[s] {
+		local := lastSlotOp(snap, s)
+		forgeChanged := ok && fingerprint != baseValue
+		changed := !ok || localChanged(s, "", baseValue, local, baseOp)
+		if skip(s, forgeChanged, changed) {
 			continue
 		}
 		comment, err := snap.SearchCommentByOpId(rt.target)
 		if err != nil {
 			return err
 		}
-		local := lastSlotOp(snap, s)
 		pulled := Unrender(text.Cleanup(rt.text))
 		switch {
 		case pulled == comment.Message:
 			record(local.Id(), string(slotText), fingerprint)
-		case local.Id() == baseOp.Id() || rt.at.After(local.Time()):
-			if local.Id() != baseOp.Id() {
+		case !changed || rt.at.After(local.Time()):
+			if changed && forgeChanged {
 				conflict("a text", true)
 			}
-			author, err := e.identityFor(rt.editor)
+			author, unix, err := by(rt.editor, rt.at, forgeChanged)
 			if err != nil {
 				return err
 			}
-			_, err = b.EditCommentRaw(author, rt.at.Unix(), comment.CombinedId(), pulled,
+			_, err = b.EditCommentRaw(author, unix, comment.CombinedId(), pulled,
 				map[string]string{e.key(string(slotText)): fingerprint})
 			if err != nil {
 				return err
@@ -696,6 +710,17 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		}
 	}
 	return nil
+}
+
+// localChanged tells whether git-bug changed a value since the forge last
+// saw it, given its base. A text's base is the fingerprint of it as rendered
+// for the forge, and a title's has its #refs translated: their operations
+// tell, not their values.
+func localChanged(s slot, local, baseValue string, localOp, baseOp dag.Operation) bool {
+	if s.kind == slotText || s.kind == slotTitle {
+		return localOp.Id() != baseOp.Id()
+	}
+	return local != baseValue
 }
 
 // changedAt returns when the forge last changed a value: the time of its

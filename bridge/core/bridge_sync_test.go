@@ -319,6 +319,70 @@ func TestSyncIssueDryRun(t *testing.T) {
 	require.Contains(t, all, "would create issue: local")
 }
 
+func syncAll(t *testing.T, repo *cache.RepoCache, dryRun bool) []string {
+	results, err := core.SyncAll(context.Background(), repo, []string{"a", "b"}, dryRun)
+	require.NoError(t, err)
+	var report []string
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+		report = append(report, r.String())
+	}
+	return report
+}
+
+// numberOn returns the number of a bug's issue on a fake forge.
+func numberOn(t *testing.T, b *cache.BugCache, f *synctest.Fake) string {
+	n, ok := b.Snapshot().GetCreateMetadata("sync:" + f.Key() + ":number")
+	require.True(t, ok)
+	return n
+}
+
+// Titles carry #refs too, like the issue's own number that a workflow
+// appends to it: on another forge they say that forge's numbers, and coming
+// back they're no change.
+func TestSyncTranslatesTitleRefs(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	b := newSyncForge(t, repo, "b")
+	b.UserAct("bob").CreateIssue("already on b", "body")
+	alice := a.UserAct("alice")
+	alice.CreateIssue("first", "body")
+	alice.CreateIssue("Wrong example (#2), see #1 and #9", "body")
+	syncAll(t, repo, false)
+
+	byTitle := func(title string) *cache.BugCache {
+		b, err := repo.Bugs().ResolveMatcher(func(x *cache.BugExcerpt) bool { return x.Title == title })
+		require.NoError(t, err)
+		return b
+	}
+	bug, first := byTitle("Wrong example (#2), see #1 and #9"), byTitle("first")
+	n, firstN := numberOn(t, bug, b), numberOn(t, first, b)
+	require.NotEqual(t, "2", n, "a numbering that differs from a's")
+	require.Equal(t, "Wrong example (#"+n+"), see #"+firstN+" and `#9`", b.Issue(n).Title)
+	require.Equal(t, "Wrong example (#2), see #1 and #9", a.Issue("2").Title)
+	require.Equal(t, "Wrong example (#2), see #1 and #9", bug.Snapshot().Title)
+
+	// the next syncs claim the echo of the title, and write nothing
+	writes := a.Writes() + b.Writes()
+	syncAll(t, repo, false)
+	ops := len(bug.Snapshot().Operations)
+	syncAll(t, repo, false)
+	require.Equal(t, writes, a.Writes()+b.Writes())
+	require.Len(t, bug.Snapshot().Operations, ops)
+	require.NotContains(t, strings.Join(syncAll(t, repo, true), "\n"), "would send")
+	require.Equal(t, "Wrong example (#2), see #1 and #9", bug.Snapshot().Title)
+
+	// renamed on b, in b's numbers: a gets it in its own
+	b.UserAct("bob").SetTitle(core.Ref{ID: b.Issue(n).ID}, "Right example (#"+n+")")
+	syncAll(t, repo, false)
+	require.Equal(t, "Right example (#2)", a.Issue("2").Title)
+	require.Equal(t, "Right example (#"+n+")", b.Issue(n).Title)
+	writes = a.Writes() + b.Writes()
+	syncAll(t, repo, false)
+	syncAll(t, repo, false)
+	require.Equal(t, writes, a.Writes()+b.Writes())
+}
+
 func TestSyncIssueUnknownBug(t *testing.T) {
 	repo := newRepo(t)
 	newSyncForge(t, repo, "a")

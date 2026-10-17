@@ -500,6 +500,23 @@ func TestPushTranslatesRefs(t *testing.T) {
 	require.Contains(t, second.Body, "[view on fake](https://src.test/issues/2)")
 }
 
+// A forge's edit that came without event, so reconciled, was still written
+// on that forge: elsewhere its mentions are defused and its refs translated.
+func TestPushRendersReconciledEdit(t *testing.T) {
+	repo := newRepo(t)
+	src := synctest.NewFake("src.test/1", "src.test", synctest.Quirks{NoEditEvents: true}, bot)
+	dst := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	alice := src.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	pull(t, repo, src)
+	push(t, repo, dst, true)
+
+	alice.EditText(issue, issue, "cc @carol, see #9")
+	pull(t, repo, src)
+	push(t, repo, dst, true)
+	require.Contains(t, dst.Issue("1").Body, "cc `@carol`, see [#9](https://src.test/issues/9)")
+}
+
 func sync(t *testing.T, repo *cache.RepoCache, f *synctest.Fake) []core.ExportResult {
 	pull(t, repo, f)
 	return push(t, repo, f, true)

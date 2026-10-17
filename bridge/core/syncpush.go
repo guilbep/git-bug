@@ -120,7 +120,7 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 		return nil
 	}
 	if e.opts.DryRun {
-		e.planPush(b, snap, onRemote, out)
+		e.planPush(b, snap, refs, onRemote, out)
 		return nil
 	}
 
@@ -155,7 +155,7 @@ func (e *Engine) pushBug(ctx context.Context, b *cache.BugCache, refs *refIndex,
 }
 
 // planPush reports what pushing a bug would do, without doing it.
-func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, onRemote bool, out chan<- ExportResult) {
+func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex, onRemote bool, out chan<- ExportResult) {
 	if !onRemote {
 		if _, _, ok := e.accountFor(snap.Operations[0].Author()); !ok {
 			out <- NewExportNothing(b.Id(), "missing author token")
@@ -202,7 +202,7 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, onRemote bool, 
 		changes = append(changes, fmt.Sprintf("%d edits", edits))
 	}
 	for kind, local := range map[slotKind]string{
-		slotTitle:  snap.Title,
+		slotTitle:  e.title(snap, refs),
 		slotStatus: snap.Status.String(),
 		slotLabels: labelsValue(labelStrings(snap.Labels)),
 	} {
@@ -229,10 +229,13 @@ func (e *Engine) createIssue(ctx context.Context, b *cache.BugCache, snap *bug.S
 
 	latest, message, _ := e.textToPush(snap, createOp)
 	text := e.render(snap, refs, b.Id(), createOp, latest, message, attributed)
+	// a reference to the issue itself is unknown until created: pushChanges
+	// sets the title again
+	title := e.title(snap, refs)
 
 	var issue Ref
 	err := e.call(ctx, func() (err error) {
-		issue, err = e.remote.CreateIssue(ctx, as, snap.Title, text)
+		issue, err = e.remote.CreateIssue(ctx, as, title, text)
 		return err
 	})
 	if err != nil {
@@ -251,7 +254,7 @@ func (e *Engine) createIssue(ctx context.Context, b *cache.BugCache, snap *bug.S
 			e.key("labels"): "",
 		},
 	}
-	addRecord(records, lastSlotOp(snap, s(slotTitle, "")).Id(), e.key("title"), snap.Title)
+	addRecord(records, lastSlotOp(snap, s(slotTitle, "")).Id(), e.key("title"), title)
 	addRecord(records, latest.Id(), e.key("text"), Fingerprint(text))
 	if err := setRecords(b, records); err != nil {
 		return Ref{}, false, err
@@ -382,14 +385,15 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 
 	// title, status and labels that differ from what the forge last saw
 	snap = b.Snapshot()
+	title := e.title(snap, refs)
 	for _, sc := range []struct {
 		kind  slotKind
 		local string
 		write func(Account) error
 		event func(entity.Id) ExportResult
 	}{
-		{slotTitle, snap.Title, func(as Account) error {
-			return e.remote.SetTitle(ctx, as, issue, snap.Title)
+		{slotTitle, title, func(as Account) error {
+			return e.remote.SetTitle(ctx, as, issue, title)
 		}, NewExportTitleEdition},
 		{slotStatus, snap.Status.String(), func(as Account) error {
 			return e.remote.SetStatus(ctx, as, issue, snap.Status)
@@ -524,6 +528,22 @@ func (e *Engine) render(snap *bug.Snapshot, refs *refIndex, markerID entity.Id, 
 	})
 }
 
+// title is the bug's title for this remote, its #refs translated as in texts
+// when it was written on another forge. Unlike a text, it is rendered again
+// when a ref gets known, such as to the issue itself once created.
+func (e *Engine) title(snap *bug.Snapshot, refs *refIndex) string {
+	src, _, ok := sourceOf(lastSlotOp(snap, s(slotTitle, "")))
+	if !ok || src == e.remote.Key() {
+		return snap.Title
+	}
+	re := remoteInfoFor(src).dialect.Ref
+	return mapProse(snap.Title, func(prose string) string {
+		return replaceRefs(prose, re, func(n string) string {
+			return refs.translateTitle(src, n, e.remote)
+		})
+	})
+}
+
 // call runs a write, waiting and retrying when the forge rate limits.
 func (e *Engine) call(ctx context.Context, write func() error) error {
 	for attempt := 0; ; attempt++ {
@@ -590,16 +610,31 @@ var trailingNumber = regexp.MustCompile(`\d+$`)
 // translate rewrites a reference to issue number n of remote src for remote
 // to: to its number there, or else a link to it on src.
 func (idx *refIndex) translate(src, n string, to Remote) string {
-	if bugId, ok := idx.byNumber[src][n]; ok {
-		if number, ok := idx.numbers[bugId][to.Key()]; ok {
-			return to.Dialect().FormatRef(number)
-		}
+	if ref, ok := idx.onRemote(src, n, to); ok {
+		return ref
 	}
 	if url, ok := idx.urls[src]; ok && trailingNumber.MatchString(url) {
 		return fmt.Sprintf("[#%s](%s)", n, trailingNumber.ReplaceAllString(url, n))
 	}
 	// not a link to the wrong issue, at least
 	return "`#" + n + "`"
+}
+
+// translateTitle is translate for a title, which shows no links.
+func (idx *refIndex) translateTitle(src, n string, to Remote) string {
+	if ref, ok := idx.onRemote(src, n, to); ok {
+		return ref
+	}
+	return "`#" + n + "`"
+}
+
+// onRemote returns the reference on remote to of the bug that is issue
+// number n of remote src, if it is on both.
+func (idx *refIndex) onRemote(src, n string, to Remote) (string, bool) {
+	if number, ok := idx.numbers[idx.byNumber[src][n]][to.Key()]; ok {
+		return to.Dialect().FormatRef(number), true
+	}
+	return "", false
 }
 
 // remoteKeyOf returns the remote key of a "sync:<key>:<name>" metadata key.

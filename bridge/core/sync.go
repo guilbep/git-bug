@@ -169,6 +169,14 @@ func sourceOf(op dag.Operation) (key string, url string, ok bool) {
 			return key, own[syncKey(key, "url")], true
 		}
 	}
+	// reconciled: the forge reported no event, only the value
+	for k := range own {
+		for _, kind := range []slotKind{slotTitle, slotText} {
+			if key, ok := remoteKeyOf(k, string(kind)); ok {
+				return key, "", true
+			}
+		}
+	}
 	// pulled by a pre-sync bridge
 	for _, kind := range []string{"github", "gitlab"} {
 		if _, ok := own[kind+"-id"]; ok {

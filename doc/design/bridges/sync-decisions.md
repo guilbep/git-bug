@@ -87,6 +87,22 @@ spec stays the authority.
   several runs.
 - **An unresolvable `#ref` with no known source URL becomes `` `#n` ``**, never
   a link to the wrong issue.
+- **Titles have their `#refs` translated too**, as a GitHub workflow may
+  append each issue's number to its title (co2: `… (#2518)`), which on
+  GitLab named another issue. What a forge saw of a title is it as
+  translated, so whether git-bug changed it is told by its operations, as
+  for texts. Unlike a text, a title is translated again at each push: a
+  reference to the issue itself is known only once the issue exists, so it
+  is created with `` `#n` `` and its title set again right after (one more
+  write). An unknown ref is `` `#n` ``, not a link: titles show no links.
+  Mentions in titles are left alone. *If wrong:* one title write when an
+  issue a title names reaches the forge; a mention in a title may notify
+  someone on another forge.
+- **A value reconciled from a forge, without event, was written on that
+  forge**: GitLab's and Gitea's text edits (they have no events) were
+  pushed elsewhere as git-bug text, their mentions live (one would notify
+  on GitHub) and refs untranslated. The value recorded by reconcile now
+  names the forge. *If wrong:* nothing.
 - **Labels**: GitHub sets the full set with `updateIssue(labelIds)` and
   creates missing ones with its REST API (GraphQL can't); Gitea sets ids and
   creates missing ones, as it silently ignores unknown names.
