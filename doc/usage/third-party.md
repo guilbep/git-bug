@@ -246,6 +246,19 @@ When the same thing changed on two platforms between two syncs, the later
 change wins, and `bridge sync` reports it. Deleting an issue or a comment on a
 platform is never propagated: it just stops syncing there.
 
+One issue at a time:
+
+```bash
+git bug bridge sync --issue <id>        # sync it now, alone
+git bug bridge link <id> gl 12          # it is GitLab's #12: don't create it there again
+git bug bridge take <id> gl             # drop what wasn't sent to GitLab, keep GitLab's version
+git bug bridge unlink <id> gl           # stop syncing it with GitLab, for good
+```
+
+After `link`, the next sync sends git-bug's title, description and status,
+and adds the comments and labels of each side to the other; `take` right
+after keeps GitLab's instead. Neither writes to the platform.
+
 > [!TIP]
 > See the [CLI documentation][doc/cli/bridge] for more information on the
 > command line arguments and options.

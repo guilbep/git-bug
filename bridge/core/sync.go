@@ -9,6 +9,7 @@ import (
 
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/bug"
+	"github.com/git-bug/git-bug/entities/identity"
 	"github.com/git-bug/git-bug/entity"
 	"github.com/git-bug/git-bug/entity/dag"
 )
@@ -51,6 +52,9 @@ type Engine struct {
 	// by its marker, with the issue's URL: the real run records the link,
 	// so its push doesn't create another.
 	attached map[entity.Id]string
+	// theirs, when set, resolves every difference of a pull for the forge:
+	// git-bug's changes not sent yet are undone, by that identity. See Take.
+	theirs identity.Interface
 }
 
 func NewEngine(ctx context.Context, repo *cache.RepoCache, r Remote, opts SyncOptions) (*Engine, error) {

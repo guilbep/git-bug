@@ -53,8 +53,12 @@ func (e *Engine) PullIssue(ctx context.Context, b *cache.BugCache) <-chan Import
 		defer close(out)
 		snap := b.Snapshot()
 		ref, ok := e.issueRef(snap)
-		if _, gone := snap.Operations[0].GetMetadata(e.key("gone")); !ok || gone {
+		if !ok {
 			out <- NewImportNothing(b.Id(), "not on this forge yet")
+			return
+		}
+		if _, gone := snap.Operations[0].GetMetadata(e.key("gone")); gone {
+			out <- NewImportNothing(b.Id(), "not synced with this forge anymore")
 			return
 		}
 		issue, err := e.remote.Fetch(ctx, ref)
@@ -80,6 +84,12 @@ func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportR
 	if duplicate {
 		out <- NewImportWarning(fmt.Errorf("issue %s duplicates the issue of bug %s, as a retried write can do: not imported", issue.URL, b.Id().Human()), b.Id())
 		return nil
+	}
+	if b != nil {
+		if _, gone := b.Snapshot().Operations[0].GetMetadata(e.key("gone")); gone {
+			out <- NewImportNothing(b.Id(), "not synced with this forge anymore")
+			return nil
+		}
 	}
 	if e.opts.DryRun {
 		e.planPull(b, issue, out)
@@ -131,18 +141,12 @@ func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportR
 	return b.Commit()
 }
 
-// findBug returns the bug of a forge issue, nil if there's none. duplicate
-// tells that the issue carries the marker of a bug already on the forge
-// with another issue.
+// findBug returns the bug of a forge issue, nil if there's none, or the bug
+// it was unlinked from. duplicate tells that the issue carries the marker of
+// a bug already on the forge with another issue.
 func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCache, duplicate bool, err error) {
-	idKey := e.key("id")
-	b, err = e.repo.Bugs().ResolveMatcher(func(excerpt *cache.BugExcerpt) bool {
-		if excerpt.CreateMetadata[idKey] == issue.ID {
-			return true
-		}
-		id, ok := e.remote.Legacy(excerpt.CreateMetadata, excerpt.CreateMetadata)
-		return ok && id == issue.ID
-	})
+	var gone entity.Id
+	b, err = e.repo.Bugs().ResolveMatcher(e.issueMatcher(issue.ID, &gone))
 	if multiple, ok := errors.AsType[*entity.ErrMultipleMatch](err); ok {
 		// the old bridges could import an issue they had exported
 		b, err = e.pickDuplicate(multiple.Matching)
@@ -151,6 +155,11 @@ func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCac
 		}
 	}
 	if err == nil || !entity.IsErrNotFound(err) {
+		return b, false, err
+	}
+	if gone != "" {
+		// not synced anymore, nor imported again
+		b, err = e.repo.Bugs().Resolve(gone)
 		return b, false, err
 	}
 
@@ -432,7 +441,7 @@ func (e *Engine) replayConflict(b *cache.BugCache, snap *bug.Snapshot, ev *Event
 		_, err := b.SetMetadata(localOp.Id(), seen)
 		return true, err
 	}
-	if ev.Time.After(localOp.Time()) {
+	if e.theirs != nil || ev.Time.After(localOp.Time()) {
 		out <- NewImportWarning(fmt.Errorf("%s changed on both sides, kept the forge's change", s.kind), b.Id())
 		return false, nil
 	}
@@ -551,14 +560,19 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		out <- NewImportWarning(fmt.Errorf("%s changed on both sides, kept %s change", what, kept), b.Id())
 	}
 
-	// who and when sets a value taken from the forge
+	// who and when sets a value taken from the forge: the forge's change, or
+	// with theirs undoing git-bug's, the user now
 	by := func(u User, at time.Time, forgeChanged bool) (identity.Interface, int64, error) {
+		if !forgeChanged && e.theirs != nil {
+			return e.theirs, time.Now().Unix(), nil
+		}
 		author, err := e.identityFor(u)
 		return author, at.Unix(), err
 	}
-	// skip tells whether to leave a value alone: the forge didn't change it
+	// skip tells whether to leave a value alone: the forge didn't change it,
+	// and with theirs, git-bug didn't either
 	skip := func(s slot, forgeChanged, changed bool) bool {
-		return decided[s] || !forgeChanged
+		return decided[s] || !forgeChanged && (e.theirs == nil || !changed)
 	}
 
 	snap := b.Snapshot()
@@ -592,7 +606,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		switch {
 		case sc.local == sc.remote:
 			record(local.Id(), string(sc.kind), sc.remote)
-		case !changed || at.After(local.Time()):
+		case e.theirs != nil || !changed || at.After(local.Time()):
 			if changed && forgeChanged {
 				conflict(string(sc.kind), true)
 			}
@@ -610,7 +624,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		}
 	}
 
-	// labels: both sides' changes merge
+	// labels: both sides' changes merge, or with theirs the forge's set stays
 	ls := slot{kind: slotLabels}
 	baseValue, _, ok := base(snap, e.remote, ls)
 	remote := cleanLabels(issue.Labels)
@@ -618,6 +632,9 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 	changed := !ok || labelsValue(labelStrings(snap.Labels)) != baseValue
 	if !skip(ls, forgeChanged, changed) {
 		was := splitLabels(baseValue)
+		if e.theirs != nil {
+			was = snap.Labels
+		}
 		var added, removed []string
 		for _, l := range remote {
 			if !slices.Contains(was, common.Label(l)) && !slices.Contains(snap.Labels, common.Label(l)) {
@@ -685,7 +702,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 		switch {
 		case pulled == comment.Message:
 			record(local.Id(), string(slotText), fingerprint)
-		case !changed || rt.at.After(local.Time()):
+		case e.theirs != nil || !changed || rt.at.After(local.Time()):
 			if changed && forgeChanged {
 				conflict("a text", true)
 			}

@@ -577,7 +577,8 @@ func newRefIndex(excerpts []*cache.BugExcerpt) *refIndex {
 	for _, excerpt := range excerpts {
 		for k, number := range excerpt.CreateMetadata {
 			key, ok := remoteKeyOf(k, "number")
-			if !ok {
+			// an issue unlinked or deleted is no longer the bug's
+			if !ok || excerpt.CreateMetadata[syncKey(key, "gone")] != "" {
 				continue
 			}
 			idx.add(excerpt.Id(), key, Ref{Number: number, URL: excerpt.CreateMetadata[syncKey(key, "url")]})

@@ -19,11 +19,14 @@ func NewBridgeCommand(env *execenv.Env) *cobra.Command {
 	}
 
 	cmd.AddCommand(newBridgeAuthCommand(env))
+	cmd.AddCommand(newBridgeLinkCommand(env))
 	cmd.AddCommand(newBridgeNewCommand(env))
 	cmd.AddCommand(newBridgePullCommand(env))
 	cmd.AddCommand(newBridgePushCommand(env))
 	cmd.AddCommand(newBridgeRm(env))
 	cmd.AddCommand(newBridgeSyncCommand(env))
+	cmd.AddCommand(newBridgeTakeCommand(env))
+	cmd.AddCommand(newBridgeUnlinkCommand(env))
 
 	return cmd
 }

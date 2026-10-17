@@ -37,6 +37,10 @@ pulled, then its changes pushed to every forge, creating it where a sync
 would. Nothing else is read or written, and the next full sync still
 reads everything changed since the last one.
 
+For one issue on one forge, see also "git bug bridge link" (it already is an
+issue there), "git bug bridge take" (drop git-bug's changes not sent there)
+and "git bug bridge unlink" (stop syncing it there).
+
 ```
 git-bug bridge sync [NAME]... [flags]
 ```

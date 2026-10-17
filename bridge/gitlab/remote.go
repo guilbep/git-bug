@@ -1,6 +1,7 @@
 package gitlab
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -123,9 +124,10 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 }
 
 func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
-	iid, err := strconv.ParseInt(ref.ID, 10, 64)
+	// an issue's ID is its number
+	iid, err := strconv.ParseInt(cmp.Or(ref.ID, ref.Number), 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("issue %q: %w", ref.ID, err)
+		return nil, fmt.Errorf("issue %q: %w", cmp.Or(ref.ID, ref.Number), err)
 	}
 	gi, _, err := r.reader.Issues.GetIssue(r.projectID, iid, gitlab.WithContext(ctx))
 	if err != nil {

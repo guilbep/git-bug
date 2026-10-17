@@ -269,7 +269,7 @@ func (f *Fake) nextID() string {
 
 func (f *Fake) find(ref core.Ref) (*fakeIssue, error) {
 	for _, issue := range f.issues {
-		if issue.ID == ref.ID {
+		if issue.ID == ref.ID || ref.ID == "" && issue.Number == ref.Number {
 			if issue.deleted {
 				return nil, core.ErrGone
 			}

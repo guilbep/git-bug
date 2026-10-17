@@ -12,6 +12,7 @@ import (
 	"github.com/git-bug/git-bug/bridge/core"
 	"github.com/git-bug/git-bug/bridge/core/synctest"
 	"github.com/git-bug/git-bug/cache"
+	"github.com/git-bug/git-bug/entities/common"
 	"github.com/git-bug/git-bug/entity"
 )
 
@@ -388,4 +389,220 @@ func TestSyncIssueUnknownBug(t *testing.T) {
 	newSyncForge(t, repo, "a")
 	_, err := core.SyncIssue(context.Background(), repo, "deadbeef", nil, false)
 	require.Error(t, err)
+}
+
+func syncA(t *testing.T, repo *cache.RepoCache) {
+	results, err := core.SyncAll(context.Background(), repo, []string{"a"}, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+}
+
+// Link makes a bug and an issue already on the forge one: the next sync
+// sends git-bug's title, description and status, and adds each side's
+// comments and labels to the other. Nothing is created twice.
+func TestLink(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	alice := a.UserAct("alice")
+	ref := alice.CreateIssue("forge title", "forge body")
+	alice.Comment(ref, "forge comment")
+	alice.SetLabels(ref, []string{"forge"})
+	alice.SetTitle(ref, "forge title, renamed")
+	alice.SetStatus(ref, common.ClosedStatus)
+
+	bug, _, err := repo.Bugs().New("local title", "local body")
+	require.NoError(t, err)
+	_, _, err = bug.AddComment("local comment")
+	require.NoError(t, err)
+	_, _, err = bug.ChangeLabels([]string{"local"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, bug.Commit())
+
+	linked, err := core.Link(context.Background(), repo, bug.Id().Human(), "a", ref.URL)
+	require.NoError(t, err)
+	require.Equal(t, ref.URL, linked.URL)
+	require.Zero(t, a.Writes(), "nothing written to the forge")
+
+	syncA(t, repo)
+	require.Nil(t, a.Issue("2"), "not created again")
+	require.Len(t, repo.Bugs().AllIds(), 1, "nor imported")
+	issue := a.Issue(ref.Number)
+	require.Equal(t, "local title", issue.Title)
+	require.Equal(t, "local body", core.Unrender(issue.Body))
+	require.Equal(t, common.OpenStatus, issue.Status)
+	require.ElementsMatch(t, []string{"forge", "local"}, issue.Labels)
+	require.Len(t, issue.Comments, 2)
+	snap := bug.Snapshot()
+	require.Equal(t, "local title", snap.Title)
+	require.Equal(t, common.OpenStatus, snap.Status)
+	require.ElementsMatch(t, []common.Label{"forge", "local"}, snap.Labels)
+	require.Len(t, snap.Comments, 3, "the body, and both comments")
+
+	writes := a.Writes()
+	syncA(t, repo)
+	syncA(t, repo)
+	require.Equal(t, writes, a.Writes())
+}
+
+func TestLinkRefuses(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	ref := a.UserAct("alice").CreateIssue("on the forge", "body")
+	syncA(t, repo)
+	pulled := onlyBug(t, repo)
+	bug, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	_, err = core.Link(ctx, repo, bug.Id().Human(), "a", "#"+ref.Number)
+	require.ErrorContains(t, err, pulled.Id().Human(), "the issue is another bug's")
+	_, err = core.Link(ctx, repo, pulled.Id().Human(), "a", "2")
+	require.ErrorContains(t, err, ref.URL, "the bug has an issue there")
+	for _, issue := range []string{"https://elsewhere.test/issues/1", "99", "first"} {
+		_, err = core.Link(ctx, repo, bug.Id().Human(), "a", issue)
+		require.Error(t, err, issue)
+	}
+	_, err = core.Link(ctx, repo, bug.Id().Human(), "nope", "1")
+	require.Error(t, err)
+	require.Zero(t, a.Writes())
+}
+
+// Unlink stops syncing a bug with a forge, for good: neither is the issue
+// created again, nor pulled again, and it can be linked to another bug.
+func TestUnlink(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	bug, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	syncA(t, repo)
+	ref := a.Issue("1").Ref
+	ctx := context.Background()
+
+	require.NoError(t, core.Unlink(ctx, repo, bug.Id().Human(), "a"))
+	_, _, err = bug.AddComment("after")
+	require.NoError(t, err)
+	require.NoError(t, bug.Commit())
+	a.UserAct("alice").Comment(ref, "on the forge, after")
+	writes := a.Writes()
+	syncA(t, repo)
+	results, err := core.SyncIssue(ctx, repo, bug.Id().Human(), nil, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+	require.Equal(t, writes, a.Writes(), "nothing pushed")
+	require.Nil(t, a.Issue("2"), "nor created again")
+	require.Len(t, bug.Snapshot().Comments, 2, "nothing pulled")
+	require.Len(t, repo.Bugs().AllIds(), 1, "nor imported as another bug")
+
+	require.ErrorContains(t, core.Unlink(ctx, repo, bug.Id().Human(), "a"), "not synced")
+	_, err = core.Link(ctx, repo, bug.Id().Human(), "a", "1")
+	require.ErrorContains(t, err, "unlinked")
+	other, _, err := repo.Bugs().New("another", "body")
+	require.NoError(t, err)
+	_, err = core.Link(ctx, repo, other.Id().Human(), "a", "1")
+	require.NoError(t, err, "the issue is free")
+	syncA(t, repo)
+	require.Len(t, other.Snapshot().Comments, 2, "it got the forge's comment")
+}
+
+func take(t *testing.T, repo *cache.RepoCache, b *cache.BugCache) {
+	results, err := core.Take(context.Background(), repo, b.Id().Human(), "a")
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+}
+
+// Take replaces what git-bug hasn't sent to the forge yet with the forge's
+// version. New comments stay, to be sent.
+func TestTake(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	alice := a.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	alice.Comment(ref, "comment")
+	alice.SetLabels(ref, []string{"x"})
+	syncA(t, repo)
+	bug := onlyBug(t, repo)
+
+	// changes not sent yet, and one on both sides
+	_, err := bug.SetTitle("local title")
+	require.NoError(t, err)
+	_, _, err = bug.EditCreateComment("local body")
+	require.NoError(t, err)
+	_, err = bug.EditComment(bug.Snapshot().Comments[1].CombinedId(), "local comment")
+	require.NoError(t, err)
+	_, err = bug.Close()
+	require.NoError(t, err)
+	_, _, err = bug.ChangeLabels([]string{"y"}, []string{"x"})
+	require.NoError(t, err)
+	_, _, err = bug.AddComment("new in git-bug")
+	require.NoError(t, err)
+	require.NoError(t, bug.Commit())
+	alice.SetTitle(ref, "forge title")
+	alice.Comment(ref, "new on the forge")
+	writes := a.Writes()
+
+	take(t, repo, bug)
+	require.Equal(t, writes, a.Writes(), "nothing written to the forge")
+	snap := bug.Snapshot()
+	require.Equal(t, "forge title", snap.Title)
+	require.Equal(t, "body", snap.Comments[0].Message)
+	require.Equal(t, "comment", snap.Comments[1].Message)
+	require.Equal(t, common.OpenStatus, snap.Status)
+	require.Equal(t, []common.Label{"x"}, snap.Labels)
+	var texts []string
+	for _, c := range snap.Comments {
+		texts = append(texts, c.Message)
+	}
+	require.Contains(t, texts, "new in git-bug")
+	require.Contains(t, texts, "new on the forge")
+
+	syncA(t, repo)
+	require.Equal(t, writes+1, a.Writes(), "only the new comment is sent")
+	require.Equal(t, "forge title", a.Issue(ref.Number).Title)
+	ops := len(bug.Snapshot().Operations)
+	take(t, repo, bug)
+	require.Len(t, bug.Snapshot().Operations, ops, "nothing left to take")
+}
+
+// After Link, Take keeps the forge's version instead of git-bug's.
+func TestLinkThenTake(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	alice := a.UserAct("alice")
+	ref := alice.CreateIssue("forge title", "forge body")
+	alice.SetLabels(ref, []string{"forge"})
+	bug, _, err := repo.Bugs().New("local title", "local body")
+	require.NoError(t, err)
+	_, _, err = bug.ChangeLabels([]string{"local"}, nil)
+	require.NoError(t, err)
+	_, err = bug.Close()
+	require.NoError(t, err)
+	require.NoError(t, bug.Commit())
+
+	_, err = core.Link(context.Background(), repo, bug.Id().Human(), "a", ref.Number)
+	require.NoError(t, err)
+	take(t, repo, bug)
+	snap := bug.Snapshot()
+	require.Equal(t, "forge title", snap.Title)
+	require.Equal(t, "forge body", snap.Comments[0].Message)
+	require.Equal(t, common.OpenStatus, snap.Status)
+	require.Equal(t, []common.Label{"forge"}, snap.Labels)
+
+	writes := a.Writes()
+	syncA(t, repo)
+	require.Equal(t, writes, a.Writes(), "the forge has it all")
+}
+
+func TestTakeNeedsALink(t *testing.T) {
+	repo := newRepo(t)
+	newSyncForge(t, repo, "a")
+	bug, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	_, err = core.Take(context.Background(), repo, bug.Id().Human(), "a")
+	require.ErrorContains(t, err, "not synced")
 }

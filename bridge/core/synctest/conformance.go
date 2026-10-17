@@ -345,6 +345,10 @@ func oneIssueAlone(w *world) {
 	require.NoError(w.t, err)
 	require.Equal(w.t, "title", got.Title)
 	require.Len(w.t, got.Comments, 1)
+	// by its number only, as Link finds it
+	got, err = w.a.Fetch(ctx, core.Ref{Number: ref.Number})
+	require.NoError(w.t, err)
+	require.Equal(w.t, ref.ID, got.ID)
 
 	b := w.onlyBug()
 	for _, f := range []Forge{w.a, w.b} {

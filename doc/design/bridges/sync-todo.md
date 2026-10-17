@@ -125,6 +125,13 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 - [x] Titles carry translated `#refs` too (co2's `… (#2518)` named another
       issue on GitLab), and a reconciled GitLab or Gitea edit is rendered
       as written there (its mentions were posted live).
+- [x] Duplicates, one issue at a time: `bridge link <id> <bridge> <number|url>`
+      (it already is that forge issue), `bridge unlink <id> <bridge>` (stop
+      syncing it there, for good), `bridge take <id> <bridge>` (drop what
+      wasn't sent there, keep the forge's version); core `Link`, `Unlink`,
+      `Take` for git-board. Rulings in sync-decisions.md.
+- [ ] Issue numbers of git-bug's own, to name an issue across forges:
+      discussed apart, not built.
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
       fork's `trunk`, never merged) runs build-and-test.yml on every push,
       once Actions are enabled on the fork (a one-time click in its Actions

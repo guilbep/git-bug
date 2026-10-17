@@ -173,6 +173,51 @@ spec stays the authority.
   For a person who wants one comment out now, without a run over every
   issue (a minute and more on co2). *If wrong:* a full sync does it all.
 
+## One issue on one forge: link, unlink, take
+
+`Link`, `Unlink` and `Take` in `bridge/core` (for git-board), and
+`bridge link`, `bridge unlink`, `bridge take` on the command line. Each runs
+under the bridge lock and writes nothing to the forge.
+
+- **Link records the forge issue on the bug as a pull would**, found by its
+  number or URL (`Remote.Fetch` by number: GitLab's issue id is its number).
+  The forge's events are taken as seen, not replayed over git-bug's
+  history. A value both sides hold is recorded in sync; git-bug's others
+  are changes not sent yet, so the next sync sends git-bug's title,
+  description and status. Comments of each side are added to the other,
+  and labels merge, as if the issue had none when last in sync (a lone
+  `bridge push` sets git-bug's instead). `take` right after keeps the
+  forge's version. Refused: an issue that is another bug's (by id or legacy
+  metadata), a bug that has or had an issue on that forge, a URL of another
+  project. *If wrong:* the forge's title, description and status are
+  edited at the next sync; comments are matched by marker only, as in a
+  pull, so copies of git-bug's comments posted by another account appear
+  twice.
+- **Unlink is the mark the engine already puts on a bug whose issue was
+  deleted** (`sync:<remote>:gone`, here `unlinked`): the bug is no longer
+  pushed there, so no issue is created again, and the forge issue is no
+  longer pulled, into the bug or as a new bug. The issue is free to be
+  linked to another bug, and references to it stop translating to the old
+  bug (deleted issues' too). It's final: metadata keeps a key's first value,
+  so neither the bug's issue id nor the mark can change, and linking a bug
+  once unlinked is refused. *If wrong:* a bug unlinked by mistake never
+  syncs with that forge again; a new bug can be linked to the issue.
+- **"Changes not sent yet", for take, are what a push would send**, read
+  from the records: a status or label set other than what the forge last
+  saw, a title operation since the forge last saw the title, and a
+  description or comment text whose last version isn't the one the forge
+  last saw (refused edits included). Take pulls the issue (`Fetch`, as
+  `SyncIssue` does) with every conflict resolved for the forge, then undoes
+  each change not sent yet with the forge's current value, made by the
+  user's identity at that time (a forge change keeps its author and time).
+  Comments the forge doesn't have stay, and the next sync sends them:
+  git-bug can't delete a comment, and an addition conflicts with nothing.
+  Assignees aren't synced. The bug's other forges get the forge's version
+  at the next sync, as git-bug changes. *If wrong:* a comment written in
+  git-bug by mistake still reaches the forge.
+- **`bridge take <id> <bridge>`, not `bridge sync --issue <id> --theirs`**:
+  "the forge's version" names one forge, and a sync runs over several.
+
 ## Set aside
 
 Considered and left as they are, each covered by the spec, an earlier
