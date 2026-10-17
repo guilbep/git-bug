@@ -16,6 +16,7 @@ and verify your installation.
 
 <!-- mdformat-toc start --slug=github --maxlevel=4 --minlevel=2 -->
 
+- [The bridge-sync fork](#the-bridge-sync-fork)
 - [Download a pre-compiled release binary](#download-a-pre-compiled-release-binary)
   - [Verify a download](#verify-a-download)
 - [Linux](#linux)
@@ -29,6 +30,33 @@ and verify your installation.
 - [Verify your installation](#verify-your-installation)
 
 <!-- mdformat-toc end -->
+
+## The bridge-sync fork<a name="the-bridge-sync-fork"></a>
+
+`git bug bridge sync`, two-way sync with GitHub, GitLab and Gitea, is only in
+the `bridge-sync` branch of [guilbep/git-bug][fork] for now. `go install`
+can't fetch a fork of this module, so build it from a clone, with Go 1.26 or
+newer:
+
+```bash
+git clone --branch bridge-sync https://github.com/guilbep/git-bug.git
+cd git-bug
+make install   # with the web UI, which needs Node.js and pnpm
+# or without it:
+go install -ldflags "-X main.version=$(git describe --tags)" .
+```
+
+Both install into `$(go env GOBIN)`, else `$(go env GOPATH)/bin`: put it on
+your `PATH` before any other `git-bug`. `git bug version` then shows
+`v0.11.0-<n>-g<commit>`, and `git bug bridge sync --help` works. To update,
+`git pull` in the clone and install again. To set up a sync, see the
+[quick start][quick-start].
+
+Everyone running bridges on a repository synced with this version needs it
+too: an older `git-bug`'s `bridge pull` imports synced issues again.
+
+[fork]: https://github.com/guilbep/git-bug/tree/bridge-sync
+[quick-start]: doc/usage/third-party.md#quick-start-sync-a-repository-with-github-and-gitlab
 
 ## Download a pre-compiled release binary<a name="download-a-pre-compiled-release-binary"></a>
 

@@ -104,22 +104,19 @@ func TestGitlabImport(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
 
-	importer := &gitlabImporter{}
-	err = importer.Init(ctx, backend, core.Configuration{
-		confKeyProjectID:     projectID,
-		confKeyGitlabBaseUrl: defaultBaseURL,
-		confKeyDefaultLogin:  login,
-	})
+	r, err := newRemote(ctx, defaultBaseURL, projectID, login, []*auth.Token{token})
+	require.NoError(t, err)
+	importer, err := core.NewEngine(ctx, backend, r, core.SyncOptions{DefaultLogin: login, LoginKey: metaKeyGitlabLogin})
 	require.NoError(t, err)
 
 	start := time.Now()
 
-	events, err := importer.ImportAll(ctx, backend, time.Time{})
-	require.NoError(t, err)
-
-	for result := range events {
-		require.NoError(t, result.Err)
+	for result := range importer.Pull(ctx, time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, result.Event, result.String())
 	}
 
 	fmt.Printf("test repository imported in %f seconds\n", time.Since(start).Seconds())

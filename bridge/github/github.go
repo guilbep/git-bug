@@ -38,12 +38,16 @@ func (g *Github) LoginMetaKey() string {
 	return metaKeyGithubLogin
 }
 
+// NewImporter returns nothing: the bridge imports with the sync engine, see
+// NewRemote.
 func (*Github) NewImporter() core.Importer {
-	return &githubImporter{}
+	return nil
 }
 
+// NewExporter returns nothing: the bridge exports with the sync engine, see
+// NewRemote.
 func (*Github) NewExporter() core.Exporter {
-	return &githubExporter{}
+	return nil
 }
 
 func buildClient(token *auth.Token) *rateLimitHandlerClient {

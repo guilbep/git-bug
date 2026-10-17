@@ -181,21 +181,19 @@ func TestGithubImporter(t *testing.T) {
 
 	ctx := context.Background()
 
-	importer := &githubImporter{}
-	err = importer.Init(ctx, backend, core.Configuration{
-		confKeyOwner:        "git-bug",
-		confKeyProject:      "test-github-bridge",
-		confKeyDefaultLogin: login,
-	})
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+
+	r, err := newRemote(ctx, "git-bug", "test-github-bridge", login, []*auth.Token{token}, graphqlClient)
+	require.NoError(t, err)
+	importer, err := core.NewEngine(ctx, backend, r, core.SyncOptions{DefaultLogin: login, LoginKey: metaKeyGithubLogin})
 	require.NoError(t, err)
 
 	start := time.Now()
 
-	events, err := importer.ImportAll(ctx, backend, time.Time{})
-	require.NoError(t, err)
-
-	for result := range events {
-		require.NoError(t, result.Err)
+	for result := range importer.Pull(ctx, time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, result.Event, result.String())
 	}
 
 	fmt.Printf("test repository imported in %f seconds\n", time.Since(start).Seconds())
@@ -204,7 +202,7 @@ func TestGithubImporter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b, err := backend.Bugs().ResolveBugCreateMetadata(metaKeyGithubUrl, tt.url)
+			b, err := backend.Bugs().ResolveBugCreateMetadata("sync:github.com/git-bug/test-github-bridge:url", tt.url)
 			require.NoError(t, err)
 
 			ops := b.Snapshot().Operations

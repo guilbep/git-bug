@@ -9,11 +9,14 @@ from third-party platforms.
 - [Supported bridges](#supported-bridges)
 - [Getting started](#getting-started)
 - [Tokens and required permissions](#tokens-and-required-permissions)
+  - [Gitea](#gitea)
   - [GitHub](#github)
   - [GitLab](#gitlab)
   - [Jira](#jira)
   - [Launchpad](#launchpad)
 - [Interacting with the bridge](#interacting-with-the-bridge)
+- [Quick start: sync a repository with GitHub and GitLab](#quick-start-sync-a-repository-with-github-and-gitlab)
+- [Syncing several platforms](#syncing-several-platforms)
 
 <!-- mdformat-toc end -->
 
@@ -48,9 +51,10 @@ This has several benefits:
 
 We support a number of bridges:
 
-- Jira
+- Gitea and Forgejo
 - GitHub
 - GitLab
+- Jira
 - Launchpad
 
 _For a full list of the features enabled for each bridge, see the
@@ -86,6 +90,17 @@ API operations, which determine the minimum permissions a token needs:
   status/title change events
 - **push** (GitHub, GitLab and Jira only): create issues, edit title and body,
   add and edit comments, change labels and toggle the status (open/close)
+
+### Gitea<a name="gitea"></a>
+
+The Gitea bridge works with Forgejo too. Create an access token on the
+instance, at `$BASE_URL/user/settings/applications`:
+
+- **Permissions**: read and write on issues and repositories, and read on
+  users.
+- **Repository access**: read access to pull. Pushing issues and comments
+  needs an account that can open them, and setting labels needs write access
+  to the repository.
 
 ### GitHub<a name="github"></a>
 
@@ -161,6 +176,88 @@ To pull and integrate updates for issues from the bridge:
 ```bash
 git bug bridge pull [NAME]
 ```
+
+## Quick start: sync a repository with GitHub and GitLab<a name="quick-start-sync-a-repository-with-github-and-gitlab"></a>
+
+```bash
+# in a repository already holding git-bug issues: get them, and adopt your
+# identity so that the bridges tag it with your logins
+git bug pull origin
+git bug user adopt <your-identity-id>
+
+# one bridge per forge, with sync
+git bug bridge new --name gh --url https://github.com/<owner>/<repo> --sync
+git bug bridge new --name gl --target gitlab --url https://gitlab.example.com/<group>/<project> --sync
+
+git bug bridge sync --dry-run   # what would be pulled and pushed; changes nothing
+git bug bridge sync
+git bug push origin
+```
+
+`bridge new` takes the target from a github.com or gitlab.com URL, and the
+GitLab instance from the project URL (`--base-url` is only needed for an
+instance served under a path). It uses the forge's stored token when only one
+fits (`git bug bridge auth` lists them); otherwise pass `--credential <id>`, or
+a new token with `--token-stdin`, which is then stored for the next bridges.
+
+The same person on both forges is two identities, except token owners. Link
+their login on each bridge to one identity:
+
+```bash
+git config git-bug.bridge.gh.login-<identity-id> alice
+git config git-bug.bridge.gl.login-<identity-id> alice-ex
+```
+
+## Syncing several platforms<a name="syncing-several-platforms"></a>
+
+By default, a bridge only pushes what a token owner can post, and never issues
+that came from another platform. To keep several platforms in sync through
+`git-bug`, for example a GitHub repository and a GitLab project, enable `sync`
+on their bridges, with `git bug bridge new --sync` or later:
+
+```bash
+git config git-bug.bridge.<name>.sync true
+```
+
+Then, from a single place such as a CI job:
+
+```bash
+git bug pull
+git bug bridge sync --dry-run   # the first time: what would be mirrored
+git bug bridge sync
+git bug push
+```
+
+`git bug bridge sync` pulls every bridge with `sync` enabled, then pushes to
+each of them, so that an issue, comment, edit, status, title or label change
+made on one platform reaches the others in one run. Running it again changes
+nothing until something changes somewhere. Gitea (and Forgejo), GitHub and
+GitLab support `sync`.
+
+What was written by someone without a token on a platform is posted there with
+the bridge's `default-login` token, under a header naming the author and
+linking to where it was written. Use a dedicated account for that login, with
+the permissions listed above: everything it posts appears as its own. In text
+coming from another platform, `@mentions` are defused so that they don't notify
+whoever has the same name there, and issue references point to the mirrored
+issue, or to the original one when it isn't mirrored yet.
+
+When the same thing changed on two platforms between two syncs, the later
+change wins, and `bridge sync` reports it. Deleting an issue or a comment on a
+platform is never propagated: it just stops syncing there.
+
+One issue at a time:
+
+```bash
+git bug bridge sync --issue <id>        # sync it now, alone
+git bug bridge link <id> gl 12          # it is GitLab's #12: don't create it there again
+git bug bridge take <id> gl             # drop what wasn't sent to GitLab, keep GitLab's version
+git bug bridge unlink <id> gl           # stop syncing it with GitLab, for good
+```
+
+After `link`, the next sync sends git-bug's title, description and status,
+and adds the comments and labels of each side to the other; `take` right
+after keeps GitLab's instead. Neither writes to the platform.
 
 > [!TIP]
 > See the [CLI documentation][doc/cli/bridge] for more information on the

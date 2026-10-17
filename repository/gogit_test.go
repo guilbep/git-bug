@@ -203,3 +203,34 @@ func TestGoGitRepo_Head(t *testing.T) {
 		Hash:      string(commit),
 	}, meta)
 }
+
+// A push goes where git's does: to every pushurl of the remote, else to
+// every url. A remote that mirrors to two forges gets both.
+func TestPushRefsToEveryPushURL(t *testing.T) {
+	requireGitBinary(t)
+	for name, setup := range map[string][]string{
+		"pushurls": {"config", "--add", "remote.origin.pushurl"},
+		"urls":     {"config", "--add", "remote.origin.url"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newTestGoGitRepo(t, false)
+			first, second := newTestGoGitRepo(t, true), newTestGoGitRepo(t, true)
+			runGit(t, repo.path, "remote", "add", "origin", first.path)
+			if name == "pushurls" {
+				runGit(t, repo.path, append(setup, first.path)...)
+			}
+			runGit(t, repo.path, append(setup, second.path)...)
+
+			commit := storeTestCommits(t, repo, 1)[0]
+			require.NoError(t, repo.UpdateRef("bugs", "x", "", commit))
+			_, err := repo.PushRefs("origin", "bugs")
+			require.NoError(t, err)
+
+			for _, remote := range []*GoGitRepo{first, second} {
+				got, err := remote.ResolveRef("bugs", "x")
+				require.NoError(t, err)
+				require.Equal(t, commit, got)
+			}
+		})
+	}
+}

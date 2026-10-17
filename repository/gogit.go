@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -219,25 +220,70 @@ func (repo *GoGitRepo) PushRefs(remote string, namespaces ...string) (string, er
 
 	buf := bytes.NewBuffer(nil)
 
-	remoteUrl, err := repo.resolveRemote(remote, false)
+	urls, err := repo.pushURLs(remote)
 	if err != nil {
 		return "", err
 	}
 
-	err = remo.Push(&gogit.PushOptions{
-		RemoteName: remote,
-		RemoteURL:  remoteUrl,
-		RefSpecs:   refSpecs,
-		Progress:   buf,
-	})
-	if err == gogit.NoErrAlreadyUpToDate {
-		return "already up-to-date", nil
+	upToDate := 0
+	for _, u := range urls {
+		err = remo.Push(&gogit.PushOptions{
+			RemoteName: remote,
+			RemoteURL:  u,
+			RefSpecs:   refSpecs,
+			Progress:   buf,
+		})
+		if err == gogit.NoErrAlreadyUpToDate {
+			upToDate++
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", u, err)
+		}
 	}
-	if err != nil {
-		return "", err
+	if upToDate == len(urls) {
+		return "already up-to-date", nil
 	}
 
 	return buf.String(), nil
+}
+
+// pushURLs returns where a push to remote goes, as git's does: every
+// pushurl of the remote, else every url, with url.<base>.insteadOf applied.
+// A remote mirroring to two forges gets both.
+func (repo *GoGitRepo) pushURLs(remote string) ([]string, error) {
+	local, err := repo.r.Config()
+	if err != nil {
+		return nil, err
+	}
+	options := local.Raw.Section("remote").Subsection(remote).Options
+	urls := options.GetAll("pushurl")
+	if len(urls) == 0 {
+		urls = options.GetAll("url")
+	}
+	if len(urls) == 0 {
+		// not a remote of the repository's own config
+		u, err := repo.resolveRemote(remote, false)
+		return []string{u}, err
+	}
+
+	cfg, err := repo.r.ConfigScoped(config.SystemScope)
+	if err != nil {
+		return nil, fmt.Errorf("unable to load system-scoped git config: %v", err)
+	}
+	var res []string
+	for _, u := range urls {
+		for _, rewrite := range cfg.URLs {
+			if strings.HasPrefix(u, rewrite.InsteadOf) {
+				u = rewrite.ApplyInsteadOf(u)
+				break
+			}
+		}
+		if !slices.Contains(res, u) {
+			res = append(res, u)
+		}
+	}
+	return res, nil
 }
 
 // StoreData will store arbitrary data and return the corresponding hash

@@ -1,0 +1,138 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/git-bug/git-bug/cache"
+)
+
+// SyncResult is a result of SyncAll, from one of the bridges.
+type SyncResult struct {
+	Bridge string
+	Import *ImportResult
+	Export *ExportResult
+}
+
+func (r SyncResult) IsError() bool {
+	return (r.Import != nil && r.Import.Event == ImportEventError) ||
+		(r.Export != nil && r.Export.Event == ExportEventError)
+}
+
+func (r SyncResult) String() string {
+	if r.Import != nil {
+		return r.Bridge + ": " + r.Import.String()
+	}
+	return r.Bridge + ": " + r.Export.String()
+}
+
+// SyncAll pulls the named bridges, or every bridge with sync enabled, then
+// pushes to each of them, under the repository's bridge lock. What one
+// bridge pulls reaches the others in the same run.
+func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun bool) (<-chan SyncResult, error) {
+	return syncRun(ctx, repo, names, dryRun, nil)
+}
+
+// SyncIssue syncs one bug, by id prefix, as SyncAll does every bug: its
+// issue is pulled from each forge it is on, then the bug pushed to each,
+// its issue created where a push would create it. The bridges' sync times
+// stay as they were: no other issue was read.
+func SyncIssue(ctx context.Context, repo *cache.RepoCache, prefix string, names []string, dryRun bool) (<-chan SyncResult, error) {
+	b, err := repo.Bugs().ResolvePrefix(prefix)
+	if err != nil {
+		return nil, err
+	}
+	return syncRun(ctx, repo, names, dryRun, b)
+}
+
+// syncRun is SyncAll, or SyncIssue when only is set.
+func syncRun(ctx context.Context, repo *cache.RepoCache, names []string, dryRun bool, only *cache.BugCache) (<-chan SyncResult, error) {
+	if len(names) == 0 {
+		all, err := ConfiguredBridges(repo)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range all {
+			if b, err := LoadBridge(repo, name); err == nil && b.IsSync() {
+				names = append(names, name)
+			}
+		}
+		if len(names) == 0 {
+			return nil, fmt.Errorf("no bridge has sync enabled: set git-bug.bridge.<name>.%s to true", ConfigKeySync)
+		}
+	}
+
+	var bridges []*Bridge
+	for _, name := range names {
+		b, err := LoadBridge(repo, name)
+		if err != nil {
+			return nil, err
+		}
+		if !b.IsSync() {
+			return nil, fmt.Errorf("bridge %s doesn't have sync enabled: set git-bug.bridge.%s.%s to true", name, name, ConfigKeySync)
+		}
+		bridges = append(bridges, b)
+	}
+
+	unlock, err := lockBridges(repo)
+	if err != nil {
+		return nil, err
+	}
+
+	// every engine first: each registers its remote, for the others to
+	// render text pulled from it
+	engines := make([]*Engine, len(bridges))
+	for i, b := range bridges {
+		if engines[i], err = b.newEngine(ctx, dryRun); err != nil {
+			unlock()
+			return nil, fmt.Errorf("%s: %w", b.Name, err)
+		}
+	}
+
+	out := make(chan SyncResult)
+	go func() {
+		defer close(out)
+		defer unlock()
+
+		pulled := make([]bool, len(bridges))
+		for i, b := range bridges {
+			// a bit before, just to be sure
+			start := time.Now().Add(-5 * time.Second)
+			pulled[i] = true
+			var pulls <-chan ImportResult
+			if only != nil {
+				pulls = engines[i].PullIssue(ctx, only)
+			} else {
+				pulls = engines[i].Pull(ctx, b.configTime(configKeyLastSyncTime))
+			}
+			for r := range pulls {
+				pulled[i] = pulled[i] && r.Event != ImportEventError
+				out <- SyncResult{Bridge: b.Name, Import: &r}
+			}
+			if pulled[i] && !dryRun && only == nil {
+				_ = b.storeConfigTime(configKeyLastSyncTime, start)
+			}
+		}
+		for i, b := range bridges {
+			// what git-bug knows of that forge may be stale: pushing could
+			// undo what changed there since
+			if !pulled[i] {
+				r := NewExportError(errors.New("not pushed, as its pull failed"), "")
+				out <- SyncResult{Bridge: b.Name, Export: &r}
+				continue
+			}
+			var pushes <-chan ExportResult
+			if only != nil {
+				pushes = engines[i].PushBug(ctx, only)
+			} else {
+				pushes = engines[i].Push(ctx)
+			}
+			for r := range pushes {
+				out <- SyncResult{Bridge: b.Name, Export: &r}
+			}
+		}
+	}()
+	return out, nil
+}
