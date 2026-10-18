@@ -583,3 +583,24 @@ func TestGiteaLinkRefusesPullRequest(t *testing.T) {
 		require.ErrorContains(t, err, "has no issue", arg)
 	}
 }
+
+// A label made on Gitea after the adapter read the repository's labels is
+// found again, to be removed: an engine may live long, as git-board's do.
+func TestGiteaRemovesLabelMadeSinceRead(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeGitea(t)
+	tokens := map[string]string{"bot": "token-bot", "alice": "token-alice"}
+	g := giteaHarness{baseURL: fake.URL + "/", tokens: tokens, newRepo: func(*testing.T) string { return "project" }}.newForge(t).(giteaForge)
+	alice := g.UserAct("alice").(giteaActor)
+	ref := alice.CreateIssue("title", "body")
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, []string{"a"}, nil))
+
+	// made on Gitea, as the adapter had read the labels
+	var made apiLabel
+	alice.call(alice.token, http.MethodPost, "/labels", map[string]any{"name": "new"}, &made)
+	alice.call(alice.token, http.MethodPost, "/issues/"+ref.Number+"/labels", map[string]any{"labels": []int64{made.ID}}, nil)
+	require.ElementsMatch(t, []string{"a", "new"}, g.Issue(ref.Number).Labels)
+
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, nil, []string{"new"}))
+	require.Equal(t, []string{"a"}, g.Issue(ref.Number).Labels)
+}

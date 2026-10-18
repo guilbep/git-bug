@@ -136,7 +136,11 @@ spec stays the authority.
   full set (not checked against a live GitLab); Gitea posts ids, creating
   missing ones as it silently ignores unknown names, and deletes one label
   at a time. A label to remove that the project doesn't have is on no
-  issue, and is skipped. *If wrong:* a push alone no longer makes the
+  issue, and is skipped. GitHub's and Gitea's adapters read the project's
+  labels again when one is missing, before creating or skipping it: an
+  engine may live long (git-board keeps one between a check and a send),
+  and a label made on the forge since would otherwise never be removed.
+  *If wrong:* a push alone no longer makes the
   forge's labels git-bug's; the forge's own changes merge at the next pull,
   as in a full sync. A change that adds and removes is two writes on
   GitHub, and Gitea takes one write per label removed.

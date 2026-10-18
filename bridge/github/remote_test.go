@@ -751,3 +751,19 @@ func TestGithubSecondaryRateLimitWaits(t *testing.T) {
 	}
 	require.Equal(t, "local", g.Issue("1").Title)
 }
+
+// A label made on GitHub after the adapter read the repository's labels is
+// found again, to be removed: an engine may live long, as git-board's do.
+func TestGithubRemovesLabelMadeSinceRead(t *testing.T) {
+	ctx := context.Background()
+	g := newGithubForge(t, "owner")
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, []string{"a"}, nil))
+
+	// made on GitHub, as the adapter had read the labels
+	alice.SetLabels(ref, []string{"a", "new"})
+
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, nil, []string{"new"}))
+	require.Equal(t, []string{"a"}, g.Issue(ref.Number).Labels)
+}

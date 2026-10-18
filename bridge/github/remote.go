@@ -489,8 +489,12 @@ func (r *remote) repositoryID(ctx context.Context) (string, error) {
 func (r *remote) labelID(ctx context.Context, name string, create bool) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.labels == nil {
-		r.labels = map[string]string{}
+	// read on a miss: the label may have been made on GitHub since the labels
+	// were read, as an engine may live long.
+	// ponytail: one read of every label per missing one; a new label is a
+	// write anyway.
+	if _, ok := r.labels[strings.ToLower(name)]; !ok {
+		labels := map[string]string{}
 		vars := varmap{
 			"owner": githubv4.String(r.owner),
 			"name":  githubv4.String(r.project),
@@ -500,17 +504,17 @@ func (r *remote) labelID(ctx context.Context, name string, create bool) (string,
 		for {
 			var q labelsQuery
 			if err := r.reader.queryPrintMsgs(ctx, &q, vars); err != nil {
-				r.labels = nil
 				return "", err
 			}
 			for _, l := range q.Repository.Labels.Nodes {
-				r.labels[strings.ToLower(l.Name)] = l.ID
+				labels[strings.ToLower(l.Name)] = l.ID
 			}
 			if !q.Repository.Labels.PageInfo.HasNextPage {
 				break
 			}
 			vars["after"] = q.Repository.Labels.PageInfo.EndCursor
 		}
+		r.labels = labels
 	}
 	if id, ok := r.labels[strings.ToLower(name)]; ok || !create {
 		return id, nil

@@ -414,7 +414,11 @@ func (r *remote) confirm(ctx context.Context, err error, number, commentID strin
 func (r *remote) labelID(ctx context.Context, as core.Account, name string, create bool) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.labels == nil {
+	// read on a miss: the label may have been made on Gitea since the labels
+	// were read, as an engine may live long.
+	// ponytail: one read of every label per missing one; a new label is a
+	// write anyway.
+	if _, ok := r.labels[strings.ToLower(name)]; !ok {
 		labels := map[string]int64{}
 		for page := 1; ; page++ {
 			var res []apiLabel
