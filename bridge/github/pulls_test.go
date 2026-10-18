@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -298,4 +299,54 @@ func TestGithubSendsReviewComments(t *testing.T) {
 	require.Equal(t, writes, g.Writes(), "nothing sent twice")
 	require.Len(t, b.Snapshot().Comments, 5, "nothing pulled back")
 	require.Len(t, b.Snapshot().Operations, ops)
+}
+
+// The flow starts on GitHub: a reply in git-bug to a pulled line comment
+// answers it there, and resolves its thread; an approval without text,
+// GitHub's most common one, is pulled.
+func TestGithubAnswersPulledLineComment(t *testing.T) {
+	g, repo, b, bot := pullSetup(t)
+	line := g.fake.pullAct("carol", 7, "pulls/comments", restPost{Body: "why?", CommitID: head, Path: "main.go", Line: 3, Side: "LEFT"})
+	g.fake.pullAct("carol", 7, "pulls/reviews", restPost{Event: "APPROVE", CommitID: head})
+	syncPulls(t, repo, g)
+
+	snap := b.Snapshot()
+	require.Len(t, snap.Comments, 3)
+	approval := snap.Comments[2]
+	require.Empty(t, approval.Message)
+	var pulled *bug.AddCommentOperation
+	for _, op := range snap.Operations {
+		if c, ok := op.(*bug.AddCommentOperation); ok {
+			if c.Message == "why?" {
+				pulled = c
+			}
+			if c.Message == "" {
+				require.Equal(t, "APPROVE", c.Metadata["review:state"])
+			}
+		}
+	}
+	require.Equal(t, "old", pulled.Metadata["review:side"])
+
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	reply := maps.Clone(pulled.Metadata)
+	for k := range reply {
+		if strings.HasPrefix(k, "sync:") {
+			delete(reply, k)
+		}
+	}
+	reply["review:reply-to"] = string(entity.CombineIds(b.Id(), pulled.Id()))
+	_, _, err = b.AddCommentRaw(me, time.Now().Unix(), "because", nil, reply)
+	require.NoError(t, err)
+	_, err = b.SetMetadataRaw(bot, time.Now().Unix(), pulled.Id(), map[string]string{"review:resolved": "true"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	syncPulls(t, repo, g)
+
+	p := g.fake.pulls[7]
+	require.Len(t, p.lines, 2)
+	require.Equal(t, line.ID, p.lines[1].InReplyToID)
+	require.True(t, p.resolved["PRRT_"+line.NodeID])
+	require.Len(t, b.Snapshot().Comments, 4)
 }
