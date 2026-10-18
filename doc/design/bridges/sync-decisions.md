@@ -123,9 +123,23 @@ spec stays the authority.
   pushed elsewhere as git-bug text, their mentions live (one would notify
   on GitHub) and refs untranslated. The value recorded by reconcile now
   names the forge. *If wrong:* nothing.
-- **Labels**: GitHub sets the full set with `updateIssue(labelIds)` and
-  creates missing ones with its REST API (GraphQL can't); Gitea sets ids and
-  creates missing ones, as it silently ignores unknown names.
+- **A push sends label changes against what the forge last saw, never
+  git-bug's set** (`Remote.ChangeLabels`): a push without a pull first, as
+  git-board's Send, would otherwise remove the labels added on the forge
+  since, and put back the ones removed there. What the push records as seen
+  stays git-bug's set, not the forge's: the next pull then takes a label
+  added or removed on the forge as the forge's change, with no conflict.
+  GitHub adds and removes with `addLabelsToLabelable` and
+  `removeLabelsFromLabelable` (GraphQL, as its other writes), creating
+  missing labels with its REST API (GraphQL can't); GitLab with
+  `add_labels` and `remove_labels`, which it creates when missing as for a
+  full set (not checked against a live GitLab); Gitea posts ids, creating
+  missing ones as it silently ignores unknown names, and deletes one label
+  at a time. A label to remove that the project doesn't have is on no
+  issue, and is skipped. *If wrong:* a push alone no longer makes the
+  forge's labels git-bug's; the forge's own changes merge at the next pull,
+  as in a full sync. A change that adds and removes is two writes on
+  GitHub, and Gitea takes one write per label removed.
 
 ## Rendering and identities
 
@@ -221,7 +235,7 @@ under the bridge lock and writes nothing to the forge.
   are changes not sent yet, so the next sync sends git-bug's title,
   description and status. Comments of each side are added to the other,
   and labels merge, as if the issue had none when last in sync (a lone
-  `bridge push` sets git-bug's instead). `take` right after keeps the
+  `bridge push` adds git-bug's, and the next pull the forge's). `take` right after keeps the
   forge's version. Refused: an issue that is another bug's (by id or legacy
   metadata), a bug that has or had an issue on that forge, a URL of another
   project. *If wrong:* the forge's title, description and status are

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -178,6 +179,10 @@ func (f *fakeGithub) setLabels(login string, issue *ghIssue, labels []string) {
 		return actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)}
 	}
 	for _, l := range labels {
+		// an issue's labels are the repository's
+		if !slices.Contains(slices.Collect(maps.Values(f.labels)), l) {
+			f.labels[f.nextID("LA")] = l
+		}
 		if !slices.Contains(issue.labels, l) {
 			issue.timeline = append(issue.timeline, timelineItem{Typename: "LabeledEvent",
 				LabeledEvent: labeledEvent{actorEvent: event(), Label: label{Name: githubv4.String(l)}}})

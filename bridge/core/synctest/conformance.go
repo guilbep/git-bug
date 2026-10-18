@@ -37,6 +37,7 @@ func Run(t *testing.T, h Harness) {
 		"conflict keeps later edit":  conflictKeepsLater,
 		"crash after a write":        crashAfterWrite,
 		"labels merge":               labelsMerge,
+		"push alone keeps labels":    pushAloneKeepsLabels,
 		"token owner acts directly":  tokenOwnerActsDirectly,
 		"refs never mirrored":        refsNeverMirrored,
 		"deletion is not propagated": deletionNotPropagated,
@@ -279,6 +280,32 @@ func labelsMerge(w *world) {
 	require.Equal(w.t, []common.Label{"y"}, w.onlyBug().Snapshot().Labels)
 	require.Equal(w.t, []string{"y"}, w.issue(w.a, "title").Labels)
 	require.Equal(w.t, []string{"y"}, w.issue(w.b, "title").Labels)
+	w.stable()
+}
+
+// pushAloneKeepsLabels pushes without pulling first, as git-board's Send
+// does: git-bug's label changes are sent, and the forge's stay.
+func pushAloneKeepsLabels(w *world) {
+	alice := w.a.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	alice.SetLabels(ref, []string{"a", "b", "c"})
+	w.sync()
+
+	// since: a adds x and removes b, git-bug adds y and removes c
+	alice.SetLabels(ref, []string{"a", "c", "x"})
+	b := w.onlyBug()
+	_, _, err := b.ChangeLabels([]string{"y"}, []string{"c"})
+	require.NoError(w.t, err)
+	require.NoError(w.t, b.Commit())
+
+	for r := range w.engine(w.a).Push(context.Background()) {
+		require.NotEqual(w.t, core.ExportEventError, r.Event, r.String())
+	}
+	require.ElementsMatch(w.t, []string{"a", "x", "y"}, w.issue(w.a, "title").Labels)
+
+	require.Zero(w.t, w.sync(), "no conflict")
+	require.Equal(w.t, []common.Label{"a", "x", "y"}, w.onlyBug().Snapshot().Labels)
+	require.ElementsMatch(w.t, []string{"a", "x", "y"}, w.issue(w.b, "title").Labels)
 	w.stable()
 }
 

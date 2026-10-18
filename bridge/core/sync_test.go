@@ -372,6 +372,40 @@ func TestPullMergesLabels(t *testing.T) {
 	require.Equal(t, []common.Label{"b"}, onlyBug(t, repo).Snapshot().Labels)
 }
 
+// A push alone, without a pull first, sends git-bug's label changes, not its
+// set: what the forge changed since the last pull stays, and the next sync
+// brings it in as the forge's change.
+func TestPushAloneKeepsForgeLabels(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.SetLabels(issue, []string{"a", "b", "c"})
+	pull(t, repo, f)
+
+	// since the pull, the forge adds x and removes b, git-bug adds y and
+	// removes c
+	alice.SetLabels(issue, []string{"a", "c", "x"})
+	b := onlyBug(t, repo)
+	_, _, err := b.ChangeLabels([]string{"y"}, []string{"c"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	push(t, repo, f, true)
+	require.Equal(t, []string{"a", "x", "y"}, f.Issue(issue.Number).Labels)
+	writes := f.Writes()
+
+	results := pull(t, repo, f)
+	require.Zero(t, warnings(results), "no conflict")
+	require.Equal(t, []common.Label{"a", "x", "y"}, onlyBug(t, repo).Snapshot().Labels)
+	push(t, repo, f, true)
+	require.Equal(t, writes, f.Writes(), "nothing more sent")
+	ops := len(onlyBug(t, repo).Snapshot().Operations)
+	sync(t, repo, f)
+	require.Equal(t, writes, f.Writes())
+	require.Len(t, onlyBug(t, repo).Snapshot().Operations, ops)
+}
+
 func push(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, foreign bool) []core.ExportResult {
 	var res []core.ExportResult
 	for r := range engine(t, repo, f, foreign).Push(context.Background()) {

@@ -386,6 +386,8 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 	// title, status and labels that differ from what the forge last saw
 	snap = b.Snapshot()
 	title := e.title(snap, refs)
+	baseLabels, _, _ := base(snap, e.remote, s(slotLabels, ""))
+	added, removed := labelChanges(baseLabels, snap.Labels)
 	for _, sc := range []struct {
 		kind  slotKind
 		local string
@@ -399,7 +401,8 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			return e.remote.SetStatus(ctx, as, issue, snap.Status)
 		}, NewExportStatusChange},
 		{slotLabels, labelsValue(labelStrings(snap.Labels)), func(as Account) error {
-			return e.remote.SetLabels(ctx, as, issue, labelStrings(snap.Labels))
+			// the changes only: the forge's own since it was last seen stay
+			return e.remote.ChangeLabels(ctx, as, issue, added, removed)
 		}, NewExportLabelChange},
 	} {
 		baseValue, _, ok := base(snap, e.remote, s(sc.kind, ""))
@@ -698,6 +701,23 @@ func setRecords(b *cache.BugCache, records map[entity.Id]map[string]string) erro
 		}
 	}
 	return nil
+}
+
+// labelChanges returns the labels to add to and remove from base, a label
+// set as recorded, to have labels.
+func labelChanges(base string, labels []common.Label) (added, removed []string) {
+	was := splitLabels(base)
+	for _, l := range labels {
+		if !slices.Contains(was, l) {
+			added = append(added, l.String())
+		}
+	}
+	for _, l := range was {
+		if !slices.Contains(labels, l) {
+			removed = append(removed, l.String())
+		}
+	}
+	return added, removed
 }
 
 func labelStrings(labels []common.Label) []string {

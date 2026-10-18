@@ -134,7 +134,9 @@ operation.
 
 Push sends a value when it differs from the base, never each intermediate
 operation. A local close followed by a reopen, when the base is open,
-sends nothing.
+sends nothing. Labels are sent as what git-bug added and removed since the
+base, never as git-bug's set: a push without a pull first leaves the labels
+the forge changed since, and the next pull brings them in.
 
 ## Adapter interface
 
@@ -161,7 +163,7 @@ type Remote interface {
 	EditText(ctx context.Context, as Account, issue, target Ref, body string) error
 	SetStatus(ctx context.Context, as Account, issue Ref, status common.Status) error
 	SetTitle(ctx context.Context, as Account, issue Ref, title string) error
-	SetLabels(ctx context.Context, as Account, issue Ref, labels []string) error
+	ChangeLabels(ctx context.Context, as Account, issue Ref, added, removed []string) error
 
 	// How @mentions and #refs are written on this forge
 	Dialect() Dialect
@@ -186,7 +188,7 @@ Checked against the forges:
 |---|---|---|---|---|
 | create issue/comment returns an id | ✅ | ✅ | ✅ | ✅ |
 | timeline events with ids | ✅ | ✅ except comment edits | ✅ `/timeline` | ✅ changelog (made-up ids) |
-| set labels as a full set | ✅ | ✅ | ✅ | ✅ |
+| add and remove labels | ✅ | ✅ | ✅ | ✅ |
 | status | close/reopen | state event | state field | workflow transition, mapped in the adapter |
 | who can edit a comment | author or maintainers | author only | author or writers | per permissions |
 
