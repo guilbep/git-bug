@@ -140,6 +140,10 @@ spec stays the authority.
   labels again when one is missing, before creating or skipping it: an
   engine may live long (git-board keeps one between a check and a send),
   and a label made on the forge since would otherwise never be removed.
+  A bug the old bridges pulled has a base, what they pulled (`base` reads
+  their tags), so its first sync and a push alone send git-bug's changes
+  since, removals included; only a push alone after `Link`, whose base is
+  empty on purpose, adds without removing.
   *If wrong:* a push alone no longer makes the
   forge's labels git-bug's; the forge's own changes merge at the next pull,
   as in a full sync. A change that adds and removes is two writes on

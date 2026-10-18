@@ -36,7 +36,7 @@ func newRepo(t *testing.T) *cache.RepoCache {
 	return backend
 }
 
-func engine(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, foreign bool) *core.Engine {
+func engine(t *testing.T, repo *cache.RepoCache, f core.Remote, foreign bool) *core.Engine {
 	e, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
 		Foreign:      foreign,
 		DefaultLogin: "bot",
@@ -46,7 +46,7 @@ func engine(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, foreign bool)
 	return e
 }
 
-func pull(t *testing.T, repo *cache.RepoCache, f *synctest.Fake) []core.ImportResult {
+func pull(t *testing.T, repo *cache.RepoCache, f core.Remote) []core.ImportResult {
 	var res []core.ImportResult
 	for r := range engine(t, repo, f, true).Pull(context.Background(), time.Time{}) {
 		if r.Event == core.ImportEventError {
@@ -417,7 +417,55 @@ func TestPushAloneKeepsForgeLabels(t *testing.T) {
 	require.Len(t, onlyBug(t, repo).Snapshot().Operations, ops)
 }
 
-func push(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, foreign bool) []core.ExportResult {
+// A bug an old bridge pulled has no sync record of its labels: what that
+// bridge pulled is what the forge saw. A full sync sends git-bug's changes
+// since, a label git-bug dropped included.
+func TestSyncLegacyBugLabels(t *testing.T) {
+	repo := newRepo(t)
+	f := legacyFake{synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)}
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.SetLabels(issue, []string{"FEAT", "a"})
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+
+	// as the old bridge pulled it: each operation tagged with its forge id
+	b, _, err := repo.Bugs().NewRaw(me, time.Now().Unix(), "title", "body", nil,
+		map[string]string{"fake-id": issue.ID, core.MetaKeyOrigin: "fake"})
+	require.NoError(t, err)
+	labeled := f.Issue(issue.Number).Events[0]
+	_, err = b.ForceChangeLabelsRaw(me, time.Now().Unix(), labeled.Added, nil, map[string]string{"fake-id": labeled.ID})
+	require.NoError(t, err)
+	// then git-bug drops FEAT and adds b
+	_, _, err = b.ChangeLabels([]string{"b"}, []string{"FEAT"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	dry, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
+		Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
+	})
+	require.NoError(t, err)
+	for r := range dry.Pull(context.Background(), time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+	}
+	var planned []string
+	for r := range dry.Push(context.Background()) {
+		planned = append(planned, r.String())
+	}
+	require.Len(t, planned, 1)
+	require.Contains(t, planned[0], "would send: labels +b -FEAT")
+
+	sync(t, repo, f)
+	require.Equal(t, []string{"a", "b"}, f.Issue(issue.Number).Labels)
+	require.Equal(t, []common.Label{"a", "b"}, onlyBug(t, repo).Snapshot().Labels)
+	sync(t, repo, f)
+	writes := f.Writes()
+	sync(t, repo, f)
+	require.Equal(t, writes, f.Writes())
+	require.Equal(t, []common.Label{"a", "b"}, onlyBug(t, repo).Snapshot().Labels)
+}
+
+func push(t *testing.T, repo *cache.RepoCache, f core.Remote, foreign bool) []core.ExportResult {
 	var res []core.ExportResult
 	for r := range engine(t, repo, f, foreign).Push(context.Background()) {
 		if r.Event == core.ExportEventError {
@@ -562,7 +610,7 @@ func TestPushRendersReconciledEdit(t *testing.T) {
 	require.Contains(t, dst.Issue("1").Body, "cc `@carol`, see [#9](https://src.test/issues/9)")
 }
 
-func sync(t *testing.T, repo *cache.RepoCache, f *synctest.Fake) []core.ExportResult {
+func sync(t *testing.T, repo *cache.RepoCache, f core.Remote) []core.ExportResult {
 	pull(t, repo, f)
 	return push(t, repo, f, true)
 }
