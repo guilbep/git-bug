@@ -192,6 +192,20 @@ spec stays the authority.
   so the next full sync still reads everything changed since the last one.
   For a person who wants one comment out now, without a run over every
   issue (a minute and more on co2). *If wrong:* a full sync does it all.
+- **A bug synced alone that isn't on a forge yet is first looked for there
+  by its git-bug marker**, as a full pull attaches it: another clone may
+  have synced it, or a push died between creating the issue and recording
+  it. `PullIssue` lists the issues updated since the bug was created (less
+  `claimWindow`, for clocks), through `Remote.Issues`, and pulls the first
+  one carrying the bug's marker, posted by one of the accounts. A dry run
+  says it would sync with that issue instead of creating one. When the
+  listing fails or stops, the push to that forge doesn't happen. No forge
+  search API: one listing works on every forge. *If wrong:* a bug never
+  synced whose creation is old, like one pulled long ago from another
+  forge, lists most of the project at each one-issue sync until it is on
+  that forge (a minute and more on co2; git-board's Send makes two, its
+  dry run then the real one); a forge search for the marker would then
+  do.
 
 ## One issue on one forge: link, unlink, take
 

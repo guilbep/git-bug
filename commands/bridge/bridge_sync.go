@@ -56,8 +56,10 @@ or on the forges.
 
 --issue syncs one issue only: its changes on each forge it is on are
 pulled, then its changes pushed to every forge, creating it where a sync
-would. Nothing else is read or written, and the next full sync still
-reads everything changed since the last one.
+would. Nothing else is pulled or written, and the next full sync still
+reads everything changed since the last one. On a forge it isn't known
+on yet, the issues changed since it was created are read, to find one
+that a sync from another clone created for it.
 
 For one issue on one forge, see also "git bug bridge link" (it already is an
 issue there), "git bug bridge take" (drop git-bug's changes not sent there)

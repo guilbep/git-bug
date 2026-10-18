@@ -46,7 +46,8 @@ func (e *Engine) Pull(ctx context.Context, since time.Time) <-chan ImportResult 
 }
 
 // PullIssue brings one bug's issue into git-bug, as Pull does every issue
-// changed since a time: nothing when the bug isn't on the forge.
+// changed since a time: nothing when the bug isn't on the forge. A bug not
+// recorded there may be all the same, see pullMarked.
 func (e *Engine) PullIssue(ctx context.Context, b *cache.BugCache) <-chan ImportResult {
 	out := make(chan ImportResult)
 	go func() {
@@ -54,7 +55,7 @@ func (e *Engine) PullIssue(ctx context.Context, b *cache.BugCache) <-chan Import
 		snap := b.Snapshot()
 		ref, ok := e.issueRef(snap)
 		if !ok {
-			out <- NewImportNothing(b.Id(), "not on this forge yet")
+			e.pullMarked(ctx, b, out)
 			return
 		}
 		if _, gone := snap.Operations[0].GetMetadata(e.key("gone")); gone {
@@ -74,6 +75,34 @@ func (e *Engine) PullIssue(ctx context.Context, b *cache.BugCache) <-chan Import
 		}
 	}()
 	return out
+}
+
+// pullMarked pulls the issue of a bug not recorded on the forge, created by
+// another clone's push or by one that died before recording it, as Pull
+// would: found by its git-bug marker among the issues updated since the bug
+// was created, as it was pushed after.
+func (e *Engine) pullMarked(ctx context.Context, b *cache.BugCache, out chan<- ImportResult) {
+	// ponytail: lists the project's issues updated since, once per bug not
+	// pushed yet; a forge search for the marker if that costs too much
+	for issue, err := range e.remote.Issues(ctx, b.Snapshot().CreateTime.Add(-claimWindow)) {
+		if err != nil {
+			out <- NewImportError(fmt.Errorf("listing issues: %w", err), b.Id())
+			return
+		}
+		if id, ok := e.marker(issue); ok && id == b.Id() {
+			if err := e.pullIssue(ctx, issue, out); err != nil {
+				out <- NewImportError(fmt.Errorf("issue %s: %w", issue.URL, err), b.Id())
+			}
+			return
+		}
+	}
+	// a forge may end its listing quietly when stopped: the push must not
+	// create an issue that may be there
+	if err := ctx.Err(); err != nil {
+		out <- NewImportError(fmt.Errorf("pull stopped: %w", err), b.Id())
+		return
+	}
+	out <- NewImportNothing(b.Id(), "not on this forge yet")
 }
 
 func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportResult) error {
@@ -163,10 +192,9 @@ func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCac
 		return b, false, err
 	}
 
-	// created by a push that died before recording it: only git-bug's
-	// accounts post markers, anyone else's is just text
-	id, ok := MarkerID(text.Cleanup(issue.OriginalBody))
-	if !ok || !e.isAccount(issue.Author) {
+	// created by a push that died before recording it
+	id, ok := e.marker(issue)
+	if !ok {
 		return nil, false, nil
 	}
 	b, err = e.repo.Bugs().Resolve(id)
@@ -187,6 +215,13 @@ func (e *Engine) findBug(issue *Issue, out chan<- ImportResult) (b *cache.BugCac
 	tags[e.key("as")] = issue.Author.Login
 	_, err = b.SetMetadata(b.Snapshot().Operations[0].Id(), tags)
 	return b, false, err
+}
+
+// marker returns the bug whose git-bug marker an issue carries: only
+// git-bug's accounts post markers, anyone else's is just text.
+func (e *Engine) marker(issue *Issue) (entity.Id, bool) {
+	id, ok := MarkerID(text.Cleanup(issue.OriginalBody))
+	return id, ok && e.isAccount(issue.Author)
 }
 
 // planPull reports what pulling an issue would do, without doing it.

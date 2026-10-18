@@ -38,7 +38,7 @@ func SyncAll(ctx context.Context, repo *cache.RepoCache, names []string, dryRun 
 // SyncIssue syncs one bug, by id prefix, as SyncAll does every bug: its
 // issue is pulled from each forge it is on, then the bug pushed to each,
 // its issue created where a push would create it. The bridges' sync times
-// stay as they were: no other issue was read.
+// stay as they were: no other issue was pulled.
 func SyncIssue(ctx context.Context, repo *cache.RepoCache, prefix string, names []string, dryRun bool) (<-chan SyncResult, error) {
 	b, err := repo.Bugs().ResolvePrefix(prefix)
 	if err != nil {

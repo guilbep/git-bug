@@ -634,3 +634,64 @@ func TestLinkTitleWithRefs(t *testing.T) {
 	syncAll(t, repo, false)
 	require.Equal(t, writes, b.Writes())
 }
+
+// syncIssue syncs one bug with forge a, and returns the report.
+func syncIssue(t *testing.T, repo *cache.RepoCache, b *cache.BugCache, dryRun bool) string {
+	results, err := core.SyncIssue(context.Background(), repo, b.Id().Human(), []string{"a"}, dryRun)
+	require.NoError(t, err)
+	var report []string
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+		report = append(report, r.String())
+	}
+	return strings.Join(report, "\n")
+}
+
+// A bug another clone synced, or whose push died before recording its
+// issue, is already on the forge: synced alone, it finds its issue by its
+// git-bug marker, as a full sync does, instead of creating another.
+func TestSyncIssueFindsItsIssueByMarker(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	bug, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	issue, err := a.CreateIssue(context.Background(), bot, "local", core.Render("body", bug.Id(), nil, nil, nil))
+	require.NoError(t, err)
+	a.UserAct("alice").Comment(issue, "from the forge")
+
+	// the forge can't be searched: nothing is created
+	a.FailNextListing()
+	results, err := core.SyncIssue(context.Background(), repo, bug.Id().Human(), []string{"a"}, false)
+	require.NoError(t, err)
+	errs := 0
+	for r := range results {
+		if r.IsError() {
+			errs++
+		}
+	}
+	require.Positive(t, errs)
+	require.Nil(t, a.Issue("2"))
+
+	report := syncIssue(t, repo, bug, true)
+	require.Contains(t, report, "would sync with "+issue.URL)
+	require.NotContains(t, report, "would create")
+
+	syncIssue(t, repo, bug, false)
+	require.Nil(t, a.Issue("2"), "no second issue")
+	require.Equal(t, issue.Number, numberOn(t, bug, a))
+	require.Len(t, bug.Snapshot().Comments, 2, "its issue was pulled")
+}
+
+// Only git-bug's accounts post markers: anyone else's is just text, and
+// syncing one bug imports no other.
+func TestSyncIssueIgnoresStrangersMarker(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	bug, _, err := repo.Bugs().New("local", "body")
+	require.NoError(t, err)
+	a.UserAct("alice").CreateIssue("copied", core.Render("body", bug.Id(), nil, nil, nil))
+
+	syncIssue(t, repo, bug, false)
+	require.Equal(t, "local", a.Issue("2").Title)
+	require.Len(t, repo.Bugs().AllIds(), 1)
+}
