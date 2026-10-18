@@ -39,6 +39,16 @@ type SyncOptions struct {
 	PullsOf func(bug entity.Id) []string
 }
 
+// Option sets SyncOptions that a bridge's configuration doesn't give, for
+// SyncAll, SyncIssue and Bridge.Use.
+type Option func(*SyncOptions)
+
+// WithPullsOf sets SyncOptions.PullsOf: a pull brings in the comments and
+// reviews of the pull requests it gives for each bug.
+func WithPullsOf(f func(bug entity.Id) []string) Option {
+	return func(o *SyncOptions) { o.PullsOf = f }
+}
+
 // Engine syncs a git-bug repository with one forge project.
 // See doc/design/bridges/sync.md.
 type Engine struct {

@@ -71,6 +71,14 @@ type Bridge struct {
 	conf           Configuration
 	initImportDone bool
 	initExportDone bool
+	// opts change the SyncOptions of its engines, see Use
+	opts []Option
+}
+
+// Use sets options of the sync engines the bridge creates from now on, for
+// its pulls and pushes, beyond what its configuration gives.
+func (b *Bridge) Use(opts ...Option) {
+	b.opts = append(b.opts, opts...)
 }
 
 // Register will register a new BridgeImpl
@@ -455,13 +463,17 @@ func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
 		}
 		links[login] = prefix
 	}
-	return NewEngine(ctx, b.repo, remote, SyncOptions{
+	opts := SyncOptions{
 		Foreign:      foreign,
 		DryRun:       dryRun,
 		DefaultLogin: b.conf[ConfigKeyDefaultLogin],
 		LoginKey:     b.impl.LoginMetaKey(),
 		Links:        links,
-	})
+	}
+	for _, o := range b.opts {
+		o(&opts)
+	}
+	return NewEngine(ctx, b.repo, remote, opts)
 }
 
 // SupportsSync tells whether the bridge can take part in `bridge sync`.

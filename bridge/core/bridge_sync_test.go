@@ -695,3 +695,61 @@ func TestSyncIssueIgnoresStrangersMarker(t *testing.T) {
 	require.Equal(t, "local", a.Issue("2").Title)
 	require.Len(t, repo.Bugs().AllIds(), 1)
 }
+
+// git-board gives the pull requests of each bug to SyncAll, SyncIssue, and
+// a bridge's own pulls, which then bring their comments in.
+func TestSyncWithPullsOf(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	ref := a.UserAct("alice").CreateIssue("from a", "body")
+	a.OpenPull("7", "c1", "main.go")
+	a.PullAct("carol", "7", core.PullComment{Body: "one"})
+	var asked []entity.Id
+	pullsOf := core.WithPullsOf(func(bug entity.Id) []string {
+		asked = append(asked, bug)
+		return []string{"7"}
+	})
+	texts := func() (res []string) {
+		for _, c := range onlyBug(t, repo).Snapshot().Comments {
+			res = append(res, c.Message)
+		}
+		return res
+	}
+
+	results, err := core.SyncAll(context.Background(), repo, []string{"a"}, false, pullsOf)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+	require.Equal(t, []string{"body", "one"}, texts())
+	require.Equal(t, []entity.Id{onlyBug(t, repo).Id()}, asked)
+
+	a.PullAct("carol", "7", core.PullComment{Body: "two"})
+	results, err = core.SyncIssue(context.Background(), repo, onlyBug(t, repo).Id().Human(), nil, false, pullsOf)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+	require.Equal(t, []string{"body", "one", "two"}, texts())
+
+	a.PullAct("carol", "7", core.PullComment{Body: "three"})
+	br, err := core.LoadBridge(repo, "a")
+	require.NoError(t, err)
+	br.Use(pullsOf)
+	events, err := br.ImportAllSince(context.Background(), time.Time{})
+	require.NoError(t, err)
+	for e := range events {
+		require.NotEqual(t, core.ImportEventError, e.Event, e.String())
+	}
+	require.Equal(t, []string{"body", "one", "two", "three"}, texts())
+	require.Empty(t, a.Issue(ref.Number).Comments, "nothing sent to the issue")
+
+	// without, as the command line runs it: none
+	a.PullAct("carol", "7", core.PullComment{Body: "four"})
+	results, err = core.SyncAll(context.Background(), repo, []string{"a"}, false)
+	require.NoError(t, err)
+	for r := range results {
+		require.False(t, r.IsError(), r.String())
+	}
+	require.Len(t, texts(), 4)
+}
