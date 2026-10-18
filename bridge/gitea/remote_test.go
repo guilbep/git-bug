@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/git-bug/git-bug/bridge/core"
+	"github.com/git-bug/git-bug/bridge/core/auth"
 	"github.com/git-bug/git-bug/bridge/core/synctest"
 	"github.com/git-bug/git-bug/cache"
 	"github.com/git-bug/git-bug/entities/common"
@@ -532,4 +533,40 @@ func TestGiteaNotFoundByOutsiderIsNotGone(t *testing.T) {
 	require.NoError(t, b.Commit())
 	sync()
 	require.Equal(t, "by the bot", g.Issue(ref.Number).Title)
+}
+
+// Gitea numbers pull requests with the issues, and its issues API serves
+// both: a bug can't be linked to a pull request, whose comments, title,
+// state and labels sync would then write.
+func TestGiteaLinkRefusesPullRequest(t *testing.T) {
+	fake := newFakeGitea(t)
+	fake.issues = append(fake.issues, &fakeIssue{apiIssue: apiIssue{
+		ID: 1001, Number: 1, Title: "a pull request", User: &apiUser{ID: 99, Login: "carol"}, State: "open",
+		HTMLURL: fake.URL + "/bot/project/pulls/1", Labels: []apiLabel{}, PullRequest: map[string]any{},
+	}})
+
+	repo := repotest.NewGoGitRepo(t, false)
+	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
+	require.NoError(t, err)
+	defer backend.Close()
+	core.Register(&Gitea{})
+	for k, v := range map[string]string{
+		core.ConfigKeyTarget: target, confKeyBaseURL: fake.URL + "/", confKeyOwner: "bot",
+		confKeyProject: "project", confKeyDefaultLogin: "bot",
+	} {
+		require.NoError(t, core.SetBridgeConfig(backend, "gt", k, v))
+	}
+	token := auth.NewToken(target, "token-bot")
+	token.SetMetadata(auth.MetaKeyBaseURL, fake.URL+"/")
+	require.NoError(t, auth.Store(backend, token))
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+	b, _, err := backend.Bugs().New("local", "body")
+	require.NoError(t, err)
+
+	for _, arg := range []string{"1", fake.URL + "/bot/project/pulls/1"} {
+		_, err = core.Link(context.Background(), backend, b.Id().Human(), "gt", arg)
+		require.ErrorContains(t, err, "has no issue", arg)
+	}
 }

@@ -201,6 +201,11 @@ func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
 	if err := r.do(ctx, r.reader, http.MethodGet, r.repoPath("/issues/"+url.PathEscape(number)), nil, &gi); err != nil {
 		return nil, err
 	}
+	// numbered with the issues, and served by the same API: as on GitHub,
+	// no issue has that number
+	if gi.PullRequest != nil {
+		return nil, fmt.Errorf("%w: #%s is a pull request", core.ErrGone, number)
+	}
 	return r.convert(ctx, gi)
 }
 
