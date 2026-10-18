@@ -361,6 +361,12 @@ same keys, and its origin `sync:<remote>:pr-comment`, its GitHub id.
 - **A pull request that can't be read is an error, as a failed issue
   listing**: that forge isn't pushed to in that run. Not found (404) is a
   warning. *If wrong:* a transient failure delays one run's push.
+- **A bug's pull request comments are sent along with its issue**: only
+  for a bug whose issue is on that GitHub repository (created by the same
+  push if need be), and not unlinked or deleted there. A pull brings them
+  in for any bug `PullsOf` names, except an unlinked one. *If wrong:*
+  comments written for a bug that doesn't sync with that repository wait,
+  in a dry run as "would send to pull request" only once it does.
 - **`WithPullsOf` gives one function for every bridge of a run**, as agreed
   with git-board: it takes a bug, not a remote. *If wrong:* with two GitHub
   bridges, a number `PullsOf` gives is read on both repositories, and
