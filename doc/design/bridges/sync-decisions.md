@@ -202,7 +202,8 @@ under the bridge lock and writes nothing to the forge.
 - **Link records the forge issue on the bug as a pull would**, found by its
   number or URL (`Remote.Fetch` by number: GitLab's issue id is its number).
   The forge's events are taken as seen, not replayed over git-bug's
-  history. A value both sides hold is recorded in sync; git-bug's others
+  history. A value both sides hold is recorded in sync (the title as
+  git-bug would send it there, its `#refs` translated); git-bug's others
   are changes not sent yet, so the next sync sends git-bug's title,
   description and status. Comments of each side are added to the other,
   and labels merge, as if the issue had none when last in sync (a lone

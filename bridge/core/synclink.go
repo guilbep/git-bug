@@ -171,8 +171,10 @@ func (e *Engine) link(ctx context.Context, b *cache.BugCache, bridge, arg string
 	}
 	records := map[entity.Id]map[string]string{createOp.Id(): tags}
 	// a value both sides hold is in sync; git-bug's others are changes not
-	// sent yet
-	if title := cleanTitle(issue.Title); title == snap.Title {
+	// sent yet. The title is git-bug's as sent there, its #refs translated.
+	refs := newRefIndex(e.excerpts())
+	refs.created(b.Id(), e.remote.Key(), issue.Ref)
+	if title := cleanTitle(issue.Title); title == e.title(snap, refs) {
 		addRecord(records, lastSlotOp(snap, s(slotTitle, "")).Id(), e.key("title"), title)
 	}
 	if issue.Status == snap.Status {

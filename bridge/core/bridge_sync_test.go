@@ -606,3 +606,31 @@ func TestTakeNeedsALink(t *testing.T) {
 	_, err = core.Take(context.Background(), repo, bug.Id().Human(), "a")
 	require.ErrorContains(t, err, "not synced")
 }
+
+// A title with #refs is linked in sync when the forge's is the one git-bug
+// would send there, its refs translated.
+func TestLinkTitleWithRefs(t *testing.T) {
+	repo := newRepo(t)
+	a := newSyncForge(t, repo, "a")
+	b := newSyncForge(t, repo, "b")
+	b.UserAct("bob").CreateIssue("already on b", "body")
+	a.UserAct("alice").CreateIssue("first", "body")
+	syncAll(t, repo, false)
+	first, err := repo.Bugs().ResolveMatcher(func(x *cache.BugExcerpt) bool { return x.Title == "first" })
+	require.NoError(t, err)
+	n := numberOn(t, first, b)
+	require.NotEqual(t, "1", n)
+
+	a.UserAct("alice").CreateIssue("see #1", "body")
+	ref := b.UserAct("bob").CreateIssue("see #"+n, "body")
+	syncA(t, repo)
+	bug, err := repo.Bugs().ResolveMatcher(func(x *cache.BugExcerpt) bool { return x.Title == "see #1" })
+	require.NoError(t, err)
+
+	_, err = core.Link(context.Background(), repo, bug.Id().Human(), "b", ref.Number)
+	require.NoError(t, err)
+	require.NotContains(t, strings.Join(syncAll(t, repo, true), "\n"), "would send")
+	writes := b.Writes()
+	syncAll(t, repo, false)
+	require.Equal(t, writes, b.Writes())
+}
