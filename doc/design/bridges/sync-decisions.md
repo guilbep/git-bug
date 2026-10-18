@@ -100,9 +100,20 @@ spec stays the authority.
   someone on another forge.
 - **What a pre-sync bridge pulled goes back to its own project as it is**,
   and its `#refs` translate elsewhere: bugs with `<kind>-id` are indexed by
-  the number of their `<kind>-url`, as references from `legacy:<kind>`.
-  Without it, co2's 228 bugs of the old GitHub bridge had their titles'
-  `#n` turned into `` `#n` `` on GitHub itself. *If wrong:* nothing.
+  the number of their `<kind>-url`, under the key the adapter gives their
+  project (`github.com/<owner>/<repo>` from `github-url`;
+  `<host>/<gitlab-project-id>` for GitLab, whose URL names the project by
+  path, not id), and what it pulled refers to that project. So a `#5` of one
+  project is never another's, and GitLab's `#77` reaches GitHub as `#2518`,
+  co2's bug 228 being both. A bug whose project can't be read refers to
+  nothing (`` `#n` ``). Without it, co2's 228 bugs of the old GitHub bridge
+  had their titles' `#n` turned into `` `#n` `` on GitHub itself. Titles
+  are rendered at each push, texts only when they change: the first sync
+  after this change sets once again each title whose ref now translates
+  (a legacy title naming a GitHub issue created since the migration, a
+  GitLab title naming a legacy one), one write per issue that a dry run
+  lists as "would send: title". *If wrong:* a reference to a legacy issue
+  goes out as a link to its forge.
 - **Titles already mirrored without translation are set once again** at
   the first sync after this change, where they hold a `#n`: one write per
   issue, its echo claimed by the next pull. That fixes their refs, and is a

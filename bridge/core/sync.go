@@ -1,8 +1,10 @@
 package core
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -146,8 +148,8 @@ func remoteInfoFor(key string) remoteInfo {
 	if info, ok := remotes[key]; ok {
 		return info
 	}
-	// pulled by a pre-sync bridge: "legacy:github"
-	return remoteInfo{kind: strings.TrimPrefix(key, "legacy:"), dialect: defaultDialect}
+	// not synced in this run
+	return remoteInfo{kind: key, dialect: defaultDialect}
 }
 
 // displayKind names a kind of forge as people do.
@@ -167,29 +169,65 @@ func displayKind(kind string) string {
 // with "<kind>-id" and "<kind>-url".
 var legacyKinds = []string{"github", "gitlab"}
 
-// sourceOf returns the key of the remote an operation was pulled from, and
-// its URL there, if any.
-func sourceOf(op dag.Operation) (key string, url string, ok bool) {
+// legacyKey returns the key, as its adapter writes it, of the project a
+// pre-sync bridge synced a bug with, from the metadata of the bug's create
+// operation.
+func legacyKey(kind string, createMeta map[string]string) (string, bool) {
+	switch kind {
+	case "github":
+		// https://github.com/<owner>/<repo>/issues/<n>
+		u, err := url.Parse(createMeta["github-url"])
+		if err != nil || u.Host == "" {
+			return "", false
+		}
+		owner, rest, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
+		repo, _, _ := strings.Cut(rest, "/")
+		if owner == "" || repo == "" {
+			return "", false
+		}
+		return strings.ToLower(u.Host + "/" + owner + "/" + repo), true
+	case "gitlab":
+		// the URL names the project by its path, the key by its id; older
+		// bridges recorded an empty base URL
+		u, err := url.Parse(cmp.Or(createMeta["gitlab-base-url"], createMeta["gitlab-url"]))
+		project := createMeta["gitlab-project-id"]
+		if err != nil || u.Host == "" || project == "" {
+			return "", false
+		}
+		return u.Host + "/" + project, true
+	}
+	return "", false
+}
+
+// sourceOf returns the remote an operation was pulled from, if any: its key
+// and kind, and the operation's URL there. createMeta is the metadata of the
+// bug's create operation.
+func sourceOf(op dag.Operation, createMeta map[string]string) (key, kind, url string, ok bool) {
 	own := ownMetadata(op)
 	for k := range own {
 		if strings.HasPrefix(k, "sync:") && strings.HasSuffix(k, ":id") {
 			key = strings.TrimSuffix(strings.TrimPrefix(k, "sync:"), ":id")
-			return key, own[syncKey(key, "url")], true
+			return key, remoteInfoFor(key).kind, own[syncKey(key, "url")], true
 		}
 	}
 	// reconciled: the forge reported no event, only the value
 	for k := range own {
-		for _, kind := range []slotKind{slotTitle, slotText} {
-			if key, ok := remoteKeyOf(k, string(kind)); ok {
-				return key, "", true
+		for _, sk := range []slotKind{slotTitle, slotText} {
+			if key, ok := remoteKeyOf(k, string(sk)); ok {
+				return key, remoteInfoFor(key).kind, "", true
 			}
 		}
 	}
-	// pulled by a pre-sync bridge
+	// pulled by a pre-sync bridge, from its bug's project
 	for _, kind := range legacyKinds {
 		if _, ok := own[kind+"-id"]; ok {
-			return "legacy:" + kind, own[kind+"-url"], true
+			key, ok := legacyKey(kind, createMeta)
+			if !ok {
+				// a project unknown: its numbers translate to none
+				key = "legacy:" + kind
+			}
+			return key, kind, own[kind+"-url"], true
 		}
 	}
-	return "", "", false
+	return "", "", "", false
 }

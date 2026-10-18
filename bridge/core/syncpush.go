@@ -512,8 +512,8 @@ func (e *Engine) render(snap *bug.Snapshot, refs *refIndex, markerID entity.Id, 
 			name = owner.Author().Login()
 		}
 		attr = &Attribution{Name: name, When: owner.Time()}
-		if src, url, ok := sourceOf(owner); ok {
-			attr.Source = displayKind(remoteInfoFor(src).kind)
+		if _, kind, url, ok := sourceOf(owner, snap.Operations[0].AllMetadata()); ok {
+			attr.Source = displayKind(kind)
 			attr.URL = url
 		}
 	}
@@ -547,7 +547,7 @@ func (e *Engine) title(snap *bug.Snapshot, refs *refIndex) string {
 // foreignSource returns the remote an operation was pulled from, unless it
 // is this one, where what it wrote goes back as it is.
 func (e *Engine) foreignSource(snap *bug.Snapshot, op dag.Operation) (string, bool) {
-	src, _, ok := sourceOf(op)
+	src, _, _, ok := sourceOf(op, snap.Operations[0].AllMetadata())
 	if !ok || src == e.remote.Key() {
 		return "", false
 	}
@@ -589,20 +589,25 @@ func newRefIndex(excerpts []*cache.BugExcerpt) *refIndex {
 		urls:     map[string]string{},
 	}
 	for _, excerpt := range excerpts {
-		for k, number := range excerpt.CreateMetadata {
-			key, ok := remoteKeyOf(k, "number")
-			// an issue unlinked or deleted is no longer the bug's
-			if !ok || excerpt.CreateMetadata[syncKey(key, "gone")] != "" {
-				continue
-			}
-			idx.add(excerpt.Id(), key, Ref{Number: number, URL: excerpt.CreateMetadata[syncKey(key, "url")]})
-		}
-		// on a forge through its pre-sync bridge: text it pulled is from
-		// "legacy:<kind>"
+		meta := excerpt.CreateMetadata
+		issues := map[string]Ref{} // by remote key
+		// on a forge through its pre-sync bridge
 		for _, kind := range legacyKinds {
-			url := excerpt.CreateMetadata[kind+"-url"]
-			if _, ok := excerpt.CreateMetadata[kind+"-id"]; ok && trailingNumber.MatchString(url) {
-				idx.add(excerpt.Id(), "legacy:"+kind, Ref{Number: trailingNumber.FindString(url), URL: url})
+			url := meta[kind+"-url"]
+			key, ok := legacyKey(kind, meta)
+			if _, legacy := meta[kind+"-id"]; legacy && ok && trailingNumber.MatchString(url) {
+				issues[key] = Ref{Number: trailingNumber.FindString(url), URL: url}
+			}
+		}
+		for k, number := range meta {
+			if key, ok := remoteKeyOf(k, "number"); ok {
+				issues[key] = Ref{Number: number, URL: meta[syncKey(key, "url")]}
+			}
+		}
+		for key, issue := range issues {
+			// an issue unlinked or deleted is no longer the bug's
+			if meta[syncKey(key, "gone")] == "" {
+				idx.add(excerpt.Id(), key, issue)
 			}
 		}
 	}

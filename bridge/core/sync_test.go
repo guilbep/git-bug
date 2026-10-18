@@ -944,3 +944,65 @@ func TestIssueURLForOtherTools(t *testing.T) {
 	require.NotEmpty(t, urls[pushed.Id()])
 	require.Contains(t, slices.Collect(maps.Values(urls)), pulled.URL)
 }
+
+// pushBug pushes one bug, and fails the test on an error.
+func pushBug(t *testing.T, repo *cache.RepoCache, f *synctest.Fake, b *cache.BugCache) {
+	for r := range engine(t, repo, f, true).PushBug(context.Background(), b) {
+		require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+	}
+}
+
+// legacyBug is a bug a pre-sync bridge pulled, or pushed, with its metadata.
+func legacyBug(t *testing.T, repo *cache.RepoCache, title, message string, meta map[string]string) *cache.BugCache {
+	me, err := repo.GetUserIdentity()
+	require.NoError(t, err)
+	b, _, err := repo.Bugs().NewRaw(me, time.Now().Unix(), title, message, nil, meta)
+	require.NoError(t, err)
+	return b
+}
+
+// A #5 written on a project, by its pre-sync bridge, is that project's
+// issue, not another project's #5.
+func TestPushTranslatesLegacyRefsOfTheirProject(t *testing.T) {
+	repo := newRepo(t)
+	dst := synctest.NewFake(key, "fake.test", synctest.Quirks{}, bot)
+	for _, p := range []struct{ project, number string }{{"one/repo", "3"}, {"Two/Repo", "4"}} {
+		legacyBug(t, repo, p.project+"#5", "body", map[string]string{
+			"github-id": p.project + "-5", "github-url": "https://github.com/" + p.project + "/issues/5",
+			"sync:" + key + ":number": p.number,
+		})
+	}
+	b := legacyBug(t, repo, "refers", "see #5", map[string]string{
+		"github-id": "one-7", "github-url": "https://github.com/one/repo/issues/7",
+	})
+
+	pushBug(t, repo, dst, b)
+	body := dst.Issue("1").Body
+	require.Contains(t, body, "see #3")
+	require.Contains(t, body, "[view on GitHub](https://github.com/one/repo/issues/7)")
+}
+
+// A bug the GitHub pre-sync bridge pulled is that GitHub project's issue
+// wherever it is referred to: GitLab's #77 is GitHub's #2518.
+func TestPushTranslatesRefsToLegacyIssues(t *testing.T) {
+	for name, onGitlab := range map[string]map[string]string{
+		"synced": {"sync:gitlab.test/42:number": "77"},
+		"legacy": {"gitlab-id": "77", "gitlab-url": "https://gitlab.test/group/proj/-/issues/77", "gitlab-project-id": "42", "gitlab-base-url": "https://gitlab.test/"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newRepo(t)
+			gitlab := synctest.NewFake("gitlab.test/42", "gitlab.test", synctest.Quirks{}, bot)
+			github := synctest.NewFake("github.com/owner/repo", "github.com", synctest.Quirks{}, bot)
+			meta := map[string]string{"github-id": "I_2518", "github-url": "https://github.com/Owner/Repo/issues/2518"}
+			maps.Copy(meta, onGitlab)
+			legacyBug(t, repo, "bug 228", "body", meta)
+			gitlab.UserAct("alice").CreateIssue("refers", "see #77")
+			pull(t, repo, gitlab)
+
+			b, err := repo.Bugs().ResolveMatcher(func(x *cache.BugExcerpt) bool { return x.Title == "refers" })
+			require.NoError(t, err)
+			pushBug(t, repo, github, b)
+			require.Contains(t, github.Issue("1").Body, "see #2518")
+		})
+	}
+}
