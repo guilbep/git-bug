@@ -110,6 +110,9 @@ func (r *remote) Accounts(context.Context) ([]core.Account, error) {
 
 func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Issue, error] {
 	return func(yield func(*core.Issue, error) bool) {
+		// stops the listing if the caller stops early
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 		for res := range Issues(ctx, r.reader, r.projectID, since) {
 			if res.Err != nil {
 				yield(nil, res.Err)
