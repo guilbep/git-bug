@@ -178,10 +178,6 @@ func (f *Fake) SetTitle(_ context.Context, as core.Account, issue core.Ref, titl
 	return f.write(func() error { return f.setTitle(as.User, issue, title) })
 }
 
-func (f *Fake) SetLabels(_ context.Context, as core.Account, issue core.Ref, labels []string) error {
-	return f.write(func() error { return f.setLabels(as.User, issue, labels) })
-}
-
 func (f *Fake) ChangeLabels(_ context.Context, as core.Account, ref core.Ref, added, removed []string) error {
 	return f.write(func() error {
 		issue, err := f.find(ref)

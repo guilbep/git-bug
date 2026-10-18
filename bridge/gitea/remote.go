@@ -349,23 +349,9 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 	return r.confirm(ctx, err, issue.Number, "")
 }
 
-// SetLabels sets the labels by id, creating the missing ones: Gitea silently
-// ignores the names of labels that don't exist.
-func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref, labels []string) error {
-	ids := make([]int64, 0, len(labels))
-	for _, l := range labels {
-		id, err := r.labelID(ctx, as, l, true)
-		if err != nil {
-			return err
-		}
-		ids = append(ids, id)
-	}
-	err := r.write(ctx, as, http.MethodPut, r.repoPath("/issues/"+issue.Number+"/labels"), map[string]any{"labels": ids}, nil)
-	return r.confirm(ctx, err, issue.Number, "")
-}
-
-// ChangeLabels adds labels by id, creating the missing ones as SetLabels
-// does, then removes labels one by one, as Gitea removes them.
+// ChangeLabels adds labels by id, creating the missing ones: Gitea silently
+// ignores the names of labels that don't exist. Then it removes labels one
+// by one, as Gitea removes them.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
 	ids := make([]int64, 0, len(added))
 	for _, l := range added {

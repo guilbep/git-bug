@@ -233,8 +233,8 @@ func TestPullClaimsSeveralLabelEvents(t *testing.T) {
 	_, op, err := b.ChangeLabelsRaw(me, time.Now().Unix(), []string{"a", "b"}, nil, nil)
 	require.NoError(t, err)
 	// a forge emitting one event per label
-	require.NoError(t, f.SetLabels(context.Background(), bot, issue, []string{"a"}))
-	require.NoError(t, f.SetLabels(context.Background(), bot, issue, []string{"a", "b"}))
+	require.NoError(t, f.ChangeLabels(context.Background(), bot, issue, []string{"a"}, nil))
+	require.NoError(t, f.ChangeLabels(context.Background(), bot, issue, []string{"b"}, nil))
 	markPushed(t, b, op.Id(), map[string]string{"labels": "a\nb"})
 
 	pull(t, repo, f)

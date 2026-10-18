@@ -370,18 +370,6 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 	return r.update(ctx, as, githubv4.UpdateIssueInput{ID: issue.ID, Title: &t})
 }
 
-func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref, labels []string) error {
-	ids := make([]githubv4.ID, 0, len(labels))
-	for _, l := range labels {
-		id, err := r.labelID(ctx, l, true)
-		if err != nil {
-			return err
-		}
-		ids = append(ids, id)
-	}
-	return r.update(ctx, as, githubv4.UpdateIssueInput{ID: issue.ID, LabelIDs: &ids})
-}
-
 // ChangeLabels adds labels, creating the missing ones, then removes labels.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
 	add, err := r.labelIDs(ctx, added, true)

@@ -120,9 +120,6 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 		if v, ok := opt["state_event"].(string); ok {
 			f.setState(u, issue, v == "close")
 		}
-		if v, ok := opt["labels"]; ok {
-			f.setLabels(u, issue, labelList(v))
-		}
 		if add, remove := labelList(opt["add_labels"]), labelList(opt["remove_labels"]); len(add)+len(remove) > 0 {
 			labels := slices.Compact(slices.Sorted(slices.Values(append(add, issue.Labels...))))
 			f.setLabels(u, issue, slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(remove, l) }))

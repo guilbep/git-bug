@@ -349,13 +349,6 @@ func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 		if in.State != nil {
 			f.setState(c.login, issue, *in.State == githubv4.IssueStateClosed)
 		}
-		if in.LabelIDs != nil {
-			var names []string
-			for _, id := range *in.LabelIDs {
-				names = append(names, f.labels[fmt.Sprint(id)])
-			}
-			f.setLabels(c.login, issue, names)
-		}
 	case *addLabelsToLabelableMutation:
 		in := input.(githubv4.AddLabelsToLabelableInput)
 		issue, err := f.find(in.LabelableID)
