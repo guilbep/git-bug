@@ -29,7 +29,7 @@ func (e *Engine) Push(ctx context.Context) <-chan ExportResult {
 	go func() {
 		defer close(out)
 
-		excerpts := e.excerpts(out)
+		excerpts := e.excerpts()
 		refs := newRefIndex(excerpts)
 
 		for _, excerpt := range excerpts {
@@ -55,7 +55,7 @@ func (e *Engine) PushBug(ctx context.Context, b *cache.BugCache) <-chan ExportRe
 	go func() {
 		defer close(out)
 		// every bug's issues: references in its texts are translated
-		refs := newRefIndex(e.excerpts(out))
+		refs := newRefIndex(e.excerpts())
 		if err := e.pushBug(ctx, b, refs, out); err != nil {
 			out <- NewExportError(err, b.Id())
 		}
@@ -64,12 +64,12 @@ func (e *Engine) PushBug(ctx context.Context, b *cache.BugCache) <-chan ExportRe
 }
 
 // excerpts are every bug's, oldest first.
-func (e *Engine) excerpts(out chan<- ExportResult) []*cache.BugExcerpt {
+func (e *Engine) excerpts() []*cache.BugExcerpt {
 	var excerpts []*cache.BugExcerpt
 	for _, id := range e.repo.Bugs().AllIds() {
 		excerpt, err := e.repo.Bugs().ResolveExcerpt(id)
 		if err != nil {
-			out <- NewExportError(err, id)
+			// removed since AllIds, by the cache's update: nothing to push
 			continue
 		}
 		excerpts = append(excerpts, excerpt)
