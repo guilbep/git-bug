@@ -176,6 +176,10 @@ type Remote interface {
   texts, and the events the forge exposes (comment added or edited, status,
   title, labels), each with its id, author and time. Events can be
   partial: what a forge doesn't report is caught by reconciling.
+- A forge with pull requests (GitHub) also implements `PullRemote`: their
+  line comments, reviews and comments, and resolving a thread. The engine
+  mirrors git-bug comments that `review:*` metadata anchors to them, never
+  to issues (see [sync-decisions.md](sync-decisions.md#pull-requests-git-boards-review)).
 - A read-only forge (Launchpad) returns `ErrNotSupported` from the write
   methods.
 - `EditText` targets either the issue's description or a comment. The

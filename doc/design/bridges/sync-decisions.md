@@ -275,6 +275,102 @@ under the bridge lock and writes nothing to the forge.
 - **`bridge take <id> <bridge>`, not `bridge sync --issue <id> --theirs`**:
   "the forge's version" names one forge, and a sync runs over several.
 
+## Pull requests: git-board's review
+
+git-board writes review comments as git-bug comments (its milestone M4);
+the engine mirrors them to the issue's GitHub pull requests. The contract
+with git-board: a line comment carries `review:path`, `review:line`,
+`review:side` (`old` or `new`), `review:commit` (a full SHA) and
+`review:pr` (`github.com/<owner>/<repo>#<n>`); a reply also
+`review:reply-to`, the comment id (`CombinedId`) of the comment it answers;
+a review `review:state` (`APPROVE`, `REQUEST_CHANGES`, `COMMENT`),
+`review:commit` and `review:pr`, its summary as text. A SetMetadata
+`review:resolved` (`true` or `false`) on a thread's first comment resolves
+it, the last one winning. What is pulled from a pull request carries the
+same keys, and its origin `sync:<remote>:pr-comment`, its GitHub id.
+
+- **A comment with any `review:*` key, or pulled from a pull request, is
+  never an issue comment**, on any forge: not posted, not edited, not
+  counted by a dry run. *If wrong:* a comment written for the issue with a
+  `review:*` key never reaches it.
+- **Only a remote whose adapter is a `PullRemote` has pull requests:
+  GitHub's.** GitLab's merge requests and Gitea's pull requests stay out.
+  *If wrong:* review comments stay in git-bug on those forges.
+- **What was pulled from a pull request records its origin as
+  `sync:<remote>:pr-comment`, not `:id`**: an own `:id` makes an operation
+  pulled from that remote's issue (`sourceOf`) and an issue comment there.
+  What was sent records `:id` and `:url` with SetMetadata, as a pushed
+  issue comment. Both are GitHub node ids (`PRRC_`, `PRR_`, `IC_`): the
+  REST ids of line comments, reviews and comments are three sequences that
+  may collide. A reply's `in_reply_to` is the number in its parent's
+  recorded URL (`#discussion_r<n>`), so no comment is fetched for it.
+  *If wrong:* a reply to a parent that went out as a plain comment starts
+  its own thread on the same line.
+- **A push trusts `review:pr`** (the first value, SetMetadata included);
+  `PullsOf` serves pulls only. A comment without one waits for git-board to
+  add it: a dry run says "would send later: … (waits for a pull request)".
+  *If wrong:* nothing.
+- **A pull request comment goes with the author's account, or with sync the
+  default one, attributed, as an issue comment; an approval only with its
+  author's own**, else it's reported ("missing author token: approval by
+  … not sent"). A request for changes may go with the default account, as
+  the contract says. *If wrong:* a request for changes blocks a pull
+  request under the bot's name until someone dismisses it.
+- **A line comment GitHub won't put on its line (422: outside the diff, or
+  on a commit no longer in it) goes as a comment of the pull request**,
+  starting with "On `path` line N (new side) at abc1234:". It counts as
+  sent: it isn't sent again if the line comes back. A review GitHub
+  refuses (422: approving one's own pull request) is refused for good,
+  warned once. A pull request GitHub doesn't find (404) warns, and is tried
+  at the next run. *If wrong:* a comment that could be on its line later
+  stays a plain comment.
+- **What a push sends a pull request carries the git-bug marker**, and is
+  committed right after: a pull with `PullsOf` takes a comment posted by an
+  account with the marker of a comment not recorded as sent as that
+  comment, as for issue comments. The command line has no `PullsOf`: there,
+  a push that died between GitHub's answer and the commit posts again.
+  *If wrong:* one duplicate comment after such a crash, on the command line.
+- **A pull lists each pull request whole**, three REST listings of 100 per
+  page (line comments, reviews, comments), not since the last sync: the
+  reviews' listing has no `since`, and a reply's parent must be listed to
+  map GitHub's `in_reply_to_id`. *If wrong:* three requests per pull
+  request `PullsOf` gives at each pull: git-board gives the open ones.
+- **A pulled line comment is anchored where it was written**
+  (`original_line`, `original_commit_id`), which an outdated comment keeps
+  while GitHub's `line` becomes null. *If wrong:* nothing; git-board tells
+  outdated from the commit.
+- **Reviews without text that only hold line comments are not pulled**
+  (GitHub makes one for each line comment posted alone), nor pending or
+  dismissed ones: GitHub no longer says what a dismissed review was. One
+  pulled before its dismissal stays as it was. *If wrong:* a dismissed
+  review's text is missing.
+- **An edit on GitHub of a pull request comment is pulled, and wins**:
+  git-bug's edits of them aren't sent (the contract sends new comments
+  only). *If wrong:* an edit made in git-bug is lost at the next edit on
+  GitHub, and never reaches GitHub.
+- **`review:resolved` is sent with GraphQL `resolveReviewThread` or
+  `unresolveReviewThread`**, which the `repo` scope allows to whoever may
+  resolve it on GitHub, under the account of whoever set it (the default
+  one on their behalf). The thread is found by its first comment through
+  `reviewThreads`, with no team field. What GitHub last saw is
+  `sync:<remote>:resolved` on the thread's first comment, SetMetadata, the
+  last one winning; a thread is open until then. One GitHub can't find (a
+  comment that went out as a plain comment has no thread) or refuses is
+  refused for good. Resolutions made on GitHub are not pulled. *If wrong:*
+  a thread resolved on GitHub shows open in git-board.
+- **A pull request that can't be read is an error, as a failed issue
+  listing**: that forge isn't pushed to in that run. Not found (404) is a
+  warning. *If wrong:* a transient failure delays one run's push.
+- **`WithPullsOf` gives one function for every bridge of a run**, as agreed
+  with git-board: it takes a bug, not a remote. *If wrong:* with two GitHub
+  bridges, a number `PullsOf` gives is read on both repositories, and
+  another repository's pull request of that number lands on the bug.
+- **Only `SyncAll`, `SyncIssue` and a bridge's own runs with `Bridge.Use`
+  pull pull request comments**; the command line (`bridge sync`, `bridge
+  pull`), `Link` and `Take` don't, as they don't know an issue's pull
+  requests: git-board's branches do. Every push sends them. *If wrong:*
+  nothing.
+
 ## Set aside
 
 Considered and left as they are, each covered by the spec, an earlier
