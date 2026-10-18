@@ -32,6 +32,11 @@ type SyncOptions struct {
 	// Links are identity id prefixes, by lowercased login: the identity of
 	// that forge user, whatever else matches them.
 	Links map[string]string
+	// PullsOf returns the numbers of a bug's pull requests on this remote,
+	// whose comments and reviews a pull brings into the bug. It is called
+	// for remotes with pull requests (PullRemote: GitHub) only, once per bug
+	// at each pull. Nil imports none. What git-bug writes is sent without it.
+	PullsOf func(bug entity.Id) []string
 }
 
 // Engine syncs a git-bug repository with one forge project.

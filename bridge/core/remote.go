@@ -162,6 +162,54 @@ type Event struct {
 	Text   string
 }
 
+// ErrOutsideDiff is returned by a PullRemote for a line comment it can't put
+// on its line: one outside the pull request's diff, or on a commit no longer
+// in it.
+var ErrOutsideDiff = errors.New("not on a line of the pull request's diff")
+
+// PullRemote is a Remote whose project has pull requests, whose line
+// comments, reviews and comments sync with the git-bug comments that the
+// review:* metadata anchor (see doc/design/bridges/sync-decisions.md). Only
+// GitHub's adapter has them.
+type PullRemote interface {
+	Remote
+	// PullComments lists the line comments, reviews and comments of pull
+	// request number pr, oldest first. Reviews without text that only hold
+	// line comments are left out.
+	PullComments(ctx context.Context, pr string) ([]PullComment, error)
+	// AddPullComment posts c on pull request number pr, by its fields: a
+	// review when State is set, else a line comment when Path is set (a
+	// reply when ReplyTo is set, which then gives the line), else a comment.
+	// It returns ErrOutsideDiff for a line comment it can't put on its line.
+	AddPullComment(ctx context.Context, as Account, pr string, c PullComment) (Ref, error)
+	// ResolveThread resolves, or unresolves, the thread of line comments
+	// that starts with the given one.
+	ResolveThread(ctx context.Context, as Account, pr string, first Ref, resolved bool) error
+}
+
+// PullComment is a comment on a pull request: on a line of its diff, a
+// review, or a comment on its conversation.
+type PullComment struct {
+	Ref
+	Author  User
+	Created time.Time
+	Updated time.Time
+	Body    string
+
+	// A line comment: the line of a file, on the old or the new side of the
+	// diff, at a commit.
+	Path   string
+	Line   int
+	Side   string // "old" or "new"
+	Commit string
+	// ReplyTo is, for a reply, the line comment it answers.
+	ReplyTo Ref
+
+	// State is, for a review: APPROVE, REQUEST_CHANGES or COMMENT. Commit is
+	// the commit reviewed.
+	State string
+}
+
 // Dialect is how a forge writes issue references.
 type Dialect struct {
 	// Ref matches a reference to an issue of the same project. Its first

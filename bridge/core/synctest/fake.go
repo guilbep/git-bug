@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -56,6 +57,7 @@ type Quirks struct {
 }
 
 var _ Forge = &Fake{}
+var _ core.PullRemote = &Fake{}
 
 // Fake is an in-memory forge with one project.
 type Fake struct {
@@ -73,6 +75,16 @@ type Fake struct {
 	writes int
 	// failListing fails the next listing of issues
 	failListing bool
+	pulls       map[string]*fakePull // by number
+}
+
+// fakePull is a pull request: it takes line comments on the files it
+// changes, at its head commit.
+type fakePull struct {
+	head     string
+	paths    []string
+	comments []core.PullComment
+	resolved map[string]bool // by the id of a thread's first comment
 }
 
 type fakeIssue struct {
@@ -88,6 +100,7 @@ func NewFake(key, instance string, q Quirks, accounts ...core.Account) *Fake {
 		accounts: accounts,
 		quirks:   q,
 		users:    map[string]core.User{},
+		pulls:    map[string]*fakePull{},
 	}
 	for _, a := range accounts {
 		f.users[a.ID] = a.User
@@ -188,6 +201,83 @@ func (f *Fake) ChangeLabels(_ context.Context, as core.Account, ref core.Ref, ad
 		labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(removed, l) })
 		return f.setLabels(as.User, ref, labels)
 	})
+}
+
+func (f *Fake) PullComments(_ context.Context, pr string) ([]core.PullComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.pulls[pr]
+	if !ok {
+		return nil, fmt.Errorf("%w: pull request %s", core.ErrGone, pr)
+	}
+	return slices.Clone(p.comments), nil
+}
+
+func (f *Fake) AddPullComment(_ context.Context, as core.Account, pr string, c core.PullComment) (core.Ref, error) {
+	var ref core.Ref
+	err := f.write(func() (err error) {
+		ref, err = f.addPullComment(as.User, pr, c)
+		return err
+	})
+	return ref, err
+}
+
+func (f *Fake) ResolveThread(_ context.Context, _ core.Account, pr string, first core.Ref, resolved bool) error {
+	return f.write(func() error {
+		p, ok := f.pulls[pr]
+		if !ok {
+			return core.ErrGone
+		}
+		if !slices.ContainsFunc(p.comments, func(c core.PullComment) bool {
+			return c.ID == first.ID && c.Path != "" && c.ReplyTo.ID == ""
+		}) {
+			return fmt.Errorf("%w: no thread starts with %s", core.ErrGone, first.ID)
+		}
+		p.resolved[first.ID] = resolved
+		return nil
+	})
+}
+
+// OpenPull opens pull request number at commit head, changing the files at
+// paths: it takes line comments on them, at that commit only.
+func (f *Fake) OpenPull(number, head string, paths ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls[number] = &fakePull{head: head, paths: paths, resolved: map[string]bool{}}
+}
+
+// PullAct posts c on pull request number as login, directly on the forge.
+func (f *Fake) PullAct(login, number string, c core.PullComment) core.Ref {
+	u := f.UserAct(login).(actor).u
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ref, err := f.addPullComment(u, number, c)
+	if err != nil {
+		panic(err)
+	}
+	return ref
+}
+
+// EditPullComment edits a comment of pull request number, directly on the
+// forge.
+func (f *Fake) EditPullComment(number, id, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, c := range f.pulls[number].comments {
+		if c.ID == id {
+			f.pulls[number].comments[i].Body = body
+			f.pulls[number].comments[i].Updated = f.now()
+		}
+	}
+}
+
+// Pull returns the comments of pull request number, and which threads are
+// resolved, by the id of their first comment.
+func (f *Fake) Pull(number string) ([]core.PullComment, map[string]bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.pulls[number]
+	return slices.Clone(p.comments), maps.Clone(p.resolved)
 }
 
 func (f *Fake) Dialect() core.Dialect {
@@ -332,6 +422,32 @@ func (f *Fake) addComment(u core.User, ref core.Ref, body string) (core.Ref, err
 	}
 	issue.Comments = append(issue.Comments, c)
 	issue.Updated = c.Created
+	return c.Ref, nil
+}
+
+func (f *Fake) addPullComment(u core.User, number string, c core.PullComment) (core.Ref, error) {
+	p, ok := f.pulls[number]
+	if !ok {
+		return core.Ref{}, fmt.Errorf("%w: pull request %s", core.ErrGone, number)
+	}
+	switch {
+	case c.State != "":
+	case c.Path != "" && c.ReplyTo.ID != "":
+		i := slices.IndexFunc(p.comments, func(o core.PullComment) bool { return o.ID == c.ReplyTo.ID && o.Path != "" })
+		if i < 0 {
+			return core.Ref{}, core.ErrOutsideDiff
+		}
+		parent := p.comments[i]
+		c.Path, c.Line, c.Side, c.Commit = parent.Path, parent.Line, parent.Side, parent.Commit
+	case c.Path != "":
+		if c.Commit != p.head || !slices.Contains(p.paths, c.Path) {
+			return core.Ref{}, core.ErrOutsideDiff
+		}
+	}
+	id := f.nextID()
+	c.Ref = core.Ref{ID: id, URL: fmt.Sprintf("https://%s/pull/%s#c%s", f.instance, number, id)}
+	c.Author, c.Created, c.Updated = u, f.now(), f.now()
+	p.comments = append(p.comments, c)
 	return c.Ref, nil
 }
 
