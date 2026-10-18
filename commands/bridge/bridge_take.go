@@ -46,19 +46,24 @@ func runBridgeTake(env *execenv.Env, args []string) error {
 	}
 	changes, errs := 0, 0
 	for r := range results {
-		if r.IsError() {
+		switch r.Import.Event {
+		case core.ImportEventError:
 			errs++
+		case core.ImportEventNothing, core.ImportEventWarning, core.ImportEventRateLimiting:
+		default:
+			changes++
 		}
 		if show(r, false) {
-			changes++
 			env.Out.Println(r.String())
 		}
 	}
 	if errs > 0 {
 		return fmt.Errorf("take finished with %d error(s)", errs)
 	}
+	// warnings alone, like the issue deleted on the forge, fail nothing, as
+	// with bridge sync
 	if changes == 0 {
-		env.Out.Printf("nothing to take: %s is as on bridge %s\n", args[0], args[1])
+		env.Out.Printf("nothing to take for %s from bridge %s\n", args[0], args[1])
 	}
 	return nil
 }
