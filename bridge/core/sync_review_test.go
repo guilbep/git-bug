@@ -360,3 +360,30 @@ func TestPushResolvesThread(t *testing.T) {
 	_, resolved = f.Pull("7")
 	require.False(t, resolved[got[0].ID])
 }
+
+// A comment anchored before its pull request is known waits: git-board
+// adds review:pr later, and the next push sends it.
+func TestPushLineCommentWaitsForItsPull(t *testing.T) {
+	repo, f, b, aliceId := reviewSetup(t)
+	meta := anchor("main.go", "3", "new", "c1")
+	delete(meta, "review:pr")
+	line := comment(t, b, aliceId, "why?", meta)
+
+	var report []string
+	for r := range reviewEngine(t, repo, f, nil, true).Push(context.Background()) {
+		report = append(report, r.String())
+	}
+	require.Contains(t, strings.Join(report, "\n"), "would send later: 1 line comments (waits for a pull request)")
+	push(t, repo, f, true)
+	got, _ := f.Pull("7")
+	require.Empty(t, got)
+	require.Empty(t, f.Issue("1").Comments)
+
+	_, err := b.SetMetadataRaw(aliceId, time.Now().Unix(), opOf(t, b, line).Id(), map[string]string{"review:pr": key + "#7"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	push(t, repo, f, true)
+	got, _ = f.Pull("7")
+	require.Len(t, got, 1)
+	require.Equal(t, "main.go", got[0].Path)
+}

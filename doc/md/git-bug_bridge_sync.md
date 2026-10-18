@@ -28,6 +28,12 @@ Run it from a single place, for example a CI job:
 
     git bug pull && git bug bridge sync && git bug push
 
+Comments written for a pull request (line comments, replies and reviews,
+anchored by their review:* metadata, as git-board writes them) go to that
+pull request on GitHub, never to an issue. This command doesn't know which
+pull requests are an issue's, so it brings none of their comments in:
+git-board does.
+
 The first sync of a repository mirrors every issue. --dry-run reads every
 forge and lists what would be pulled and pushed, and changes nothing, locally
 or on the forges.

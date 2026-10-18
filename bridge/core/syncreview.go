@@ -350,12 +350,30 @@ func (e *Engine) planPulls(b *cache.BugCache, snap *bug.Snapshot, out chan<- Exp
 	for _, r := range e.resolutions(snap) {
 		count(r.number, "resolutions")
 	}
+	// anchored before git-board knew the pull request
+	for _, op := range snap.Operations {
+		meta := op.AllMetadata()
+		if _, ok := op.(*bug.AddCommentOperation); !ok || meta[metaReviewPR] != "" ||
+			slices.ContainsFunc(slices.Collect(maps.Keys(meta)), isPullOrigin) {
+			continue
+		}
+		switch {
+		case meta[metaReviewState] != "":
+			count("", "reviews")
+		case meta[metaReviewPath] != "":
+			count("", "line comments")
+		}
+	}
 	for _, number := range slices.Sorted(maps.Keys(counts)) {
 		var parts []string
 		for _, what := range []string{"line comments", "reviews", "comments", "resolutions"} {
 			if n := counts[number][what]; n > 0 {
 				parts = append(parts, fmt.Sprintf("%d %s", n, what))
 			}
+		}
+		if number == "" {
+			out <- NewExportNothing(b.Id(), fmt.Sprintf("would send later: %s (waits for a pull request)", strings.Join(parts, ", ")))
+			continue
 		}
 		out <- NewExportNothing(b.Id(), fmt.Sprintf("would send to pull request #%s: %s", number, strings.Join(parts, ", ")))
 	}
