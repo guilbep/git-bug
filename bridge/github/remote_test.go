@@ -351,6 +351,26 @@ func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 			}
 			f.setLabels(c.login, issue, names)
 		}
+	case *addLabelsToLabelableMutation:
+		in := input.(githubv4.AddLabelsToLabelableInput)
+		issue, err := f.find(in.LabelableID)
+		if err != nil {
+			return err
+		}
+		labels := slices.Clone(issue.labels)
+		for _, id := range in.LabelIDs {
+			labels = append(labels, f.labels[fmt.Sprint(id)])
+		}
+		f.setLabels(c.login, issue, slices.Compact(slices.Sorted(slices.Values(labels))))
+	case *removeLabelsFromLabelableMutation:
+		in := input.(githubv4.RemoveLabelsFromLabelableInput)
+		issue, err := f.find(in.LabelableID)
+		if err != nil {
+			return err
+		}
+		f.setLabels(c.login, issue, slices.DeleteFunc(slices.Clone(issue.labels), func(l string) bool {
+			return slices.ContainsFunc(in.LabelIDs, func(id githubv4.ID) bool { return f.labels[fmt.Sprint(id)] == l })
+		}))
 	default:
 		return fmt.Errorf("fake GitHub doesn't do %T", m)
 	}

@@ -310,6 +310,19 @@ func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref,
 	return r.update(ctx, as, issue, &gitlab.UpdateIssueOptions{Labels: &opt})
 }
 
+// ChangeLabels adds and removes labels in one update; GitLab creates the
+// missing ones it adds, as it does for a full set.
+func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
+	var opt gitlab.UpdateIssueOptions
+	if len(added) > 0 {
+		opt.AddLabels = (*gitlab.LabelOptions)(&added)
+	}
+	if len(removed) > 0 {
+		opt.RemoveLabels = (*gitlab.LabelOptions)(&removed)
+	}
+	return r.update(ctx, as, issue, &opt)
+}
+
 func (r *remote) update(ctx context.Context, as core.Account, issue core.Ref, opt *gitlab.UpdateIssueOptions) error {
 	c, iid, err := r.writerOn(as, issue)
 	if err != nil {

@@ -123,6 +123,10 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 		if v, ok := opt["labels"]; ok {
 			f.setLabels(u, issue, labelList(v))
 		}
+		if add, remove := labelList(opt["add_labels"]), labelList(opt["remove_labels"]); len(add)+len(remove) > 0 {
+			labels := slices.Compact(slices.Sorted(slices.Values(append(add, issue.Labels...))))
+			f.setLabels(u, issue, slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(remove, l) }))
+		}
 		reply(w, &issue.Issue)
 	})
 	mux.HandleFunc("GET /api/v4/projects/{pid}/issues/{iid}/notes", func(w http.ResponseWriter, r *http.Request) {

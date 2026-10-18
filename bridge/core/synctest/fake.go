@@ -182,6 +182,18 @@ func (f *Fake) SetLabels(_ context.Context, as core.Account, issue core.Ref, lab
 	return f.write(func() error { return f.setLabels(as.User, issue, labels) })
 }
 
+func (f *Fake) ChangeLabels(_ context.Context, as core.Account, ref core.Ref, added, removed []string) error {
+	return f.write(func() error {
+		issue, err := f.find(ref)
+		if err != nil {
+			return err
+		}
+		labels := slices.Compact(slices.Sorted(slices.Values(slices.Concat(issue.Labels, added))))
+		labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(removed, l) })
+		return f.setLabels(as.User, ref, labels)
+	})
+}
+
 func (f *Fake) Dialect() core.Dialect {
 	return core.Dialect{
 		Ref:       regexp.MustCompile(`(?:^|[^\w/#])(#(\d+))\b`),

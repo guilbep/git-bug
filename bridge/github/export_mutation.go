@@ -39,7 +39,7 @@ type updateIssueCommentMutation struct {
 }
 
 type removeLabelsFromLabelableMutation struct {
-	AddLabels struct {
+	RemoveLabels struct {
 		Labelable struct {
 			Typename string `graphql:"__typename"`
 		}
@@ -47,7 +47,7 @@ type removeLabelsFromLabelableMutation struct {
 }
 
 type addLabelsToLabelableMutation struct {
-	RemoveLabels struct {
+	AddLabels struct {
 		Labelable struct {
 			Typename string `graphql:"__typename"`
 		}

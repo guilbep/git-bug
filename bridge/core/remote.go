@@ -63,6 +63,9 @@ type Remote interface {
 	SetTitle(ctx context.Context, as Account, issue Ref, title string) error
 	// SetLabels sets the full set of labels.
 	SetLabels(ctx context.Context, as Account, issue Ref, labels []string) error
+	// ChangeLabels adds and removes labels, leaving the issue's others alone.
+	// Removing a label the issue doesn't have does nothing.
+	ChangeLabels(ctx context.Context, as Account, issue Ref, added, removed []string) error
 
 	// Dialect tells how issue references are written on this forge.
 	Dialect() Dialect

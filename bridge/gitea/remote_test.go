@@ -207,16 +207,16 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 		f.labels = append(f.labels, l)
 		reply(w, l)
 	})
-	mux.HandleFunc("PUT "+repo+"/issues/{n}/labels", func(w http.ResponseWriter, r *http.Request) {
+	// setLabels sets the issue's labels to the repository's that keep keeps,
+	// told whether the issue has it
+	setLabels := func(w http.ResponseWriter, r *http.Request, keep func(l apiLabel, on bool) bool) {
 		issue := f.issue(w, r)
 		if issue == nil {
 			return
 		}
-		var opt struct{ Labels []int64 }
-		_ = json.NewDecoder(r.Body).Decode(&opt)
 		var labels []apiLabel
 		for _, l := range f.labels {
-			if slices.Contains(opt.Labels, l.ID) {
+			if keep(l, slices.Contains(issue.Labels, l)) {
 				labels = append(labels, l)
 			}
 		}
@@ -235,6 +235,19 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 		issue.Labels = append([]apiLabel{}, labels...)
 		issue.Updated = f.now()
 		reply(w, issue.Labels)
+	}
+	mux.HandleFunc("PUT "+repo+"/issues/{n}/labels", func(w http.ResponseWriter, r *http.Request) {
+		var opt struct{ Labels []int64 }
+		_ = json.NewDecoder(r.Body).Decode(&opt)
+		setLabels(w, r, func(l apiLabel, _ bool) bool { return slices.Contains(opt.Labels, l.ID) })
+	})
+	mux.HandleFunc("POST "+repo+"/issues/{n}/labels", func(w http.ResponseWriter, r *http.Request) {
+		var opt struct{ Labels []int64 }
+		_ = json.NewDecoder(r.Body).Decode(&opt)
+		setLabels(w, r, func(l apiLabel, on bool) bool { return on || slices.Contains(opt.Labels, l.ID) })
+	})
+	mux.HandleFunc("DELETE "+repo+"/issues/{n}/labels/{id}", func(w http.ResponseWriter, r *http.Request) {
+		setLabels(w, r, func(l apiLabel, on bool) bool { return on && strconv.FormatInt(l.ID, 10) != r.PathValue("id") })
 	})
 
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -411,7 +424,7 @@ func (a giteaActor) SetTitle(issue core.Ref, title string) {
 func (a giteaActor) SetLabels(issue core.Ref, labels []string) {
 	ids := []int64{}
 	for _, l := range labels {
-		id, err := a.g.labelID(context.Background(), a.g.accounts[0], l)
+		id, err := a.g.labelID(context.Background(), a.g.accounts[0], l, true)
 		if err != nil {
 			panic(err)
 		}

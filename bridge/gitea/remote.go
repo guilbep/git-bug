@@ -354,7 +354,7 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref, labels []string) error {
 	ids := make([]int64, 0, len(labels))
 	for _, l := range labels {
-		id, err := r.labelID(ctx, as, l)
+		id, err := r.labelID(ctx, as, l, true)
 		if err != nil {
 			return err
 		}
@@ -362,6 +362,40 @@ func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref,
 	}
 	err := r.write(ctx, as, http.MethodPut, r.repoPath("/issues/"+issue.Number+"/labels"), map[string]any{"labels": ids}, nil)
 	return r.confirm(ctx, err, issue.Number, "")
+}
+
+// ChangeLabels adds labels by id, creating the missing ones as SetLabels
+// does, then removes labels one by one, as Gitea removes them.
+func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
+	ids := make([]int64, 0, len(added))
+	for _, l := range added {
+		id, err := r.labelID(ctx, as, l, true)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) > 0 {
+		err := r.write(ctx, as, http.MethodPost, r.repoPath("/issues/"+issue.Number+"/labels"), map[string]any{"labels": ids}, nil)
+		if err != nil {
+			return r.confirm(ctx, err, issue.Number, "")
+		}
+	}
+	for _, l := range removed {
+		id, err := r.labelID(ctx, as, l, false)
+		if err != nil {
+			return err
+		}
+		if id == 0 {
+			// not a label of the repository: on no issue
+			continue
+		}
+		path := r.repoPath(fmt.Sprintf("/issues/%s/labels/%d", issue.Number, id))
+		if err := r.write(ctx, as, http.MethodDelete, path, nil, nil); err != nil {
+			return r.confirm(ctx, err, issue.Number, "")
+		}
+	}
+	return nil
 }
 
 // confirm checks with the reader that an issue (and a comment, if any) a
@@ -389,7 +423,9 @@ func (r *remote) confirm(ctx context.Context, err error, number, commentID strin
 	return fmt.Errorf("%w: the token can't see it: %w", core.ErrRefused, err)
 }
 
-func (r *remote) labelID(ctx context.Context, as core.Account, name string) (int64, error) {
+// labelID returns the id of a label of the repository, created if needed and
+// create, else 0.
+func (r *remote) labelID(ctx context.Context, as core.Account, name string, create bool) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.labels == nil {
@@ -409,7 +445,7 @@ func (r *remote) labelID(ctx context.Context, as core.Account, name string) (int
 		}
 		r.labels = labels
 	}
-	if id, ok := r.labels[strings.ToLower(name)]; ok {
+	if id, ok := r.labels[strings.ToLower(name)]; ok || !create {
 		return id, nil
 	}
 	rgba := common.Label(name).Color().RGBA()

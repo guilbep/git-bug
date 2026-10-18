@@ -373,13 +373,51 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 func (r *remote) SetLabels(ctx context.Context, as core.Account, issue core.Ref, labels []string) error {
 	ids := make([]githubv4.ID, 0, len(labels))
 	for _, l := range labels {
-		id, err := r.labelID(ctx, l)
+		id, err := r.labelID(ctx, l, true)
 		if err != nil {
 			return err
 		}
 		ids = append(ids, id)
 	}
 	return r.update(ctx, as, githubv4.UpdateIssueInput{ID: issue.ID, LabelIDs: &ids})
+}
+
+// ChangeLabels adds labels, creating the missing ones, then removes labels.
+func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
+	add, err := r.labelIDs(ctx, added, true)
+	if err != nil {
+		return err
+	}
+	if len(add) > 0 {
+		var m addLabelsToLabelableMutation
+		input := githubv4.AddLabelsToLabelableInput{LabelableID: issue.ID, LabelIDs: add}
+		if err := r.mutate(ctx, as, &m, input); err != nil {
+			return r.confirm(ctx, err, issue.ID)
+		}
+	}
+	remove, err := r.labelIDs(ctx, removed, false)
+	if err != nil || len(remove) == 0 {
+		return err
+	}
+	var m removeLabelsFromLabelableMutation
+	input := githubv4.RemoveLabelsFromLabelableInput{LabelableID: issue.ID, LabelIDs: remove}
+	return r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID)
+}
+
+// labelIDs returns the ids of labels of the repository. The missing ones are
+// created if create, else left out: they are on no issue.
+func (r *remote) labelIDs(ctx context.Context, names []string, create bool) ([]githubv4.ID, error) {
+	var ids []githubv4.ID
+	for _, name := range names {
+		id, err := r.labelID(ctx, name, create)
+		if err != nil {
+			return nil, err
+		}
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 func (r *remote) update(ctx context.Context, as core.Account, input githubv4.UpdateIssueInput) error {
@@ -458,8 +496,9 @@ func (r *remote) repositoryID(ctx context.Context) (string, error) {
 	return r.repoID, nil
 }
 
-// labelID returns the id of a label of the repository, created if needed.
-func (r *remote) labelID(ctx context.Context, name string) (string, error) {
+// labelID returns the id of a label of the repository, created if needed and
+// create, else "".
+func (r *remote) labelID(ctx context.Context, name string, create bool) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.labels == nil {
@@ -485,7 +524,7 @@ func (r *remote) labelID(ctx context.Context, name string) (string, error) {
 			vars["after"] = q.Repository.Labels.PageInfo.EndCursor
 		}
 	}
-	if id, ok := r.labels[strings.ToLower(name)]; ok {
+	if id, ok := r.labels[strings.ToLower(name)]; ok || !create {
 		return id, nil
 	}
 	rgba := common.Label(name).Color().RGBA()
