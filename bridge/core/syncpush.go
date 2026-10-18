@@ -162,12 +162,16 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 			return
 		}
 		comments := 0
-		for _, c := range snap.Comments[1:] {
-			if _, _, ok := e.accountFor(c.Author); ok {
+		for _, op := range snap.Operations {
+			if _, ok := op.(*bug.AddCommentOperation); !ok || isReview(op) {
+				continue
+			}
+			if _, _, ok := e.accountFor(op.Author()); ok {
 				comments++
 			}
 		}
 		out <- NewExportNothing(b.Id(), fmt.Sprintf("would create issue: %s, with %d comments", snap.Title, comments))
+		e.planPulls(b, snap, out)
 		return
 	}
 
@@ -177,6 +181,9 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 		switch op.(type) {
 		case *bug.CreateOperation, *bug.AddCommentOperation:
 		default:
+			continue
+		}
+		if isReview(op) {
 			continue
 		}
 		if _, gone := op.GetMetadata(e.key("gone")); gone {
@@ -226,6 +233,7 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 		slices.Sort(changes)
 		out <- NewExportNothing(b.Id(), "would send: "+strings.Join(changes, ", "))
 	}
+	e.planPulls(b, snap, out)
 }
 
 // createIssue creates the forge issue of a bug, from its current title and
@@ -290,7 +298,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		if !ok {
 			continue
 		}
-		if _, onRemote := opOnRemote(op, snap, e.remote); onRemote {
+		if _, onRemote := opOnRemote(op, snap, e.remote); onRemote || isReview(op) {
 			continue
 		}
 		if _, gone := op.GetMetadata(e.key("gone")); gone {
@@ -336,7 +344,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			target, markerID = issue, b.Id()
 		case *bug.AddCommentOperation:
 			id, onRemote := opOnRemote(owner, snap, e.remote)
-			if !onRemote {
+			if !onRemote || isReview(owner) {
 				continue
 			}
 			target = Ref{ID: id, URL: metadata(owner, e.key("url"))}
@@ -447,7 +455,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		}
 		out <- sc.event(b.Id())
 	}
-	return nil
+	return e.pushPulls(ctx, b, refs, out)
 }
 
 // accountFor returns the account to act as the author: theirs, or with sync
