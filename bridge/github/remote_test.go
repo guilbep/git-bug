@@ -38,6 +38,7 @@ type fakeGithub struct {
 	lastID   int
 	writes   int
 	failNext bool
+	pulls    map[int]*ghPull
 }
 
 type ghIssue struct {
@@ -277,6 +278,8 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 				q.Repository.Issues.Nodes = append(q.Repository.Issues.Nodes, f.node(issue))
 			}
 		}
+	case *reviewThreadsQuery:
+		return f.reviewThreads(q, vars)
 	case *oneIssueQuery:
 		number := int(vars["issueNumber"].(githubv4.Int))
 		for _, issue := range f.issues {
@@ -369,6 +372,10 @@ func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 		f.setLabels(c.login, issue, slices.DeleteFunc(slices.Clone(issue.labels), func(l string) bool {
 			return slices.ContainsFunc(in.LabelIDs, func(id githubv4.ID) bool { return f.labels[fmt.Sprint(id)] == l })
 		}))
+	case *resolveReviewThreadMutation:
+		return f.resolve(input.(githubv4.ResolveReviewThreadInput).ThreadID, true)
+	case *unresolveReviewThreadMutation:
+		return f.resolve(input.(githubv4.UnresolveReviewThreadInput).ThreadID, false)
 	default:
 		return fmt.Errorf("fake GitHub doesn't do %T", m)
 	}

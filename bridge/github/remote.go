@@ -45,7 +45,8 @@ func (g *Github) NewRemote(ctx context.Context, repo *cache.RepoCache, conf core
 
 func graphqlClient(token *auth.Token) Client {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token.Value})
-	return githubv4.NewClient(oauth2.NewClient(context.TODO(), src))
+	hc := oauth2.NewClient(context.TODO(), src)
+	return apiClient{Client: githubv4.NewClient(hc), http: hc}
 }
 
 var _ core.Remote = &remote{}
