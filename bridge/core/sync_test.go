@@ -391,6 +391,17 @@ func TestPushAloneKeepsForgeLabels(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, b.Commit())
 
+	dry, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
+		Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
+	})
+	require.NoError(t, err)
+	var planned []string
+	for r := range dry.Push(context.Background()) {
+		planned = append(planned, r.String())
+	}
+	require.Len(t, planned, 1)
+	require.Contains(t, planned[0], "would send: labels +y -c")
+
 	push(t, repo, f, true)
 	require.Equal(t, []string{"a", "x", "y"}, f.Issue(issue.Number).Labels)
 	writes := f.Writes()

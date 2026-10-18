@@ -204,12 +204,23 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 	for kind, local := range map[slotKind]string{
 		slotTitle:  e.title(snap, refs),
 		slotStatus: snap.Status.String(),
-		slotLabels: labelsValue(labelStrings(snap.Labels)),
 	} {
 		baseValue, _, ok := base(snap, e.remote, s(kind, ""))
 		if !ok || baseValue != local {
 			changes = append(changes, string(kind))
 		}
+	}
+	baseLabels, _, _ := base(snap, e.remote, s(slotLabels, ""))
+	added, removed := labelChanges(baseLabels, snap.Labels)
+	if len(added)+len(removed) > 0 {
+		labels := "labels"
+		for _, l := range added {
+			labels += " +" + l
+		}
+		for _, l := range removed {
+			labels += " -" + l
+		}
+		changes = append(changes, labels)
 	}
 	if len(changes) > 0 {
 		slices.Sort(changes)
