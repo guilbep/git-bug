@@ -382,14 +382,46 @@ func (e *Engine) planPulls(b *cache.BugCache, snap *bug.Snapshot, out chan<- Exp
 // pullPulls brings in the comments and reviews of a bug's pull requests on
 // this remote, as PullsOf gives them.
 func (e *Engine) pullPulls(ctx context.Context, b *cache.BugCache, out chan<- ImportResult) {
-	pr, ok := e.remote.(PullRemote)
-	if !ok || e.opts.PullsOf == nil {
+	if _, gone := b.Snapshot().Operations[0].GetMetadata(e.key("gone")); gone || !e.pullsWanted() {
 		return
 	}
-	if _, gone := b.Snapshot().Operations[0].GetMetadata(e.key("gone")); gone {
+	e.pullPullsOf(ctx, b, e.opts.PullsOf(b.Id()), out)
+}
+
+// pullAllPulls is pullPulls for every bug, loading only those PullsOf gives
+// pull requests for.
+func (e *Engine) pullAllPulls(ctx context.Context, out chan<- ImportResult) {
+	if !e.pullsWanted() {
 		return
 	}
-	for _, number := range e.opts.PullsOf(b.Id()) {
+	for _, excerpt := range e.excerpts() {
+		if ctx.Err() != nil {
+			return
+		}
+		if excerpt.CreateMetadata[e.key("gone")] != "" {
+			continue
+		}
+		numbers := e.opts.PullsOf(excerpt.Id())
+		if len(numbers) == 0 {
+			continue
+		}
+		b, err := e.repo.Bugs().Resolve(excerpt.Id())
+		if err != nil {
+			out <- NewImportError(err, excerpt.Id())
+			continue
+		}
+		e.pullPullsOf(ctx, b, numbers, out)
+	}
+}
+
+func (e *Engine) pullsWanted() bool {
+	_, ok := e.remote.(PullRemote)
+	return ok && e.opts.PullsOf != nil
+}
+
+func (e *Engine) pullPullsOf(ctx context.Context, b *cache.BugCache, numbers []string, out chan<- ImportResult) {
+	pr := e.remote.(PullRemote)
+	for _, number := range numbers {
 		err := e.pullPull(ctx, pr, b, number, out)
 		switch {
 		case errors.Is(err, ErrGone):
@@ -397,24 +429,6 @@ func (e *Engine) pullPulls(ctx context.Context, b *cache.BugCache, out chan<- Im
 		case err != nil:
 			out <- NewImportError(fmt.Errorf("pull request #%s: %w", number, err), b.Id())
 		}
-	}
-}
-
-// pullAllPulls is pullPulls for every bug.
-func (e *Engine) pullAllPulls(ctx context.Context, out chan<- ImportResult) {
-	if _, ok := e.remote.(PullRemote); !ok || e.opts.PullsOf == nil {
-		return
-	}
-	for _, excerpt := range e.excerpts() {
-		if ctx.Err() != nil {
-			return
-		}
-		b, err := e.repo.Bugs().Resolve(excerpt.Id())
-		if err != nil {
-			out <- NewImportError(err, excerpt.Id())
-			continue
-		}
-		e.pullPulls(ctx, b, out)
 	}
 }
 
