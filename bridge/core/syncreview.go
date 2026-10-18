@@ -92,10 +92,13 @@ func (e *Engine) toSend(snap *bug.Snapshot) []dag.Operation {
 }
 
 // pullAccount returns the account to send a comment of a pull request with:
-// accountFor's, except that an approval is only ever its author's.
+// accountFor's, except that an approval or a change request is only ever its
+// author's: sent by the default account, it would approve or block the pull
+// request in that account's name.
 func (e *Engine) pullAccount(op dag.Operation) (Account, bool, bool) {
 	as, onBehalf, ok := e.accountFor(op.Author())
-	if state, _ := op.GetMetadata(metaReviewState); state == "APPROVE" && onBehalf {
+	state, _ := op.GetMetadata(metaReviewState)
+	if (state == "APPROVE" || state == "REQUEST_CHANGES") && onBehalf {
 		return Account{}, false, false
 	}
 	return as, onBehalf, ok
@@ -139,6 +142,8 @@ func (c PullComment) what() string {
 	switch {
 	case c.State == "APPROVE":
 		return "approval"
+	case c.State == "REQUEST_CHANGES":
+		return "change request"
 	case c.State != "":
 		return "review"
 	case c.Path != "":

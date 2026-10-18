@@ -152,13 +152,16 @@ func TestPushLineCommentOutsideDiff(t *testing.T) {
 }
 
 // An approval is the person's own: never sent with the default token.
-func TestPushApprovalNeedsItsAuthorsToken(t *testing.T) {
+func TestPushApprovalAndChangeRequestNeedTheirAuthorsToken(t *testing.T) {
 	repo, f, b, _ := reviewSetup(t)
 	comment(t, b, me(t, repo), "ok", map[string]string{
 		"review:state": "APPROVE", "review:commit": "c1", "review:pr": key + "#7",
 	})
 	comment(t, b, me(t, repo), "some thoughts", map[string]string{
 		"review:state": "COMMENT", "review:commit": "c1", "review:pr": key + "#7",
+	})
+	comment(t, b, me(t, repo), "not like this", map[string]string{
+		"review:state": "REQUEST_CHANGES", "review:commit": "c1", "review:pr": key + "#7",
 	})
 
 	var reasons []string
@@ -171,6 +174,7 @@ func TestPushApprovalNeedsItsAuthorsToken(t *testing.T) {
 	require.Equal(t, "COMMENT", got[0].State)
 	require.Equal(t, "bot", got[0].Author.Login)
 	require.Contains(t, strings.Join(reasons, "\n"), "missing author token: approval")
+	require.Contains(t, strings.Join(reasons, "\n"), "missing author token: change request")
 }
 
 // What a pull request holds is never an issue comment, on any forge: not

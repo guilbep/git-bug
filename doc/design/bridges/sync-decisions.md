@@ -311,11 +311,12 @@ same keys, and its origin `sync:<remote>:pr-comment`, its GitHub id.
   add it: a dry run says "would send later: … (waits for a pull request)".
   *If wrong:* nothing.
 - **A pull request comment goes with the author's account, or with sync the
-  default one, attributed, as an issue comment; an approval only with its
-  author's own**, else it's reported ("missing author token: approval by
-  … not sent"). A request for changes may go with the default account, as
-  the contract says. *If wrong:* a request for changes blocks a pull
-  request under the bot's name until someone dismisses it.
+  default one, attributed, as an issue comment; an approval or a request
+  for changes only with its author's own**, else it's reported ("missing
+  author token: approval by … not sent"): either one, sent by the default
+  account, would approve or block the pull request in the bot's name.
+  *If wrong:* a person without a token here can't approve or request
+  changes from git-board; they do it on GitHub.
 - **A line comment GitHub won't put on its line (422: outside the diff, or
   on a commit no longer in it) goes as a comment of the pull request**,
   starting with "On `path` line N (new side) at abc1234:". It counts as
