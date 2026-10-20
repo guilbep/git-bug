@@ -205,6 +205,29 @@ spec stays the authority.
   GitLab in one sync, a GitLab login in an `assignee:` label is sent to
   GitHub as that GitHub login, and GitHub assignees reach GitLab as plain
   labels.
+- **A project can hold its assignees as labels instead** (decided with the
+  user, 2026-10-20): the bridge key `assignees = labels` (default `native`),
+  for a project that wants several assignees, or people without access.
+  GitHub's adapter then adds an assignee's label as a label, for anyone,
+  and unassigns them on GitHub; those GitHub assigns, as people click there,
+  are sent again and so move to labels: each mode moves the other's way to
+  its own, and switching moves them once each way, after the full pull an
+  upgrade needs. Every clone must hold them the same way, or each sync
+  undoes the others' and notifies people: git-board gives the mode from
+  `.git-board.toml` with `WithAssignees` at every run, over each clone's
+  key; the command line reads the key. An unknown value is an error. A bot
+  GitHub won't unassign (`user(login:)` finds none) keeps its assignment
+  beside its label; removing one without a user, a bot or not, warns once.
+  *If wrong:* a project in labels mode loses GitHub's assigned-to-me and
+  notifications for its assignees.
+- **Native where the forge has the concept, labels otherwise** (the user's
+  principle, 2026-10-20): assignees first. Not built, to weigh each:
+  `kind:` and GitHub's issue types (defined per organization, so an
+  EPFL-ENAC admin creates one per kind; GitLab has none); `sprint:` and
+  GitHub's Projects iteration field, which Project 40 uses and git-board
+  already syncs, rather than milestones (per repository, a due date only,
+  no cadence; on GitLab's free edition, which has no iterations, a
+  milestone may fit: not checked).
 - **A login is written as GitHub spells it**: one written in another case in
   git-bug is assigned, then the next pull replaces its label with GitHub's
   spelling, in two operations (traced, not tested: the fake GitHub keeps

@@ -146,6 +146,11 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       skips it (syncpush.go, `accountFor`).
 - [ ] A FORBIDDEN from GitHub's assign mutation refuses the whole label
       change, its ordinary labels too, not just the assignees.
+- [x] Assignees as labels per project: bridge key `assignees = labels`,
+      `core.WithAssignees` for git-board's `.git-board.toml` (git-board to
+      wire it: pass it at every run).
+- [ ] `kind:` ↔ GitHub issue types, `sprint:` ↔ Projects iteration (GitHub)
+      or milestones (GitLab): weigh each (sync-decisions.md, Assignees).
 - [ ] GitLab native assignees, every forge's login translated per person
       (sync-decisions.md, Assignees): needed before a sync of GitHub and
       GitLab together carries assignees, as the wiki's would.

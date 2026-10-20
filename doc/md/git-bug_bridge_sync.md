@@ -28,6 +28,16 @@ Run it from a single place, for example a CI job:
 
     git bug pull && git bug bridge sync && git bug push
 
+git-bug's assignee:<login> labels are GitHub's assignees. To hold them as
+labels on GitHub instead, for a project that wants several or people
+without access, set on every clone (they would undo each other's syncs
+otherwise; git-board sets it from the project's configuration):
+
+    git config git-bug.bridge.<name>.assignees labels
+
+After a change, "git bug bridge pull <name> --no-resume" reads every issue
+once, so that the next sync moves the assignees (a --dry-run lists them).
+
 Comments written for a pull request (line comments, replies and reviews,
 anchored by their review:* metadata, as git-board writes them) go to that
 pull request on GitHub, never to an issue. This command doesn't know which
