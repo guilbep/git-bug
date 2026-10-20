@@ -178,6 +178,13 @@ spec stays the authority.
   wouldn't drop it then. A dry run names the labels it would send again.
   *If wrong:* an old label of someone without access stays on GitHub; a
   clone without the record drops git-bug's label at its next pull.
+- **Upgrading reads every issue once, by hand**: a sync only lists the
+  issues updated since the last one, so the assignees and old labels of the
+  others come with `git bug bridge pull <bridge> --no-resume` (local only),
+  then `bridge sync --dry-run` names what would move, then `bridge sync`.
+  No automatic full pull: nothing goes out unasked. *If wrong:* until then,
+  an issue's assignees come in, and its old labels move, only when it
+  changes on GitHub.
 - **A login is written as GitHub spells it**: one written in another case in
   git-bug is assigned, then the next pull replaces its label with GitHub's
   spelling, in two operations (traced, not tested: the fake GitHub keeps

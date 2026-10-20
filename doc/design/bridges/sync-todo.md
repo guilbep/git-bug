@@ -135,6 +135,12 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       guilbep/git-bug-sync-test #11 (2026-10-20): the old labels of
       `guilbep` (moved) and `torvalds` (no access: kept, one warning); then
       git-bug's and GitHub's own assignee changes; syncs after them quiet.
+      Upgrade, #12 (old label, synced first by sync.6): the new binary's
+      sync left it, `bridge pull gh --no-resume` then `bridge sync` moved
+      it; again: quiet.
+- [ ] Upgrading a synced repository: `git bug bridge pull <bridge>
+      --no-resume` once (guilbep/git-board's own board), in the release
+      notes of the next tag.
 - [ ] GitLab assignees the same way.
 - [ ] Issue numbers of git-bug's own, to name an issue across forges:
       discussed apart, not built.
