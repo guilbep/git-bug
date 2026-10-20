@@ -226,6 +226,12 @@ func (e *Engine) marker(issue *Issue) (entity.Id, bool) {
 	return id, ok && e.isAccount(issue.Author)
 }
 
+// seenLabels is the label set to record as the forge's: its labels but
+// those it is sent again.
+func seenLabels(issue *Issue, resend []string) string {
+	return labelsValue(slices.DeleteFunc(cleanLabels(issue.Labels), func(l string) bool { return slices.Contains(resend, l) }))
+}
+
 // planPull reports what pulling an issue would do, without doing it.
 func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResult) {
 	var id entity.Id
@@ -236,13 +242,17 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 		// as the push: those git-bug has once the forge's events are pulled,
 		// and refused labels wait
 		has := labelStrings(snap.Labels)
+		pending := false
 		for _, ev := range issue.Events {
 			if e.findOp(snap, ev.ID) == nil {
 				has = append(has, ev.Added...)
+				pending = pending || ev.Kind == EventLabels
 			}
 		}
 		resend = resent(issue, has)
-		if _, refused := lastSlotOp(snap, slot{kind: slotLabels}).GetMetadata(e.key("refused")); refused {
+		// unless the pull records something new about them
+		baseValue, _, _ := base(snap, e.remote, slot{kind: slotLabels})
+		if !pending && e.labelsHeldBack(snap) && seenLabels(issue, resend) == baseValue {
 			resend = nil
 		}
 	}
@@ -694,8 +704,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 	remote := cleanLabels(issue.Labels)
 	// the labels the forge holds the old way that git-bug has: as not seen, a
 	// push sends them again; one git-bug removed, it removes
-	resend := resent(issue, labelStrings(snap.Labels))
-	seen := labelsValue(slices.DeleteFunc(slices.Clone(remote), func(l string) bool { return slices.Contains(resend, l) }))
+	seen := seenLabels(issue, resent(issue, labelStrings(snap.Labels)))
 	forgeChanged := ok && seen != baseValue
 	changed := !ok || labelsValue(labelStrings(snap.Labels)) != baseValue
 	if !skip(ls, forgeChanged, changed) {

@@ -145,7 +145,13 @@ func syncing(t *testing.T, g githubForge) (*cache.RepoCache, func() int) {
 	require.NoError(t, err)
 	require.NoError(t, backend.SetUserIdentity(me))
 	return backend, func() int {
-		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin})
+		mode := core.AssigneesNative
+		if g.labelAssignees {
+			mode = core.AssigneesLabels
+		}
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{
+			Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin, Assignees: mode,
+		})
 		require.NoError(t, err)
 		warnings := 0
 		for r := range e.Pull(context.Background(), time.Time{}) {
@@ -323,4 +329,41 @@ func TestGithubLabelsModeBot(t *testing.T) {
 	writes := g.Writes()
 	require.Zero(t, sync())
 	require.Equal(t, writes, g.Writes())
+}
+
+// Who GitHub refused to assign goes out as a label once the project holds
+// assignees as labels, beside those moved, and stays a label back in native.
+func TestGithubSwitchSendsRefusedAsLabels(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	g.fake.unassignable["eve"] = true
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.assign("alice", ref, "bob", true)
+	backend, sync := syncing(t, g)
+	require.Zero(t, sync())
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"assignee:eve"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Equal(t, 1, sync(), "eve refused")
+	require.Zero(t, sync())
+
+	g.labelAssignees = true
+	require.Zero(t, sync())
+	labels, assignees := g.held(ref)
+	require.Equal(t, []string{"assignee:bob", "assignee:eve"}, labels)
+	require.Empty(t, assignees)
+	writes := g.Writes()
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes())
+
+	g.labelAssignees = false
+	require.Equal(t, 1, sync(), "eve refused again")
+	labels, assignees = g.held(ref)
+	require.Equal(t, []string{"assignee:eve"}, labels, "kept, as GitHub can't assign her")
+	require.Equal(t, []string{"bob"}, assignees)
+	writes = g.Writes()
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes())
+	require.Equal(t, []common.Label{"assignee:bob", "assignee:eve"}, b.Snapshot().Labels)
 }

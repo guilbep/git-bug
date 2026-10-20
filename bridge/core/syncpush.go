@@ -220,7 +220,7 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 	baseLabels, _, _ := base(snap, e.remote, s(slotLabels, ""))
 	added, removed := labelChanges(baseLabels, snap.Labels)
 	// as the push, refused labels wait for a later change
-	if _, refused := lastSlotOp(snap, s(slotLabels, "")).GetMetadata(e.key("refused")); !refused && len(added)+len(removed) > 0 {
+	if !e.labelsHeldBack(snap) && len(added)+len(removed) > 0 {
 		labels := "labels"
 		for _, l := range added {
 			labels += " +" + l
@@ -430,7 +430,10 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			continue
 		}
 		local := lastSlotOp(snap, s(sc.kind, ""))
-		if _, refused := local.GetMetadata(e.key("refused")); refused {
+		if _, refused := local.GetMetadata(e.key("refused")); refused && sc.kind != slotLabels {
+			continue
+		}
+		if sc.kind == slotLabels && e.labelsHeldBack(snap) {
 			continue
 		}
 		as, _, ok := e.accountFor(local.Author())
@@ -450,6 +453,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			}
 			records[e.key(string(sc.kind))] = labelsValue(seen)
 			records[e.key("refused")] = "1"
+			records[e.key("refused-as")] = e.assignees()
 			err = nil
 		}
 		if errors.Is(err, ErrRefused) {
@@ -480,6 +484,33 @@ func (e *Engine) accountFor(author identity.Interface) (as Account, onBehalf boo
 		return *e.defaultAccount, true, true
 	}
 	return Account{}, false, false
+}
+
+// labelsHeldBack tells whether a push leaves a bug's labels alone: the forge
+// refused them at the last push, and nothing about them was recorded since,
+// while the forge holds assignees the same way. A refusal under the other
+// way doesn't hold, as the forge may take them now (as labels).
+func (e *Engine) labelsHeldBack(snap *bug.Snapshot) bool {
+	local := lastSlotOp(snap, slot{kind: slotLabels})
+	held := false
+	for _, op := range snap.Operations {
+		sm, ok := op.(*dag.SetMetadataOperation[*bug.Snapshot])
+		if !ok || sm.Target != local.Id() {
+			continue
+		}
+		if _, ok := sm.NewMetadata[e.key("refused")]; ok {
+			mode := sm.NewMetadata[e.key("refused-as")]
+			held = mode == "" || mode == e.assignees()
+		} else if _, ok := sm.NewMetadata[e.key(string(slotLabels))]; ok {
+			held = false
+		}
+	}
+	return held
+}
+
+// assignees is how the forge holds assignees.
+func (e *Engine) assignees() string {
+	return cmp.Or(e.opts.Assignees, AssigneesNative)
 }
 
 // refused records that the forge refused a value, warns, and doesn't try it
