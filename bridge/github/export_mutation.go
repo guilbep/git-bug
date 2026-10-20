@@ -46,6 +46,30 @@ type removeLabelsFromLabelableMutation struct {
 	} `graphql:"removeLabelsFromLabelable(input:$input)"`
 }
 
+type addAssigneesToAssignableMutation struct {
+	AddAssignees struct {
+		Assignable assignable
+	} `graphql:"addAssigneesToAssignable(input:$input)"`
+}
+
+type removeAssigneesFromAssignableMutation struct {
+	RemoveAssignees struct {
+		Assignable assignable
+	} `graphql:"removeAssigneesFromAssignable(input:$input)"`
+}
+
+// assignable is an issue, with its assignees after a change: GitHub allows
+// ten.
+type assignable struct {
+	Issue struct {
+		Assignees struct {
+			Nodes []struct {
+				Login string `graphql:"login"`
+			}
+		} `graphql:"assignees(first: 20)"`
+	} `graphql:"... on Issue"`
+}
+
 type addLabelsToLabelableMutation struct {
 	AddLabels struct {
 		Labelable struct {

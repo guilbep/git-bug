@@ -31,6 +31,10 @@ type fakeGithub struct {
 	owner string
 	// outsiders can't see the repository: GitHub resolves nothing for them
 	outsiders map[string]bool
+	// unassignable can't be assigned: GitHub leaves them out silently
+	unassignable map[string]bool
+	// noUser are logins without a user
+	noUser map[string]bool
 
 	mu       sync.Mutex
 	issues   []*ghIssue
@@ -50,6 +54,7 @@ type ghIssue struct {
 	updated     time.Time
 	closed      bool
 	labels      []string
+	assignees   []string
 	bodyEdits   []userContentEdit // oldest first
 	timeline    []timelineItem
 	edits       map[string][]userContentEdit // comment edits by comment id, oldest first
@@ -57,7 +62,8 @@ type ghIssue struct {
 }
 
 func newFakeGithub(owner string) *fakeGithub {
-	return &fakeGithub{owner: owner, labels: map[string]string{}, outsiders: map[string]bool{}}
+	return &fakeGithub{owner: owner, labels: map[string]string{}, outsiders: map[string]bool{},
+		unassignable: map[string]bool{}, noUser: map[string]bool{}}
 }
 
 // The following are called with f.mu held.
@@ -199,6 +205,40 @@ func (f *fakeGithub) setLabels(login string, issue *ghIssue, labels []string) {
 	issue.updated = now().Time
 }
 
+func (f *fakeGithub) setAssigned(login string, issue *ghIssue, assignee string, assigned bool) {
+	if slices.Contains(issue.assignees, assignee) == assigned || assigned && f.unassignable[assignee] {
+		return
+	}
+	e := assignedEvent{actorEvent: actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)}}
+	e.Assignee.Actor.Login = githubv4.String(assignee)
+	if assigned {
+		issue.assignees = append(issue.assignees, assignee)
+		issue.timeline = append(issue.timeline, timelineItem{Typename: "AssignedEvent", AssignedEvent: e})
+	} else {
+		issue.assignees = slices.DeleteFunc(issue.assignees, func(a string) bool { return a == assignee })
+		issue.timeline = append(issue.timeline, timelineItem{Typename: "UnassignedEvent", UnassignedEvent: e})
+	}
+	issue.updated = now().Time
+}
+
+// assignees changes an issue's assignees, given as user ids, and answers
+// with its assignees.
+func (f *fakeGithub) assignees(login string, id githubv4.ID, users []githubv4.ID, assigned bool, a *assignable) error {
+	issue, err := f.find(id)
+	if err != nil {
+		return err
+	}
+	for _, u := range users {
+		f.setAssigned(login, issue, strings.TrimPrefix(fmt.Sprint(u), "U_"), assigned)
+	}
+	for _, l := range issue.assignees {
+		a.Issue.Assignees.Nodes = append(a.Issue.Assignees.Nodes, struct {
+			Login string `graphql:"login"`
+		}{Login: l})
+	}
+	return nil
+}
+
 func newest(edits []userContentEdit) []userContentEdit {
 	res := slices.Clone(edits)
 	slices.Reverse(res)
@@ -242,6 +282,12 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 		login := string(vars["login"].(githubv4.String))
 		a := actorOf(login)
 		q.User = user{Login: a.Login, Name: a.User.Name}
+	case *userIDQuery:
+		login := string(vars["login"].(githubv4.String))
+		if f.noUser[login] {
+			return fmt.Errorf("Could not resolve to a User with the login of '%s'.", login)
+		}
+		q.User.ID = githubv4.ID("U_" + login)
 	case *repositoryIDQuery:
 		if f.outsiders[c.login] {
 			return fmt.Errorf("Could not resolve to a Repository with the name '%s/project'", f.owner)
@@ -372,6 +418,12 @@ func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 		f.setLabels(c.login, issue, slices.DeleteFunc(slices.Clone(issue.labels), func(l string) bool {
 			return slices.ContainsFunc(in.LabelIDs, func(id githubv4.ID) bool { return f.labels[fmt.Sprint(id)] == l })
 		}))
+	case *addAssigneesToAssignableMutation:
+		in := input.(githubv4.AddAssigneesToAssignableInput)
+		return f.assignees(c.login, in.AssignableID, in.AssigneeIDs, true, &m.AddAssignees.Assignable)
+	case *removeAssigneesFromAssignableMutation:
+		in := input.(githubv4.RemoveAssigneesFromAssignableInput)
+		return f.assignees(c.login, in.AssignableID, in.AssigneeIDs, false, &m.RemoveAssignees.Assignable)
 	case *resolveReviewThreadMutation:
 		return f.resolve(input.(githubv4.ResolveReviewThreadInput).ThreadID, true)
 	case *unresolveReviewThreadMutation:

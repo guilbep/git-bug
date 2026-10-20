@@ -177,11 +177,16 @@ func build(mm *importMediator, yield func(*core.Issue, error) bool) {
 	}
 }
 
+// assigneeLabel prefixes the label git-bug holds a GitHub assignee as.
+const assigneeLabel = "assignee:"
+
 // issueBuilder turns the events of the import mediator into an issue.
 type issueBuilder struct {
 	issue   *core.Issue
 	edited  map[string]bool // targets whose creation edit was seen
 	renamed bool
+	// GitHub's labels and assignees, the issue's labels
+	labels, assignees []string
 }
 
 func newIssueBuilder(i issue) *issueBuilder {
@@ -242,14 +247,24 @@ func (b *issueBuilder) timeline(item timelineItem) {
 		b.touch(c.CreatedAt.Time)
 	case "LabeledEvent":
 		e := item.LabeledEvent
-		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Added: []string{string(e.Label.Name)}})
-		if !slices.Contains(b.issue.Labels, string(e.Label.Name)) {
-			b.issue.Labels = append(b.issue.Labels, string(e.Label.Name))
-		}
+		b.relabel(e.actorEvent, func() { b.labels = append(b.labels, string(e.Label.Name)) })
 	case "UnlabeledEvent":
 		e := item.UnlabeledEvent
-		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Removed: []string{string(e.Label.Name)}})
-		b.issue.Labels = slices.DeleteFunc(b.issue.Labels, func(l string) bool { return l == string(e.Label.Name) })
+		b.relabel(e.actorEvent, func() {
+			b.labels = slices.DeleteFunc(b.labels, func(l string) bool { return l == string(e.Label.Name) })
+		})
+	case "AssignedEvent":
+		e := item.AssignedEvent
+		if login := string(e.Assignee.Actor.Login); login != "" {
+			b.relabel(e.actorEvent, func() { b.assignees = append(b.assignees, login) })
+		}
+	case "UnassignedEvent":
+		e := item.UnassignedEvent
+		if login := string(e.Assignee.Actor.Login); login != "" {
+			b.relabel(e.actorEvent, func() {
+				b.assignees = slices.DeleteFunc(b.assignees, func(a string) bool { return a == login })
+			})
+		}
 	case "ClosedEvent":
 		e := item.ClosedEvent
 		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventStatus, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Status: common.ClosedStatus})
@@ -265,6 +280,39 @@ func (b *issueBuilder) timeline(item timelineItem) {
 			b.issue.OriginalTitle = string(e.PreviousTitle)
 		}
 		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventTitle, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Title: string(e.CurrentTitle)})
+	}
+}
+
+// issueLabels are GitHub's labels, and its assignees as assignee:<login>
+// labels.
+func (b *issueBuilder) issueLabels() []string {
+	labels := slices.Clone(b.labels)
+	for _, login := range b.assignees {
+		labels = append(labels, assigneeLabel+login)
+	}
+	slices.Sort(labels)
+	return slices.Compact(labels)
+}
+
+// relabel makes a change of GitHub's labels or assignees an event, if it
+// changes the issue's labels: assigning someone labeled the old way doesn't.
+func (b *issueBuilder) relabel(e actorEvent, change func()) {
+	was := b.issueLabels()
+	change()
+	now := b.issueLabels()
+	ev := core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time}
+	for _, l := range now {
+		if !slices.Contains(was, l) {
+			ev.Added = append(ev.Added, l)
+		}
+	}
+	for _, l := range was {
+		if !slices.Contains(now, l) {
+			ev.Removed = append(ev.Removed, l)
+		}
+	}
+	if ev.Added != nil || ev.Removed != nil {
+		b.event(ev)
 	}
 }
 
@@ -287,7 +335,13 @@ func (b *issueBuilder) touch(t time.Time) {
 }
 
 func (b *issueBuilder) finish() *core.Issue {
-	slices.Sort(b.issue.Labels)
+	b.issue.Labels = b.issueLabels()
+	// the assignees labeled the old way, before git-bug synced GitHub's
+	for _, l := range b.issue.Labels {
+		if strings.HasPrefix(l, assigneeLabel) && slices.Contains(b.labels, l) {
+			b.issue.Resend = append(b.issue.Resend, l)
+		}
+	}
 	slices.SortStableFunc(b.issue.Events, func(x, y core.Event) int { return x.Time.Compare(y.Time) })
 	return b.issue
 }
@@ -372,7 +426,12 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 }
 
 // ChangeLabels adds labels, creating the missing ones, then removes labels.
+// An assignee:<login> label is an assignee on GitHub, never a label: one
+// labeled the old way loses the label once assigned. Those GitHub can't
+// assign are refused, and keep their old way's label.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
+	assign, added := splitAssignees(added)
+	unassign, removed := splitAssignees(removed)
 	add, err := r.labelIDs(ctx, added, true)
 	if err != nil {
 		return err
@@ -384,13 +443,104 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 			return r.confirm(ctx, err, issue.ID)
 		}
 	}
+
+	var refused core.RefusedLabels
+	if len(assign) > 0 {
+		assigned, err := r.assign(ctx, as, issue, assign, true)
+		if err != nil {
+			return err
+		}
+		for _, login := range assign {
+			if slices.ContainsFunc(assigned, func(a string) bool { return strings.EqualFold(a, login) }) {
+				removed = append(removed, assigneeLabel+login)
+			} else {
+				refused = append(refused, assigneeLabel+login)
+			}
+		}
+	}
+	if len(unassign) > 0 {
+		if _, err := r.assign(ctx, as, issue, unassign, false); err != nil {
+			return err
+		}
+		for _, login := range unassign {
+			removed = append(removed, assigneeLabel+login)
+		}
+	}
+
+	// ponytail: an assignee's label missing from the repository, as most are,
+	// reads every label again; cache the misses if pushes get slow
 	remove, err := r.labelIDs(ctx, removed, false)
-	if err != nil || len(remove) == 0 {
+	if err != nil {
 		return err
 	}
-	var m removeLabelsFromLabelableMutation
-	input := githubv4.RemoveLabelsFromLabelableInput{LabelableID: issue.ID, LabelIDs: remove}
-	return r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID)
+	if len(remove) > 0 {
+		var m removeLabelsFromLabelableMutation
+		input := githubv4.RemoveLabelsFromLabelableInput{LabelableID: issue.ID, LabelIDs: remove}
+		if err := r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID); err != nil {
+			return err
+		}
+	}
+	if refused != nil {
+		return refused
+	}
+	return nil
+}
+
+// splitAssignees returns the logins of assignee:<login> labels, and the other
+// labels.
+func splitAssignees(labels []string) (logins, others []string) {
+	for _, l := range labels {
+		if login, ok := strings.CutPrefix(l, assigneeLabel); ok && login != "" {
+			logins = append(logins, login)
+		} else {
+			others = append(others, l)
+		}
+	}
+	return logins, others
+}
+
+// assign adds logins to the issue's assignees, or removes them, and returns
+// its assignees then. GitHub silently leaves out those it can't assign; a
+// login without a user is left out too.
+func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, logins []string, add bool) ([]string, error) {
+	var ids []githubv4.ID
+	for _, login := range logins {
+		var q userIDQuery
+		// no retries: a login without a user is an answer
+		err := mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
+			return r.reader.sc.Query(ctx, &q, varmap{"login": githubv4.String(login)})
+		}, func(string) {}))
+		if errors.Is(err, core.ErrGone) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, q.User.ID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var after *assignable
+	var err error
+	if add {
+		var m addAssigneesToAssignableMutation
+		err = r.mutate(ctx, as, &m, githubv4.AddAssigneesToAssignableInput{AssignableID: issue.ID, AssigneeIDs: ids})
+		after = &m.AddAssignees.Assignable
+	} else {
+		var m removeAssigneesFromAssignableMutation
+		err = r.mutate(ctx, as, &m, githubv4.RemoveAssigneesFromAssignableInput{AssignableID: issue.ID, AssigneeIDs: ids})
+		after = &m.RemoveAssignees.Assignable
+	}
+	if err != nil {
+		return nil, r.confirm(ctx, err, issue.ID)
+	}
+	var assigned []string
+	for _, n := range after.Issue.Assignees.Nodes {
+		assigned = append(assigned, n.Login)
+	}
+	return assigned, nil
 }
 
 // labelIDs returns the ids of labels of the repository. The missing ones are
@@ -559,6 +709,7 @@ func mapErr(err error) error {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "Could not resolve to a node"), strings.Contains(msg, "Could not resolve to an Issue"),
+		strings.Contains(msg, "Could not resolve to a User"),
 		strings.Contains(msg, "NOT_FOUND"):
 		return fmt.Errorf("%w: %w", core.ErrGone, err)
 	case strings.Contains(msg, "FORBIDDEN"), strings.Contains(msg, "Resource not accessible"),

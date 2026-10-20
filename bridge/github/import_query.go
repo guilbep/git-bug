@@ -14,6 +14,12 @@ type userQuery struct {
 	User user `graphql:"user(login: $login)"`
 }
 
+type userIDQuery struct {
+	User struct {
+		ID githubv4.ID `graphql:"id"`
+	} `graphql:"user(login: $login)"`
+}
+
 type labelsQuery struct {
 	Repository struct {
 		Labels struct {
@@ -133,6 +139,18 @@ type unlabeledEvent struct {
 	Label label
 }
 
+// assignedEvent is an AssignedEvent or an UnassignedEvent.
+type assignedEvent struct {
+	actorEvent
+	// a User, a Bot, a Mannequin or an Organization: all actors. Null for a
+	// deleted user.
+	Assignee struct {
+		Actor struct {
+			Login githubv4.String
+		} `graphql:"... on Actor"`
+	}
+}
+
 type renamedTitleEvent struct {
 	actorEvent
 	CurrentTitle  githubv4.String
@@ -148,6 +166,10 @@ type timelineItem struct {
 	// Label
 	LabeledEvent   labeledEvent   `graphql:"... on LabeledEvent"`
 	UnlabeledEvent unlabeledEvent `graphql:"... on UnlabeledEvent"`
+
+	// Assignees
+	AssignedEvent   assignedEvent `graphql:"... on AssignedEvent"`
+	UnassignedEvent assignedEvent `graphql:"... on UnassignedEvent"`
 
 	// Status
 	ClosedEvent struct {
