@@ -38,6 +38,23 @@ func steady(t *testing.T, repo *cache.RepoCache, f *synctest.Fake) {
 	require.Len(t, onlyBug(t, repo).Snapshot().Operations, ops, "nothing more recorded")
 }
 
+// planned returns what a dry run of a sync would do.
+func planned(t *testing.T, repo *cache.RepoCache, f core.Remote) string {
+	t.Helper()
+	dry, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
+		Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
+	})
+	require.NoError(t, err)
+	var res []string
+	for r := range dry.Pull(context.Background(), time.Time{}) {
+		res = append(res, r.String())
+	}
+	for r := range dry.Push(context.Background()) {
+		res = append(res, r.String())
+	}
+	return strings.Join(res, "\n")
+}
+
 // A label the forge refuses, like an assignee GitHub can't assign, stays in
 // git-bug with a warning; the others go through, and nothing fails.
 func TestPushRefusedLabelStays(t *testing.T) {
@@ -57,6 +74,7 @@ func TestPushRefusedLabelStays(t *testing.T) {
 	require.Equal(t, []common.Label{"a", "assignee:eve"}, snap.Labels)
 	require.Equal(t, 1, countOps[*bug.LabelChangeOperation](snap), "the push's echo is claimed")
 	require.Equal(t, []string{"a"}, f.Issue(issue.Number).Labels)
+	require.NotContains(t, planned(t, repo, f), "would", "as the push, a dry run skips the refused label")
 }
 
 // A label the forge holds the old way, like a GitHub assignee:<login> label,
@@ -106,6 +124,7 @@ func TestSyncRefusedOldWayLabelStays(t *testing.T) {
 	steady(t, repo, f)
 	require.Equal(t, []common.Label{"assignee:eve"}, onlyBug(t, repo).Snapshot().Labels)
 	require.Equal(t, []string{"assignee:eve"}, f.Issue(issue.Number).Labels)
+	require.NotContains(t, planned(t, repo, f), "would")
 }
 
 // A dry run tells which labels a sync would send again, of an issue to
@@ -117,19 +136,8 @@ func TestDryRunNamesOldWayLabels(t *testing.T) {
 	issue := alice.CreateIssue("title", "body")
 	alice.SetLabels(issue, []string{"assignee:bob"})
 
-	planned := func() string {
-		dry, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
-			Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
-		})
-		require.NoError(t, err)
-		var res []string
-		for r := range dry.Pull(context.Background(), time.Time{}) {
-			res = append(res, r.String())
-		}
-		return strings.Join(res, "\n")
-	}
-	require.Contains(t, planned(), "would send again: labels +assignee:bob")
+	require.Contains(t, planned(t, repo, f), "would send again: labels +assignee:bob")
 	pull(t, repo, f)
-	require.Contains(t, planned(), "would send again: labels +assignee:bob")
+	require.Contains(t, planned(t, repo, f), "would send again: labels +assignee:bob")
 	require.Equal(t, []string{"assignee:bob"}, f.Issue(issue.Number).Resend, "nothing sent")
 }

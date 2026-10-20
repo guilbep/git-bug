@@ -229,10 +229,14 @@ func (e *Engine) marker(issue *Issue) (entity.Id, bool) {
 // planPull reports what pulling an issue would do, without doing it.
 func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResult) {
 	var id entity.Id
+	resend := len(issue.Resend) > 0
 	if b != nil {
 		id = b.Id()
+		// the push skips refused labels
+		_, refused := lastSlotOp(b.Snapshot(), slot{kind: slotLabels}).GetMetadata(e.key("refused"))
+		resend = resend && !refused
 	}
-	if len(issue.Resend) > 0 {
+	if resend {
 		out <- NewImportNothing(id, "would send again: labels +"+strings.Join(issue.Resend, " +")+", held by the forge the old way, of "+issue.URL)
 	}
 	if b == nil {

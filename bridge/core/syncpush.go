@@ -219,7 +219,8 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 	}
 	baseLabels, _, _ := base(snap, e.remote, s(slotLabels, ""))
 	added, removed := labelChanges(baseLabels, snap.Labels)
-	if len(added)+len(removed) > 0 {
+	// as the push, refused labels wait for a later change
+	if _, refused := lastSlotOp(snap, s(slotLabels, "")).GetMetadata(e.key("refused")); !refused && len(added)+len(removed) > 0 {
 		labels := "labels"
 		for _, l := range added {
 			labels += " +" + l
