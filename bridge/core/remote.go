@@ -24,8 +24,8 @@ var ErrGone = errors.New("deleted on the forge")
 var ErrRefused = errors.New("refused by the forge")
 
 // RefusedLabels is returned by ChangeLabels when the forge took the change
-// but these added labels, like assignees GitHub can't assign. It is an
-// ErrRefused.
+// but these labels, added or removed, like assignees GitHub can't assign or
+// unassign. It is an ErrRefused.
 type RefusedLabels []string
 
 func (r RefusedLabels) Error() string {

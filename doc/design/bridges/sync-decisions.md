@@ -168,8 +168,11 @@ spec stays the authority.
   included. The engine records the other labels as sent and the refused
   ones as not seen, so the next pull doesn't drop them, and marks the
   change refused: it is tried again at the next label change of the issue,
-  on either side. *If wrong:* the warning comes back with each label change
-  of that issue on GitHub.
+  on either side. Unassigning a login without a user, like a bot (GitHub's
+  `user(login:)` finds none), is refused the same way: the engine records
+  the label as the forge's, so the next pull doesn't put it back. *If
+  wrong:* the warning comes back with each label change of that issue on
+  GitHub.
 - **An `assignee:<login>` label already on GitHub (the old way) moves to the
   assignees**: the adapter lists it in `Issue.Resend`; while git-bug has
   it, the pull records the labels without it, so the push sends it again,

@@ -446,7 +446,7 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 
 	var refused core.RefusedLabels
 	if len(assign) > 0 {
-		assigned, err := r.assign(ctx, as, issue, assign, true)
+		assigned, _, err := r.assign(ctx, as, issue, assign, true)
 		if err != nil {
 			return err
 		}
@@ -459,11 +459,18 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 		}
 	}
 	if len(unassign) > 0 {
-		if _, err := r.assign(ctx, as, issue, unassign, false); err != nil {
+		_, unknown, err := r.assign(ctx, as, issue, unassign, false)
+		if err != nil {
 			return err
 		}
 		for _, login := range unassign {
 			removed = append(removed, assigneeLabel+login)
+			// ponytail: one without a user, like a bot, may still be assigned;
+			// refused even when it was only labeled the old way, which one
+			// more pull of that label's removal settles
+			if slices.Contains(unknown, login) {
+				refused = append(refused, assigneeLabel+login)
+			}
 		}
 	}
 
@@ -500,9 +507,10 @@ func splitAssignees(labels []string) (logins, others []string) {
 }
 
 // assign adds logins to the issue's assignees, or removes them, and returns
-// its assignees then. GitHub silently leaves out those it can't assign; a
-// login without a user is left out too.
-func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, logins []string, add bool) ([]string, error) {
+// its assignees then, and the logins without a user, left out: a bot's too,
+// as user(login:) finds no bot. GitHub silently leaves out those it can't
+// assign.
+func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, logins []string, add bool) (assigned, unknown []string, err error) {
 	var ids []githubv4.ID
 	for _, login := range logins {
 		var q userIDQuery
@@ -510,20 +518,20 @@ func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, lo
 		err := mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
 			return r.reader.sc.Query(ctx, &q, varmap{"login": githubv4.String(login)})
 		}, func(string) {}))
-		if errors.Is(err, core.ErrGone) {
+		if errors.Is(err, core.ErrGone) || err == nil && q.User.ID == nil {
+			unknown = append(unknown, login)
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ids = append(ids, q.User.ID)
 	}
 	if len(ids) == 0 {
-		return nil, nil
+		return nil, unknown, nil
 	}
 
 	var after *assignable
-	var err error
 	if add {
 		var m addAssigneesToAssignableMutation
 		err = r.mutate(ctx, as, &m, githubv4.AddAssigneesToAssignableInput{AssignableID: issue.ID, AssigneeIDs: ids})
@@ -534,13 +542,12 @@ func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, lo
 		after = &m.RemoveAssignees.Assignable
 	}
 	if err != nil {
-		return nil, r.confirm(ctx, err, issue.ID)
+		return nil, nil, r.confirm(ctx, err, issue.ID)
 	}
-	var assigned []string
 	for _, n := range after.Issue.Assignees.Nodes {
 		assigned = append(assigned, n.Login)
 	}
-	return assigned, nil
+	return assigned, unknown, nil
 }
 
 // labelIDs returns the ids of labels of the repository. The missing ones are

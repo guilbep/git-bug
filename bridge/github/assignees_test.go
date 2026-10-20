@@ -91,7 +91,8 @@ func TestGithubChangeLabelsAssigns(t *testing.T) {
 	require.Equal(t, []string{"bob"}, assignees)
 	require.Equal(t, []string{"a"}, slices.Collect(maps.Values(g.fake.labels)), "no assignee label on GitHub")
 
-	require.NoError(t, g.ChangeLabels(ctx, bot, ref, nil, []string{"assignee:bob", "assignee:nobody"}))
+	err = g.ChangeLabels(ctx, bot, ref, nil, []string{"assignee:bob", "assignee:nobody"})
+	require.Equal(t, core.RefusedLabels{"assignee:nobody"}, err, "without a user, like a bot, it may still be assigned")
 	labels, assignees = g.held(ref)
 	require.Equal(t, []string{"a"}, labels)
 	require.Empty(t, assignees)
@@ -117,6 +118,35 @@ func TestGithubChangeLabelsMovesOldWayLabels(t *testing.T) {
 	require.Len(t, issue.Events, events, "no change for the engine")
 }
 
+// syncing returns a git-bug repository, and a sync of it with GitHub that
+// returns its number of warnings.
+func syncing(t *testing.T, g githubForge) (*cache.RepoCache, func() int) {
+	backend, err := cache.NewRepoCacheNoEvents(repotest.NewGoGitRepo(t, false), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+	return backend, func() int {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin})
+		require.NoError(t, err)
+		warnings := 0
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+			if r.Event == core.ImportEventWarning {
+				warnings++
+			}
+		}
+		for r := range e.Push(context.Background()) {
+			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+			if r.Event == core.ExportEventWarning {
+				warnings++
+			}
+		}
+		return warnings
+	}
+}
+
 // A sync moves GitHub's assignee labels to its assignees, sends git-bug's
 // assignees as GitHub's, and then has nothing more to do.
 func TestGithubSyncAssignees(t *testing.T) {
@@ -125,23 +155,7 @@ func TestGithubSyncAssignees(t *testing.T) {
 	ref := alice.CreateIssue("title", "body")
 	alice.SetLabels(ref, []string{"assignee:bob", "bug"})
 
-	repo := repotest.NewGoGitRepo(t, false)
-	backend, err := cache.NewRepoCacheNoEvents(repo, nil)
-	require.NoError(t, err)
-	defer backend.Close()
-	me, err := backend.Identities().New("Me", "me@example.com")
-	require.NoError(t, err)
-	require.NoError(t, backend.SetUserIdentity(me))
-	sync := func() {
-		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin})
-		require.NoError(t, err)
-		for r := range e.Pull(context.Background(), time.Time{}) {
-			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
-		}
-		for r := range e.Push(context.Background()) {
-			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
-		}
-	}
+	backend, sync := syncing(t, g)
 	sync()
 	labels, assignees := g.held(ref)
 	require.Equal(t, []string{"bug"}, labels)
@@ -163,4 +177,27 @@ func TestGithubSyncAssignees(t *testing.T) {
 	require.Equal(t, writes, g.Writes(), "nothing more sent")
 	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
 	require.Equal(t, []common.Label{"assignee:carol", "bug"}, b.Snapshot().Labels)
+}
+
+// Unassigning a login GitHub finds no user of, like a bot's, is refused, with
+// a warning: the next pull doesn't assign it again in git-bug.
+func TestGithubSyncUnassignBot(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	g.fake.noUser["Copilot"] = true
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.assign("alice", ref, "Copilot", true)
+	backend, sync := syncing(t, g)
+	require.Zero(t, sync())
+
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels(nil, []string{"assignee:Copilot"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Equal(t, 1, sync())
+	require.Zero(t, sync())
+	require.Zero(t, sync())
+	require.Empty(t, b.Snapshot().Labels)
+	_, assignees := g.held(ref)
+	require.Equal(t, []string{"Copilot"}, assignees)
 }
