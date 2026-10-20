@@ -246,3 +246,81 @@ func TestGithubSyncRemovesOldWayLabelWithoutUser(t *testing.T) {
 	require.Empty(t, labels)
 	require.Empty(t, assignees)
 }
+
+// With assignees held as labels, an assignee's label is a label on GitHub,
+// for anyone, and GitHub's own assignees move to labels.
+func TestGithubLabelsModeChangeLabels(t *testing.T) {
+	ctx := context.Background()
+	g := newGithubForge(t, "owner")
+	g.labelAssignees = true
+	g.fake.noUser["jane"] = true
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.assign("alice", ref, "carol", true)
+	issue := g.Issue(ref.Number)
+	require.Equal(t, []string{"assignee:carol"}, issue.Labels)
+	require.Equal(t, []string{"assignee:carol"}, issue.Resend, "held the other way")
+	events := len(issue.Events)
+
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, []string{"assignee:bob", "assignee:carol", "assignee:jane"}, nil))
+	labels, assignees := g.held(ref)
+	require.Equal(t, []string{"assignee:bob", "assignee:carol", "assignee:jane"}, labels)
+	require.Empty(t, assignees)
+	issue = g.Issue(ref.Number)
+	require.Empty(t, issue.Resend)
+	require.Len(t, issue.Events, events+2, "bob's and jane's labels; carol's moved, no change")
+
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, nil, []string{"assignee:bob"}))
+	labels, _ = g.held(ref)
+	require.Equal(t, []string{"assignee:carol", "assignee:jane"}, labels)
+}
+
+// Switching how GitHub holds assignees moves them, once each way.
+func TestGithubSyncSwitchesAssigneesMode(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.assign("alice", ref, "bob", true)
+	backend, sync := syncing(t, g)
+	require.Zero(t, sync())
+	steady := func() {
+		t.Helper()
+		b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+		require.NoError(t, err)
+		writes, ops := g.Writes(), len(b.Snapshot().Operations)
+		require.Zero(t, sync())
+		require.Equal(t, writes, g.Writes(), "nothing more sent")
+		require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+		require.Equal(t, []common.Label{"assignee:bob"}, b.Snapshot().Labels)
+	}
+
+	g.labelAssignees = true
+	require.Zero(t, sync())
+	labels, assignees := g.held(ref)
+	require.Equal(t, []string{"assignee:bob"}, labels)
+	require.Empty(t, assignees)
+	steady()
+
+	g.labelAssignees = false
+	require.Zero(t, sync())
+	labels, assignees = g.held(ref)
+	require.Empty(t, labels)
+	require.Equal(t, []string{"bob"}, assignees)
+	steady()
+}
+
+// A bot GitHub won't unassign, as user(login:) finds none, gets its label
+// beside, once.
+func TestGithubLabelsModeBot(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	g.labelAssignees = true
+	g.fake.noUser["Copilot"] = true
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.assign("alice", ref, "Copilot", true)
+	_, sync := syncing(t, g)
+	require.Zero(t, sync())
+	labels, assignees := g.held(ref)
+	require.Equal(t, []string{"assignee:Copilot"}, labels)
+	require.Equal(t, []string{"Copilot"}, assignees)
+	writes := g.Writes()
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes())
+}

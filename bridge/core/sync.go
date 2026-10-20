@@ -37,6 +37,9 @@ type SyncOptions struct {
 	// for remotes with pull requests (PullRemote: GitHub) only, once per bug
 	// at each pull. Nil imports none. What git-bug writes is sent without it.
 	PullsOf func(bug entity.Id) []string
+	// Assignees, when set, is how the forge holds assignees, over the
+	// bridge's ConfigKeyAssignees.
+	Assignees string
 }
 
 // Option sets SyncOptions that a bridge's configuration doesn't give, for
@@ -47,6 +50,13 @@ type Option func(*SyncOptions)
 // reviews of the pull requests it gives for each bug.
 func WithPullsOf(f func(bug entity.Id) []string) Option {
 	return func(o *SyncOptions) { o.PullsOf = f }
+}
+
+// WithAssignees sets how the forges hold assignees, AssigneesNative or
+// AssigneesLabels, over their bridges' configuration: git-board gives it
+// from the project's, which every clone shares.
+func WithAssignees(mode string) Option {
+	return func(o *SyncOptions) { o.Assignees = mode }
 }
 
 // Engine syncs a git-bug repository with one forge project.

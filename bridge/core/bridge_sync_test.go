@@ -19,12 +19,17 @@ import (
 // forges are the fake forges of the fakesync bridges, by project name.
 var forges = map[string]*synctest.Fake{}
 
+// remoteConfs are the configurations the fakesync remotes were made with, by
+// project name.
+var remoteConfs = map[string]core.Configuration{}
+
 // syncBridge is a bridge ported to the sync engine, on a fake forge.
 type syncBridge struct{ plainBridge }
 
 func (syncBridge) Target() string { return "fakesync" }
 
 func (syncBridge) NewRemote(_ context.Context, _ *cache.RepoCache, conf core.Configuration) (core.Remote, error) {
+	remoteConfs[conf["project"]] = conf
 	return forges[conf["project"]], nil
 }
 
@@ -111,6 +116,41 @@ func TestSyncAll(t *testing.T) {
 	}
 
 	require.Equal(t, "from a", b.Issue("1").Title, "pulled from a, pushed to b in one run")
+}
+
+// How a forge holds assignees comes from the run, as git-board gives it from
+// the project's shared configuration, over each clone's bridge key: clones
+// holding them differently would undo each other's syncs.
+func TestSyncAssigneesMode(t *testing.T) {
+	repo := newRepo(t)
+	newSyncForge(t, repo, "solo")
+	sync := func(opts ...core.Option) (string, error) {
+		results, err := core.SyncAll(context.Background(), repo, nil, true, opts...)
+		if err != nil {
+			return "", err
+		}
+		for r := range results {
+			require.False(t, r.IsError(), r.String())
+		}
+		return remoteConfs["solo"][core.ConfigKeyAssignees], nil
+	}
+
+	mode, err := sync()
+	require.NoError(t, err)
+	require.Empty(t, mode, "native by default")
+	require.NoError(t, core.SetBridgeConfig(repo, "solo", core.ConfigKeyAssignees, core.AssigneesLabels))
+	mode, err = sync()
+	require.NoError(t, err)
+	require.Equal(t, core.AssigneesLabels, mode)
+	mode, err = sync(core.WithAssignees(core.AssigneesNative))
+	require.NoError(t, err)
+	require.Equal(t, core.AssigneesNative, mode, "the run's mode wins")
+
+	require.NoError(t, core.SetBridgeConfig(repo, "solo", core.ConfigKeyAssignees, "lables"))
+	_, err = sync()
+	require.ErrorContains(t, err, "lables")
+	_, err = sync(core.WithAssignees("lables"))
+	require.ErrorContains(t, err, "lables")
 }
 
 func TestSyncAllDryRun(t *testing.T) {

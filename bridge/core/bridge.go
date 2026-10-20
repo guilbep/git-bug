@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,6 +34,15 @@ const (
 	// ConfigKeyLoginPrefix, followed by an identity id, links that identity
 	// to the login it has on the forge: login-<identity> = <login>.
 	ConfigKeyLoginPrefix = "login-"
+	// ConfigKeyAssignees is how the forge holds git-bug's assignee:<login>
+	// labels: AssigneesNative (the default) or AssigneesLabels. Every clone
+	// must hold them the same way, or each sync undoes the others':
+	// WithAssignees gives it from a shared configuration.
+	ConfigKeyAssignees = "assignees"
+	// AssigneesNative holds them as the forge's assignees.
+	AssigneesNative = "native"
+	// AssigneesLabels holds them as labels on the forge too.
+	AssigneesLabels = "labels"
 
 	MetaKeyOrigin = "origin"
 
@@ -441,10 +451,7 @@ func (b *Bridge) exportEvents(ctx context.Context, since time.Time) (<-chan Expo
 
 // newEngine returns the sync engine of a bridge ported to it.
 func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
-	remote, err := b.impl.(RemoteBridge).NewRemote(ctx, b.repo, b.conf)
-	if err != nil {
-		return nil, err
-	}
+	var err error
 	foreign := false
 	if v, ok := b.conf[ConfigKeySync]; ok {
 		if foreign, err = strconv.ParseBool(v); err != nil {
@@ -472,6 +479,19 @@ func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
 	}
 	for _, o := range b.opts {
 		o(&opts)
+	}
+
+	conf := b.conf
+	if opts.Assignees != "" {
+		conf = maps.Clone(conf)
+		conf[ConfigKeyAssignees] = opts.Assignees
+	}
+	if v := conf[ConfigKeyAssignees]; v != "" && v != AssigneesNative && v != AssigneesLabels {
+		return nil, fmt.Errorf("%s: %q is neither %s nor %s", ConfigKeyAssignees, v, AssigneesNative, AssigneesLabels)
+	}
+	remote, err := b.impl.(RemoteBridge).NewRemote(ctx, b.repo, conf)
+	if err != nil {
+		return nil, err
 	}
 	return NewEngine(ctx, b.repo, remote, opts)
 }

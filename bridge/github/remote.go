@@ -40,7 +40,12 @@ func (g *Github) NewRemote(ctx context.Context, repo *cache.RepoCache, conf core
 	for _, cred := range creds {
 		tokens = append(tokens, cred.(*auth.Token))
 	}
-	return newRemote(ctx, conf[confKeyOwner], conf[confKeyProject], conf[confKeyDefaultLogin], tokens, graphqlClient)
+	r, err := newRemote(ctx, conf[confKeyOwner], conf[confKeyProject], conf[confKeyDefaultLogin], tokens, graphqlClient)
+	if err != nil {
+		return nil, err
+	}
+	r.labelAssignees = conf[core.ConfigKeyAssignees] == core.AssigneesLabels
+	return r, nil
 }
 
 func graphqlClient(token *auth.Token) Client {
@@ -62,6 +67,9 @@ type remote struct {
 	// createLabel creates a label and returns its id: GitHub creates labels
 	// with its REST API only.
 	createLabel func(ctx context.Context, name, color string) (string, error)
+	// labelAssignees holds git-bug's assignees as labels on GitHub too
+	// (core.AssigneesLabels), not as its assignees.
+	labelAssignees bool
 
 	mu     sync.Mutex
 	repoID string
@@ -112,7 +120,7 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 		// stops the mediator if the caller stops early
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		build(NewImportMediator(ctx, r.reader, r.owner, r.project, since), yield)
+		build(NewImportMediator(ctx, r.reader, r.owner, r.project, since), r.labelAssignees, yield)
 	}
 }
 
@@ -124,7 +132,7 @@ func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var issue *core.Issue
-	build(newIssueMediator(ctx, r.reader, r.owner, r.project, number), func(i *core.Issue, e error) bool {
+	build(newIssueMediator(ctx, r.reader, r.owner, r.project, number), r.labelAssignees, func(i *core.Issue, e error) bool {
 		issue, err = i, e
 		return false
 	})
@@ -141,7 +149,7 @@ var trailingNumber = regexp.MustCompile(`\d+$`)
 
 // build yields the issues the mediator reads, each with its edits and
 // timeline.
-func build(mm *importMediator, yield func(*core.Issue, error) bool) {
+func build(mm *importMediator, labelAssignees bool, yield func(*core.Issue, error) bool) {
 	var cur *issueBuilder
 	for {
 		ev := mm.NextImportEvent()
@@ -160,6 +168,7 @@ func build(mm *importMediator, yield func(*core.Issue, error) bool) {
 				return
 			}
 			cur = newIssueBuilder(ev.issue)
+			cur.labelAssignees = labelAssignees
 		case IssueEditEvent:
 			cur.edit("", ev.userContentEdit)
 		case TimelineEvent:
@@ -196,6 +205,9 @@ type issueBuilder struct {
 	renamed bool
 	// GitHub's labels and assignees, the issue's labels
 	labels, assignees []string
+	// labelAssignees holds assignees as labels: those GitHub assigns are sent
+	// again, not those labeled
+	labelAssignees bool
 }
 
 func newIssueBuilder(i issue) *issueBuilder {
@@ -345,9 +357,10 @@ func (b *issueBuilder) touch(t time.Time) {
 
 func (b *issueBuilder) finish() *core.Issue {
 	b.issue.Labels = b.issueLabels()
-	// the assignees labeled the old way, before git-bug synced GitHub's
+	// the assignees GitHub holds the other way: labeled the old way, before
+	// git-bug synced GitHub's, or with labelAssignees assigned
 	for _, l := range b.issue.Labels {
-		if _, ok := assigneeLogin(l); ok && slices.Contains(b.labels, l) {
+		if _, ok := assigneeLogin(l); ok && slices.Contains(b.labels, l) != b.labelAssignees {
 			b.issue.Resend = append(b.issue.Resend, l)
 		}
 	}
@@ -435,12 +448,16 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 }
 
 // ChangeLabels adds labels, creating the missing ones, then removes labels.
-// An assignee:<login> label is an assignee on GitHub, never a label: one
+// An assignee:<login> label is an assignee on GitHub, not a label: one
 // labeled the old way loses the label once assigned. Those GitHub can't
-// assign are refused, and keep their old way's label.
+// assign are refused, and keep their old way's label. With labelAssignees,
+// it is a label for anyone, and comes off GitHub's assignees.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
 	assign, added := splitAssignees(added)
 	unassign, removed := splitAssignees(removed)
+	if r.labelAssignees {
+		added = append(added, assign...)
+	}
 	add, err := r.labelIDs(ctx, added, true)
 	if err != nil {
 		return err
@@ -454,7 +471,14 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 	}
 
 	var refused core.RefusedLabels
-	if len(assign) > 0 {
+	switch {
+	case r.labelAssignees && len(assign) > 0:
+		// ponytail: unassigns each one labeled, assigned on GitHub or not,
+		// two calls each; one GitHub won't find, as a bot, stays assigned
+		if _, _, err := r.assign(ctx, as, issue, assign, false); err != nil {
+			return err
+		}
+	case len(assign) > 0:
 		assigned, _, err := r.assign(ctx, as, issue, assign, true)
 		if err != nil {
 			return err
