@@ -159,8 +159,9 @@ spec stays the authority.
   to `addAssigneesToAssignable` and `removeAssigneesFromAssignable`. The
   engine merges them as labels, so person by person. A GitHub change that
   leaves the labels as they were (assigning someone labeled the old way, or
-  removing that label then) is no event. *If wrong:* nothing for the
-  engine; GitLab maps its own when it comes.
+  removing that label then) is no event. One rule both ways: the prefix in
+  any case, kept as spelled, and a login; `assignee:` alone is a label.
+  *If wrong:* nothing for the engine; GitLab maps its own when it comes.
 - **A login GitHub can't assign keeps its label in git-bug, with a warning**:
   GitHub silently leaves out who has no access to the repository, so the
   adapter reads the assignees back (logins compared without case), and

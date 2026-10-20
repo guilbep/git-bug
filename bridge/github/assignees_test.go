@@ -98,6 +98,23 @@ func TestGithubChangeLabelsAssigns(t *testing.T) {
 	require.Empty(t, assignees)
 }
 
+// One rule both ways: an assignee's label has a login, and its prefix in any
+// case; it is kept as spelled. Without a login, it is a label.
+func TestGithubAssigneeLabelSpellings(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	g.fake.unassignable["eve"] = true
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	alice.SetLabels(ref, []string{"Assignee:carol", "assignee:"})
+	require.Equal(t, []string{"Assignee:carol"}, g.Issue(ref.Number).Resend)
+
+	err := g.ChangeLabels(context.Background(), g.accounts[0], ref, []string{"ASSIGNEE:bob", "Assignee:carol", "Assignee:eve"}, nil)
+	require.Equal(t, core.RefusedLabels{"Assignee:eve"}, err)
+	labels, assignees := g.held(ref)
+	require.Equal(t, []string{"assignee:"}, labels)
+	require.Equal(t, []string{"bob", "carol"}, assignees)
+}
+
 // Sent again, an old way's label comes off the issue once its login is
 // assigned, and stays when GitHub can't assign it.
 func TestGithubChangeLabelsMovesOldWayLabels(t *testing.T) {

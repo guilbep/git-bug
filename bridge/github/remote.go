@@ -180,6 +180,15 @@ func build(mm *importMediator, yield func(*core.Issue, error) bool) {
 // assigneeLabel prefixes the label git-bug holds a GitHub assignee as.
 const assigneeLabel = "assignee:"
 
+// assigneeLogin returns the login of an assignee's label, its prefix in any
+// case. One without a login is a label. Import and export both go by it.
+func assigneeLogin(label string) (string, bool) {
+	if len(label) <= len(assigneeLabel) || !strings.EqualFold(label[:len(assigneeLabel)], assigneeLabel) {
+		return "", false
+	}
+	return label[len(assigneeLabel):], true
+}
+
 // issueBuilder turns the events of the import mediator into an issue.
 type issueBuilder struct {
 	issue   *core.Issue
@@ -338,7 +347,7 @@ func (b *issueBuilder) finish() *core.Issue {
 	b.issue.Labels = b.issueLabels()
 	// the assignees labeled the old way, before git-bug synced GitHub's
 	for _, l := range b.issue.Labels {
-		if strings.HasPrefix(l, assigneeLabel) && slices.Contains(b.labels, l) {
+		if _, ok := assigneeLogin(l); ok && slices.Contains(b.labels, l) {
 			b.issue.Resend = append(b.issue.Resend, l)
 		}
 	}
@@ -450,11 +459,12 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 		if err != nil {
 			return err
 		}
-		for _, login := range assign {
+		for _, l := range assign {
+			login, _ := assigneeLogin(l)
 			if slices.ContainsFunc(assigned, func(a string) bool { return strings.EqualFold(a, login) }) {
-				removed = append(removed, assigneeLabel+login)
+				removed = append(removed, l)
 			} else {
-				refused = append(refused, assigneeLabel+login)
+				refused = append(refused, l)
 			}
 		}
 	}
@@ -463,13 +473,13 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 		if err != nil {
 			return err
 		}
-		for _, login := range unassign {
-			removed = append(removed, assigneeLabel+login)
+		for _, l := range unassign {
+			removed = append(removed, l)
 			// ponytail: one without a user, like a bot, may still be assigned;
 			// refused even when it was only labeled the old way, which one
 			// more pull of that label's removal settles
-			if slices.Contains(unknown, login) {
-				refused = append(refused, assigneeLabel+login)
+			if slices.Contains(unknown, l) {
+				refused = append(refused, l)
 			}
 		}
 	}
@@ -493,33 +503,33 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 	return nil
 }
 
-// splitAssignees returns the logins of assignee:<login> labels, and the other
-// labels.
-func splitAssignees(labels []string) (logins, others []string) {
+// splitAssignees returns the assignees' labels, and the other labels.
+func splitAssignees(labels []string) (assignees, others []string) {
 	for _, l := range labels {
-		if login, ok := strings.CutPrefix(l, assigneeLabel); ok && login != "" {
-			logins = append(logins, login)
+		if _, ok := assigneeLogin(l); ok {
+			assignees = append(assignees, l)
 		} else {
 			others = append(others, l)
 		}
 	}
-	return logins, others
+	return assignees, others
 }
 
-// assign adds logins to the issue's assignees, or removes them, and returns
-// its assignees then, and the logins without a user, left out: a bot's too,
-// as user(login:) finds no bot. GitHub silently leaves out those it can't
-// assign.
-func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, logins []string, add bool) (assigned, unknown []string, err error) {
+// assign adds the logins of assignees' labels to the issue's assignees, or
+// removes them, and returns its assignees then, and the labels of logins
+// without a user, left out: a bot's too, as user(login:) finds no bot.
+// GitHub silently leaves out those it can't assign.
+func (r *remote) assign(ctx context.Context, as core.Account, issue core.Ref, labels []string, add bool) (assigned, unknown []string, err error) {
 	var ids []githubv4.ID
-	for _, login := range logins {
+	for _, l := range labels {
+		login, _ := assigneeLogin(l)
 		var q userIDQuery
 		// no retries: a login without a user is an answer
 		err := mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
 			return r.reader.sc.Query(ctx, &q, varmap{"login": githubv4.String(login)})
 		}, func(string) {}))
 		if errors.Is(err, core.ErrGone) || err == nil && q.User.ID == nil {
-			unknown = append(unknown, login)
+			unknown = append(unknown, l)
 			continue
 		}
 		if err != nil {
