@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/git-bug/git-bug/entities/common"
@@ -21,6 +22,17 @@ var ErrGone = errors.New("deleted on the forge")
 // ErrRefused is returned when the forge refuses a write for good, like the
 // edit of someone else's comment on GitLab.
 var ErrRefused = errors.New("refused by the forge")
+
+// RefusedLabels is returned by ChangeLabels when the forge took the change
+// but these added labels, like assignees GitHub can't assign. It is an
+// ErrRefused.
+type RefusedLabels []string
+
+func (r RefusedLabels) Error() string {
+	return fmt.Sprintf("%s: labels %s", ErrRefused, strings.Join(r, ", "))
+}
+
+func (r RefusedLabels) Is(target error) bool { return target == ErrRefused }
 
 // ErrRateLimited is returned by a Remote when the forge asks to slow down.
 type ErrRateLimited struct {
@@ -118,7 +130,11 @@ type Issue struct {
 	BodyUpdated time.Time
 	Status      common.Status
 	Labels      []string
-	Comments    []Comment
+	// Resend are the labels the forge holds the old way, sent again for it
+	// to hold them the new way, like GitHub's assignee:<login> labels, now
+	// its assignees.
+	Resend   []string
+	Comments []Comment
 	// Events are time ordered.
 	Events []Event
 }

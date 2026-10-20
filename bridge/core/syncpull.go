@@ -248,6 +248,9 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 		// some may be echoes of pushes, claimed instead of pulled
 		out <- NewImportNothing(b.Id(), fmt.Sprintf("would pull up to %d changes from %s", n, issue.URL))
 	}
+	if len(issue.Resend) > 0 {
+		out <- NewImportNothing(b.Id(), "would send again: labels +"+strings.Join(issue.Resend, " +")+", held by the forge the old way")
+	}
 }
 
 // pickDuplicate returns, of bugs that are the same forge issue, the one
@@ -665,7 +668,9 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 	ls := slot{kind: slotLabels}
 	baseValue, _, ok := base(snap, e.remote, ls)
 	remote := cleanLabels(issue.Labels)
-	forgeChanged := ok && labelsValue(remote) != baseValue
+	// the labels the forge holds the old way: as not seen, a push sends them
+	seen := labelsValue(slices.DeleteFunc(slices.Clone(remote), func(l string) bool { return slices.Contains(issue.Resend, l) }))
+	forgeChanged := ok && seen != baseValue
 	changed := !ok || labelsValue(labelStrings(snap.Labels)) != baseValue
 	if !skip(ls, forgeChanged, changed) {
 		was := splitLabels(baseValue)
@@ -684,14 +689,14 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 			}
 		}
 		if len(added) == 0 && len(removed) == 0 {
-			record(lastSlotOp(snap, ls).Id(), string(slotLabels), labelsValue(remote))
+			record(lastSlotOp(snap, ls).Id(), string(slotLabels), seen)
 		} else {
 			author, unix, err := by(issue.Author, changedAt(issue, ls, issue.Updated), forgeChanged)
 			if err != nil {
 				return err
 			}
 			op, err := b.ForceChangeLabelsRaw(author, unix, added, removed,
-				map[string]string{e.key(string(slotLabels)): labelsValue(remote)})
+				map[string]string{e.key(string(slotLabels)): seen})
 			if err != nil {
 				return err
 			}

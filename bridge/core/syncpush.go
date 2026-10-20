@@ -437,6 +437,15 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			continue
 		}
 		err := e.call(ctx, func() error { return sc.write(as) })
+		records := map[string]string{e.key("pushed"): now, e.key(string(sc.kind)): sc.local}
+		if refused, ok := errors.AsType[RefusedLabels](err); ok {
+			// the others went through: the forge saw the labels without these
+			out <- NewExportWarning(err, b.Id())
+			seen := slices.DeleteFunc(labelStrings(snap.Labels), func(l string) bool { return slices.Contains(refused, l) })
+			records[e.key(string(sc.kind))] = labelsValue(seen)
+			records[e.key("refused")] = "1"
+			err = nil
+		}
 		if errors.Is(err, ErrRefused) {
 			if err := e.refused(b, local.Id(), err, out); err != nil {
 				return err
@@ -446,10 +455,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		if err != nil {
 			return err
 		}
-		_, err = b.SetMetadata(local.Id(), map[string]string{
-			e.key("pushed"):        now,
-			e.key(string(sc.kind)): sc.local,
-		})
+		_, err = b.SetMetadata(local.Id(), records)
 		if err != nil {
 			return err
 		}

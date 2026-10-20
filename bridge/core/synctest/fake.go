@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,13 @@ type Quirks struct {
 	FailAfterWrite bool
 	// RateLimitOnce: the next write is refused with ErrRateLimited.
 	RateLimitOnce bool
+	// RefuseLabels: ChangeLabels doesn't add these, and returns
+	// RefusedLabels (assignees GitHub can't assign).
+	RefuseLabels []string
+	// OldLabels: the labels of this prefix that people add on the forge are
+	// held the old way, until ChangeLabels adds them (GitHub's assignee:*
+	// labels).
+	OldLabels string
 }
 
 var _ Forge = &Fake{}
@@ -192,15 +200,31 @@ func (f *Fake) SetTitle(_ context.Context, as core.Account, issue core.Ref, titl
 }
 
 func (f *Fake) ChangeLabels(_ context.Context, as core.Account, ref core.Ref, added, removed []string) error {
-	return f.write(func() error {
+	var refused core.RefusedLabels
+	err := f.write(func() error {
 		issue, err := f.find(ref)
 		if err != nil {
 			return err
 		}
+		added = slices.DeleteFunc(slices.Clone(added), func(l string) bool {
+			if slices.Contains(f.quirks.RefuseLabels, l) {
+				refused = append(refused, l)
+				return true
+			}
+			return false
+		})
+		// now held the new way
+		issue.Resend = slices.DeleteFunc(issue.Resend, func(l string) bool {
+			return slices.Contains(added, l) || slices.Contains(removed, l)
+		})
 		labels := slices.Compact(slices.Sorted(slices.Values(slices.Concat(issue.Labels, added))))
 		labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(removed, l) })
 		return f.setLabels(as.User, ref, labels)
 	})
+	if err == nil && refused != nil {
+		return refused
+	}
+	return err
 }
 
 func (f *Fake) PullComments(_ context.Context, pr string) ([]core.PullComment, error) {
@@ -527,6 +551,7 @@ func (f *Fake) setLabels(u core.User, ref core.Ref, labels []string) error {
 func (i *fakeIssue) clone() *core.Issue {
 	c := i.Issue
 	c.Labels = slices.Clone(i.Labels)
+	c.Resend = slices.Clone(i.Resend)
 	c.Comments = slices.Clone(i.Comments)
 	c.Events = slices.Clone(i.Events)
 	return &c
@@ -568,7 +593,19 @@ func (a actor) SetTitle(issue core.Ref, title string) {
 }
 
 func (a actor) SetLabels(issue core.Ref, labels []string) {
-	a.do(func() error { return a.f.setLabels(a.u, issue, labels) })
+	a.do(func() error {
+		i, err := a.f.find(issue)
+		if err != nil {
+			return err
+		}
+		i.Resend = slices.DeleteFunc(i.Resend, func(l string) bool { return !slices.Contains(labels, l) })
+		for _, l := range labels {
+			if a.f.quirks.OldLabels != "" && strings.HasPrefix(l, a.f.quirks.OldLabels) && !slices.Contains(i.Labels, l) {
+				i.Resend = append(i.Resend, l)
+			}
+		}
+		return a.f.setLabels(a.u, issue, labels)
+	})
 }
 
 func (a actor) Delete(issue core.Ref) {
