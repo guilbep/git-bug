@@ -185,6 +185,20 @@ spec stays the authority.
   No automatic full pull: nothing goes out unasked. *If wrong:* until then,
   an issue's assignees come in, and its old labels move, only when it
   changes on GitHub.
+- **GitLab: native assignees, translated per person** (decided with the
+  user, 2026-10-20; not built). `assignee:<x>` names a git-bug person, and
+  each forge gets that person's own account there: the engine translates,
+  as it does `#n` in titles, through the identity's user id on that forge
+  (`sync:<instance>:user`) or the bridge's `login-<identity>` link. A
+  person unknown on a forge is refused there (label kept, one warning): a
+  login is never sent as is to another forge, where it may be someone
+  else. gitlab.epfl.ch is the free edition, one assignee per issue: the
+  others are refused the same way. This moves the GitHub adapter's union of
+  assignees and old labels into the engine, as an old label holds git-bug's
+  value, not necessarily a GitHub login. *Until then:* with GitHub and
+  GitLab in one sync, a GitLab login in an `assignee:` label is sent to
+  GitHub as that GitHub login, and GitHub assignees reach GitLab as plain
+  labels.
 - **A login is written as GitHub spells it**: one written in another case in
   git-bug is assigned, then the next pull replaces its label with GitHub's
   spelling, in two operations (traced, not tested: the fake GitHub keeps

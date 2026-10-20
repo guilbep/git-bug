@@ -141,7 +141,9 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 - [ ] Upgrading a synced repository: `git bug bridge pull <bridge>
       --no-resume` once (guilbep/git-board's own board), in the release
       notes of the next tag.
-- [ ] GitLab assignees the same way.
+- [ ] GitLab native assignees, every forge's login translated per person
+      (sync-decisions.md, Assignees): needed before a sync of GitHub and
+      GitLab together carries assignees, as the wiki's would.
 - [ ] Issue numbers of git-bug's own, to name an issue across forges:
       discussed apart, not built.
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
