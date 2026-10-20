@@ -257,7 +257,7 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 		}
 	}
 	if len(resend) > 0 {
-		out <- NewImportNothing(id, "would send again: labels +"+strings.Join(resend, " +")+", held by the forge the old way, of "+issue.URL)
+		out <- NewImportNothing(id, "would send again: labels +"+strings.Join(resend, " +")+", held by the forge the other way, of "+issue.URL)
 	}
 	if b == nil {
 		out <- NewImportNothing("", "would import issue "+issue.URL)

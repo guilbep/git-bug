@@ -30,8 +30,9 @@ Run it from a single place, for example a CI job:
 
 git-bug's assignee:<login> labels are GitHub's assignees. To hold them as
 labels on GitHub instead, for a project that wants several or people
-without access, set on every clone (they would undo each other's syncs
-otherwise; git-board sets it from the project's configuration):
+without access, set it in every clone that syncs, a CI job's included:
+clones holding them differently undo each other's syncs. git-board gives
+its own runs the project's setting, but this command reads only the key:
 
     git config git-bug.bridge.<name>.assignees labels
 
