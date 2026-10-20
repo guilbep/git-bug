@@ -108,23 +108,28 @@ func TestSyncRefusedOldWayLabelStays(t *testing.T) {
 	require.Equal(t, []string{"assignee:eve"}, f.Issue(issue.Number).Labels)
 }
 
-// A dry run tells which labels a sync would send again.
+// A dry run tells which labels a sync would send again, of an issue to
+// import too.
 func TestDryRunNamesOldWayLabels(t *testing.T) {
 	repo := newRepo(t)
 	f := synctest.NewFake(key, "fake.test", synctest.Quirks{OldLabels: "assignee:"}, bot)
 	alice := f.UserAct("alice")
 	issue := alice.CreateIssue("title", "body")
 	alice.SetLabels(issue, []string{"assignee:bob"})
-	pull(t, repo, f)
 
-	dry, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
-		Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
-	})
-	require.NoError(t, err)
-	var planned []string
-	for r := range dry.Pull(context.Background(), time.Time{}) {
-		planned = append(planned, r.String())
+	planned := func() string {
+		dry, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
+			Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", DryRun: true,
+		})
+		require.NoError(t, err)
+		var res []string
+		for r := range dry.Pull(context.Background(), time.Time{}) {
+			res = append(res, r.String())
+		}
+		return strings.Join(res, "\n")
 	}
-	require.Contains(t, strings.Join(planned, "\n"), "would send again: labels +assignee:bob")
+	require.Contains(t, planned(), "would send again: labels +assignee:bob")
+	pull(t, repo, f)
+	require.Contains(t, planned(), "would send again: labels +assignee:bob")
 	require.Equal(t, []string{"assignee:bob"}, f.Issue(issue.Number).Resend, "nothing sent")
 }

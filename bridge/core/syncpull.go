@@ -228,6 +228,13 @@ func (e *Engine) marker(issue *Issue) (entity.Id, bool) {
 
 // planPull reports what pulling an issue would do, without doing it.
 func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResult) {
+	var id entity.Id
+	if b != nil {
+		id = b.Id()
+	}
+	if len(issue.Resend) > 0 {
+		out <- NewImportNothing(id, "would send again: labels +"+strings.Join(issue.Resend, " +")+", held by the forge the old way, of "+issue.URL)
+	}
 	if b == nil {
 		out <- NewImportNothing("", "would import issue "+issue.URL)
 		return
@@ -247,9 +254,6 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 	if n > 0 {
 		// some may be echoes of pushes, claimed instead of pulled
 		out <- NewImportNothing(b.Id(), fmt.Sprintf("would pull up to %d changes from %s", n, issue.URL))
-	}
-	if len(issue.Resend) > 0 {
-		out <- NewImportNothing(b.Id(), "would send again: labels +"+strings.Join(issue.Resend, " +")+", held by the forge the old way")
 	}
 }
 
