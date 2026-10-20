@@ -218,3 +218,31 @@ func TestGithubSyncUnassignBot(t *testing.T) {
 	_, assignees := g.held(ref)
 	require.Equal(t, []string{"Copilot"}, assignees)
 }
+
+// An old way's label of a login without a user, removed in git-bug, comes
+// off GitHub; refused as a bot would be, it settles at the next sync.
+func TestGithubSyncRemovesOldWayLabelWithoutUser(t *testing.T) {
+	g := newGithubForge(t, "owner")
+	g.fake.noUser["nobody"] = true
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	alice.SetLabels(ref, []string{"assignee:nobody"})
+	backend, sync := syncing(t, g)
+	require.Equal(t, 1, sync(), "can't be assigned")
+
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels(nil, []string{"assignee:nobody"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Equal(t, 1, sync())
+	require.Zero(t, sync())
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	require.Empty(t, b.Snapshot().Labels)
+	labels, assignees := g.held(ref)
+	require.Empty(t, labels)
+	require.Empty(t, assignees)
+}
