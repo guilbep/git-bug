@@ -141,6 +141,11 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 - [ ] Upgrading a synced repository: `git bug bridge pull <bridge>
       --no-resume` once (guilbep/git-board's own board), in the release
       notes of the next tag.
+- [ ] An old way's label moves only with `sync=true`: the pull records it
+      as its GitHub author's change, and without their token the push
+      skips it (syncpush.go, `accountFor`).
+- [ ] A FORBIDDEN from GitHub's assign mutation refuses the whole label
+      change, its ordinary labels too, not just the assignees.
 - [ ] GitLab native assignees, every forge's login translated per person
       (sync-decisions.md, Assignees): needed before a sync of GitHub and
       GitLab together carries assignees, as the wiki's would.
