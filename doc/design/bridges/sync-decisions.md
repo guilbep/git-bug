@@ -168,8 +168,11 @@ spec stays the authority.
   returns `RefusedLabels` for the missing ones, a login without a user
   included. The engine records the other labels as sent and the refused
   ones as not seen, so the next pull doesn't drop them, and marks the
-  change refused: it is tried again at the next label change of the issue,
-  on either side. Unassigning a login without a user, like a bot (GitHub's
+  change refused, with the way the forge holds assignees then
+  (`refused-as`): the issue's labels wait until a label change on either
+  side, or a pull recording something new about them (a move to send), or
+  the forge holding assignees the other way (as labels, it takes them).
+  Unassigning a login without a user, like a bot (GitHub's
   `user(login:)` finds none), is refused the same way: the engine records
   the label as the forge's, so the next pull doesn't put it back. *If
   wrong:* the warning comes back with each label change of that issue on

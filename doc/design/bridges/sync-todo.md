@@ -149,6 +149,11 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
 - [x] Assignees as labels per project: bridge key `assignees = labels`,
       `core.WithAssignees` for git-board's `.git-board.toml` (git-board to
       wire it: pass it at every run).
+      Live on guilbep/git-bug-sync-test #11 and #12 (2026-10-20): native →
+      labels moved guilbep's assignments to labels and sent guilbep-gbtest,
+      refused before, as one; back to native reassigned guilbep, kept
+      torvalds and guilbep-gbtest as labels (one warning); full pull and
+      sync twice after each switch: quiet.
 - [ ] `kind:` ↔ GitHub issue types, `sprint:` ↔ Projects iteration (GitHub)
       or milestones (GitLab): weigh each (sync-decisions.md, Assignees).
 - [ ] GitLab native assignees, every forge's login translated per person
