@@ -139,5 +139,48 @@ func TestDryRunNamesOldWayLabels(t *testing.T) {
 	require.Contains(t, planned(t, repo, f), "would send again: labels +assignee:bob")
 	pull(t, repo, f)
 	require.Contains(t, planned(t, repo, f), "would send again: labels +assignee:bob")
-	require.Equal(t, []string{"assignee:bob"}, f.Issue(issue.Number).Resend, "nothing sent")
+	alice.SetLabels(issue, []string{"assignee:bob", "assignee:carol"})
+	require.Contains(t, planned(t, repo, f), "would send again: labels +assignee:bob +assignee:carol", "one still to pull too")
+	require.Equal(t, []string{"assignee:bob", "assignee:carol"}, f.Issue(issue.Number).Resend, "nothing sent")
+}
+
+// Removed in git-bug before it was sent again, a label the forge holds the
+// old way comes off the forge.
+func TestSyncRemovesOldWayLabel(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{OldLabels: "assignee:"}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.SetLabels(issue, []string{"a", "assignee:bob"})
+	pull(t, repo, f)
+
+	b := onlyBug(t, repo)
+	_, _, err := b.ChangeLabels(nil, []string{"assignee:bob"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.NotContains(t, planned(t, repo, f), "would send again")
+	sync(t, repo, f)
+	steady(t, repo, f)
+	require.Equal(t, []common.Label{"a"}, onlyBug(t, repo).Snapshot().Labels)
+	require.Equal(t, []string{"a"}, f.Issue(issue.Number).Labels)
+}
+
+// So does one the forge refused the new way.
+func TestSyncRemovesRefusedOldWayLabel(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{OldLabels: "assignee:", RefuseLabels: []string{"assignee:eve"}}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.SetLabels(issue, []string{"assignee:eve"})
+	sync(t, repo, f)
+
+	b := onlyBug(t, repo)
+	_, _, err := b.ChangeLabels(nil, []string{"assignee:eve"})
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.NotContains(t, planned(t, repo, f), "would send again")
+	sync(t, repo, f)
+	steady(t, repo, f)
+	require.Empty(t, onlyBug(t, repo).Snapshot().Labels)
+	require.Empty(t, f.Issue(issue.Number).Labels)
 }

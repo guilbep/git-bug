@@ -229,15 +229,25 @@ func (e *Engine) marker(issue *Issue) (entity.Id, bool) {
 // planPull reports what pulling an issue would do, without doing it.
 func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResult) {
 	var id entity.Id
-	resend := len(issue.Resend) > 0
+	resend := issue.Resend
 	if b != nil {
 		id = b.Id()
-		// the push skips refused labels
-		_, refused := lastSlotOp(b.Snapshot(), slot{kind: slotLabels}).GetMetadata(e.key("refused"))
-		resend = resend && !refused
+		snap := b.Snapshot()
+		// as the push: those git-bug has once the forge's events are pulled,
+		// and refused labels wait
+		has := labelStrings(snap.Labels)
+		for _, ev := range issue.Events {
+			if e.findOp(snap, ev.ID) == nil {
+				has = append(has, ev.Added...)
+			}
+		}
+		resend = resent(issue, has)
+		if _, refused := lastSlotOp(snap, slot{kind: slotLabels}).GetMetadata(e.key("refused")); refused {
+			resend = nil
+		}
 	}
-	if resend {
-		out <- NewImportNothing(id, "would send again: labels +"+strings.Join(issue.Resend, " +")+", held by the forge the old way, of "+issue.URL)
+	if len(resend) > 0 {
+		out <- NewImportNothing(id, "would send again: labels +"+strings.Join(resend, " +")+", held by the forge the old way, of "+issue.URL)
 	}
 	if b == nil {
 		out <- NewImportNothing("", "would import issue "+issue.URL)
@@ -259,6 +269,12 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 		// some may be echoes of pushes, claimed instead of pulled
 		out <- NewImportNothing(b.Id(), fmt.Sprintf("would pull up to %d changes from %s", n, issue.URL))
 	}
+}
+
+// resent returns the labels the forge holds the old way that git-bug has,
+// which a push sends again.
+func resent(issue *Issue, has []string) []string {
+	return slices.DeleteFunc(slices.Clone(issue.Resend), func(l string) bool { return !slices.Contains(has, l) })
 }
 
 // pickDuplicate returns, of bugs that are the same forge issue, the one
@@ -676,14 +692,21 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 	ls := slot{kind: slotLabels}
 	baseValue, _, ok := base(snap, e.remote, ls)
 	remote := cleanLabels(issue.Labels)
-	// the labels the forge holds the old way: as not seen, a push sends them
-	seen := labelsValue(slices.DeleteFunc(slices.Clone(remote), func(l string) bool { return slices.Contains(issue.Resend, l) }))
+	// the labels the forge holds the old way that git-bug has: as not seen, a
+	// push sends them again; one git-bug removed, it removes
+	resend := resent(issue, labelStrings(snap.Labels))
+	seen := labelsValue(slices.DeleteFunc(slices.Clone(remote), func(l string) bool { return slices.Contains(resend, l) }))
 	forgeChanged := ok && seen != baseValue
 	changed := !ok || labelsValue(labelStrings(snap.Labels)) != baseValue
 	if !skip(ls, forgeChanged, changed) {
 		was := splitLabels(baseValue)
 		if e.theirs != nil {
 			was = snap.Labels
+		} else {
+			// the forge held them all along, whatever was recorded
+			for _, l := range issue.Resend {
+				was = append(was, common.Label(l))
+			}
 		}
 		var added, removed []string
 		for _, l := range remote {

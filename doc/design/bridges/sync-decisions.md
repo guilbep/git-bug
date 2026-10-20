@@ -171,11 +171,13 @@ spec stays the authority.
   on either side. *If wrong:* the warning comes back with each label change
   of that issue on GitHub.
 - **An `assignee:<login>` label already on GitHub (the old way) moves to the
-  assignees**: the adapter lists it in `Issue.Resend`; the pull records the
-  labels without it, so the push sends it again, and once its login is
-  assigned it comes off the issue. When GitHub can't assign it, the label
-  stays on GitHub as well: a clone that hasn't pulled the record of it
-  wouldn't drop it then. A dry run names the labels it would send again.
+  assignees**: the adapter lists it in `Issue.Resend`; while git-bug has
+  it, the pull records the labels without it, so the push sends it again,
+  and once its login is assigned it comes off the issue. Removed in
+  git-bug, it is recorded as seen, so the push removes it. When GitHub
+  can't assign it, the label stays on GitHub as well: a clone that hasn't
+  pulled the record of it wouldn't drop it then. A dry run names the labels
+  it would send again.
   *If wrong:* an old label of someone without access stays on GitHub; a
   clone without the record drops git-bug's label at its next pull.
 - **Upgrading reads every issue once, by hand**: a sync only lists the
