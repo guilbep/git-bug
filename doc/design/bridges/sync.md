@@ -176,6 +176,10 @@ type Remote interface {
   texts, and the events the forge exposes (comment added or edited, status,
   title, labels), each with its id, author and time. Events can be
   partial: what a forge doesn't report is caught by reconciling.
+  `Issue.Resend` names labels the forge holds an old way, which a push sends
+  again; `ChangeLabels` returns `RefusedLabels` for added labels the forge
+  didn't take. GitHub's assignees are both (see
+  [sync-decisions.md](sync-decisions.md#assignees)).
 - A forge with pull requests (GitHub) also implements `PullRemote`: their
   line comments, reviews and comments, and resolving a thread. The engine
   mirrors git-bug comments that `review:*` metadata anchors to them, never

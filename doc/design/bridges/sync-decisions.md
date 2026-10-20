@@ -149,6 +149,41 @@ spec stays the authority.
   as in a full sync. A change that adds and removes is two writes on
   GitHub, and Gitea takes one write per label removed.
 
+## Assignees
+
+- **A GitHub assignee is an `assignee:<login>` label in git-bug, and only an
+  assignee on GitHub** (decided with the git-board user, 2026-10-20): never
+  an `assignee:*` label there. The adapter alone maps them: an issue's
+  labels are GitHub's and its assignees as labels, read from
+  `AssignedEvent` and `UnassignedEvent`; `ChangeLabels` sends `assignee:*`
+  to `addAssigneesToAssignable` and `removeAssigneesFromAssignable`. The
+  engine merges them as labels, so person by person. A GitHub change that
+  leaves the labels as they were (assigning someone labeled the old way, or
+  removing that label then) is no event. *If wrong:* nothing for the
+  engine; GitLab maps its own when it comes.
+- **A login GitHub can't assign keeps its label in git-bug, with a warning**:
+  GitHub silently leaves out who has no access to the repository, so the
+  adapter reads the assignees back (logins compared without case), and
+  returns `RefusedLabels` for the missing ones, a login without a user
+  included. The engine records the other labels as sent and the refused
+  ones as not seen, so the next pull doesn't drop them, and marks the
+  change refused: it is tried again at the next label change of the issue,
+  on either side. *If wrong:* the warning comes back with each label change
+  of that issue on GitHub.
+- **An `assignee:<login>` label already on GitHub (the old way) moves to the
+  assignees**: the adapter lists it in `Issue.Resend`; the pull records the
+  labels without it, so the push sends it again, and once its login is
+  assigned it comes off the issue. When GitHub can't assign it, the label
+  stays on GitHub as well: a clone that hasn't pulled the record of it
+  wouldn't drop it then. A dry run names the labels it would send again.
+  *If wrong:* an old label of someone without access stays on GitHub; a
+  clone without the record drops git-bug's label at its next pull.
+- **A login is written as GitHub spells it**: one written in another case in
+  git-bug is assigned, then the next pull replaces its label with GitHub's
+  spelling, in two operations (traced, not tested: the fake GitHub keeps
+  logins as given). *If wrong:* two extra operations; git-board writes
+  logins as the forges give them.
+
 ## Rendering and identities
 
 - **`Render` takes the source forge's dialect and a reference rewriter**; the

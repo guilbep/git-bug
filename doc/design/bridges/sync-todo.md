@@ -130,6 +130,12 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       syncing it there, for good), `bridge take <id> <bridge>` (drop what
       wasn't sent there, keep the forge's version); core `Link`, `Unlink`,
       `Take` for git-board. Rulings in sync-decisions.md.
+- [x] GitHub assignees as `assignee:<login>` labels, both ways; GitHub's
+      old `assignee:*` labels moved to the assignees. Live on
+      guilbep/git-bug-sync-test #11 (2026-10-20): the old labels of
+      `guilbep` (moved) and `torvalds` (no access: kept, one warning); then
+      git-bug's and GitHub's own assignee changes; syncs after them quiet.
+- [ ] GitLab assignees the same way.
 - [ ] Issue numbers of git-bug's own, to name an issue across forges:
       discussed apart, not built.
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the
