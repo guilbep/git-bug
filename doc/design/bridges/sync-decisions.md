@@ -180,7 +180,11 @@ spec stays the authority.
   as `identitiesFor` finds people, the other way: the bridge's
   `login-<identity>` link, a token owner, the user id
   (`sync:<instance>:user`), then the bridge's legacy key. A name is never
-  sent as a login: on another forge, it may be someone else's.
+  sent as a login: on another forge, it may be someone else's. *If
+  wrong:* a legacy key names a kind of forge, not a server: an old
+  bridge's `gitlab-id` from another GitLab server would assign, and
+  notify, whoever has that id on this one (as it already finds authors;
+  this repository's GitLab is only ever gitlab.epfl.ch).
 - **A name of no one on a forge is refused there**: no identity has it
   (like a label git-board's picker wrote for someone never pulled: the
   user's ruling, 2026-10-21), or it has no account there. The label stays
@@ -196,11 +200,13 @@ spec stays the authority.
 - **A name of several people is refused everywhere, unless they're one user
   on the forge**: two identities with one login (two people sharing it,
   or one person seen on both forges and never linked) can't tell which is
-  meant, and duplicates the old bridges left of one person can. Assigning
-  and unassigning are both refused. *If wrong:* such people's assignments
-  stay in git-bug until their identities are told apart; nothing in
-  git-bug merges two identities yet. Duplicates found by different keys
-  (a user id and a legacy login) count as two.
+  meant; identities found as one user of the forge, by id or by login
+  (duplicates the old bridges left, or the user's own made by hand beside
+  the one their token owner got), are that user. Assigning and unassigning
+  are both refused. *If wrong:* such people's assignments stay in git-bug
+  until their identities are told apart; nothing in git-bug merges two
+  identities yet. One found by user id only and the other by login only
+  (a link, a GitHub legacy login) count as two.
 - **A forge's refusal is read back**: GitHub silently leaves out who has no
   access, GitLab's free edition all but one, and both drop users that
   aren't; the adapters read the assignees back after writing and return

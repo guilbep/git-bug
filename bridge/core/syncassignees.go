@@ -116,10 +116,16 @@ func (e *Engine) accountOf(name string) (User, string) {
 	switch {
 	case len(accounts) == 0:
 		return User{}, "no one on " + e.remote.Instance()
-	case len(accounts) < people || slices.ContainsFunc(accounts, func(u User) bool { return u != accounts[0] }):
+	case len(accounts) < people || slices.ContainsFunc(accounts, func(u User) bool { return !sameUser(u, accounts[0]) }):
 		return User{}, severalPeople
 	}
 	return accounts[0], ""
+}
+
+// sameUser tells whether two users of a forge are one, by id or login.
+// ponytail: one known by id and the other by login only, they're two
+func sameUser(a, b User) bool {
+	return a.ID != "" && a.ID == b.ID || a.Login != "" && strings.EqualFold(a.Login, b.Login)
 }
 
 // accountOfIdentity returns an identity's user on this forge, as

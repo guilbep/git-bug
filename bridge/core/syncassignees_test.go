@@ -529,3 +529,23 @@ func TestSyncAssigneeLabelSpellings(t *testing.T) {
 	require.Equal(t, []string{"carol"}, logins(f.Issue(ref.Number).Assignees))
 	require.Equal(t, []string{"assignee:"}, f.Issue(ref.Number).Labels)
 }
+
+// One person with two identities of one name, found as one user on the
+// forge by different keys, is that user: the user's own identity, made by
+// hand and linked, beside the one the forge's token owner got.
+func TestSyncAssigneeOfTwoIdentitiesOfOneUser(t *testing.T) {
+	pg := core.Account{User: core.User{ID: "u-pg", Login: "pg", Name: "PG"}}
+	gh := synctest.NewFake("gh.test/1", "gh.test", synctest.Quirks{}, bot, pg)
+	p := newPeople(t, gh)
+	ref := gh.Assignee("alice").CreateIssue("title", "body")
+	require.Zero(t, p.sync())
+	p.person("pg")
+	me, err := p.repo.Identities().NewRaw("Pierre", "", "", "", nil, map[string]string{"github-login": "pg"})
+	require.NoError(t, err)
+	p.link(gh, "pg", me.Id())
+
+	p.changeLabels("title", []string{"assignee:pg"}, nil)
+	require.Zero(t, p.sync())
+	require.Equal(t, []string{"pg"}, logins(gh.Issue(ref.Number).Assignees))
+	p.steady()
+}
