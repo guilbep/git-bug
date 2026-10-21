@@ -37,8 +37,11 @@ type SyncOptions struct {
 	// for remotes with pull requests (PullRemote: GitHub) only, once per bug
 	// at each pull. Nil imports none. What git-bug writes is sent without it.
 	PullsOf func(bug entity.Id) []string
-	// Assignees, when set, is how the forge holds assignees, over the
-	// bridge's ConfigKeyAssignees.
+	// Config gives bridge keys over each clone's: how the forge holds
+	// assignees, kinds and sprints, as git-board has them shared.
+	Config map[string]string
+	// Assignees is how the forge holds assignees, from the bridge's
+	// ConfigKeyAssignees once merged with Config.
 	Assignees string
 }
 
@@ -52,12 +55,21 @@ func WithPullsOf(f func(bug entity.Id) []string) Option {
 	return func(o *SyncOptions) { o.PullsOf = f }
 }
 
-// WithAssignees sets how the forges hold assignees, AssigneesNative or
-// AssigneesLabels, over their bridges' configuration: git-board gives it
-// from the project's, which every clone shares.
-func WithAssignees(mode string) Option {
-	return func(o *SyncOptions) { o.Assignees = mode }
+// WithConfig sets a bridge key for the run, over the bridge's configuration:
+// git-board gives how forges hold assignees, kinds and sprints from the
+// project's, which every clone shares.
+func WithConfig(key, value string) Option {
+	return func(o *SyncOptions) {
+		if o.Config == nil {
+			o.Config = map[string]string{}
+		}
+		o.Config[key] = value
+	}
 }
+
+// WithAssignees sets how the forges hold assignees, ModeNative or
+// ModeLabels, over their bridges' configuration.
+func WithAssignees(mode string) Option { return WithConfig(ConfigKeyAssignees, mode) }
 
 // Engine syncs a git-bug repository with one forge project.
 // See doc/design/bridges/sync.md.
