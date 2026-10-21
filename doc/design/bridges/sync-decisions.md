@@ -309,11 +309,15 @@ spec stays the authority.
   comes off once the type is set. *If
   wrong:* until the full pull, co2's 65 typed issues get their kinds only
   when they change on GitHub.
-- **A project can switch types off with `kinds = labels`** (default
-  `native`), like `assignees`. In that mode the fork ignores types, as
-  before: it neither reads them nor clears those people set. GitLab and
-  Gitea have no equivalent, so `kind:` stays a label there. *If wrong:* a
-  project in labels mode doesn't see in git-bug the types set on GitHub.
+- **A project can hold its kinds as labels with `kinds = labels`** (default
+  `native`), which works as `assignees = labels` does. The fork still reads
+  types, and moves them to labels: the push adds the label and clears the
+  type. Switching moves them once each way. Decided with the user,
+  2026-10-21: a mode ignoring types would lose kinds, as the pull rebuilds
+  labels from what the forge holds, so a kind held as a type would seem
+  removed. GitLab and Gitea have no equivalent, so a kind stays a label
+  there. *If wrong:* in labels mode the fork clears types people set on
+  GitHub.
 - **On GitHub the fork leaves `sprint:` alone**: its native home is the
   Project's Sprint iteration, which `git-board bridge sync` already syncs.
   GitHub has no iteration on an issue: none among issue fields, and a
@@ -330,11 +334,16 @@ spec stays the authority.
   group holds them. One milestone per issue, and labels move as kinds do.
   *If wrong:* new sprints stay labels on GitLab until someone creates their
   milestone, which on a mirror like co2's means always.
-- **A project can switch milestones off with `sprints = labels`** (default
-  `native`). Milestones already on GitLab issues come in as `sprint:`
-  labels after the full pull, and a dry run names them first. *If wrong:* a
-  project that uses milestones for releases sees `v1.2` come in as
-  `sprint:v1-2` until it sets `labels`.
+- **A project can switch milestones off with `sprints = off`** (default
+  `native`; decided with the user, 2026-10-21): the fork ignores milestones
+  then. A project that wants sprints as labels needs no switch, as the fork
+  creates no milestone. Set `off` before the first sync with this version.
+  In native mode, milestones already on GitLab issues come in as `sprint:`
+  labels after the full pull, and a dry run names them first. Turned off
+  later, git-bug drops the sprints milestones held, as the forge seems to
+  have removed them. *If wrong:* a project that uses milestones for
+  releases and upgrades without `off` sees `v1.2` come in as
+  `sprint:v1-2`, until it sets `off`, which then removes them.
 - **A name is written as the identity spells it**: one written in another
   case in git-bug is assigned, then the next pull of that assignment
   replaces its label with the identity's spelling, in two operations

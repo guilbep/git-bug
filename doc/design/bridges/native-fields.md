@@ -89,9 +89,16 @@ refusals, the per-project `assignees = labels` switch).
   - A type's label held as a label on GitHub goes in `Issue.Resend` when
     the issue has no type or that one: the push sets the type, and the
     label comes off.
-- **Switch: `kinds = native|labels`**, default `native`, like `assignees`.
-  In `labels` mode the fork ignores types, as today: it neither reads them
-  nor clears those people set.
+- **Switch: `kinds = native|labels`**, default `native`, and it works as
+  `assignees` does:
+  - In `labels` mode the fork still reads types, and moves them to labels:
+    the push adds the type's label and clears the type.
+  - Switching moves them once each way, after the upgrade's full pull.
+  - Decided with the user on 2026-10-21. A mode that ignored types would
+    lose kinds: the pull rebuilds labels from what the forge holds now, so
+    a kind held as a type would seem removed on GitHub at the first sync
+    after switching.
+  - The cost: in `labels` mode the fork clears types people set on GitHub.
 - **GitLab and Gitea**: there is no equivalent, so `kind:` stays a label.
 
 ## sprint:
@@ -117,9 +124,18 @@ refusals, the per-project `assignees = labels` switch).
     neither their dates nor their titles; labels only.
   - Whether the API assigns a closed milestone isn't checked: the build
     checks it first.
-- **Switch: `sprints = native|labels`**, default `native`. Milestones
-  already on GitLab issues come in as `sprint:` labels, and a dry run names
-  them. A project that uses milestones for releases sets `labels`.
+- **Switch: `sprints = native|off`**, default `native` (decided with the
+  user on 2026-10-21).
+  - The fork never creates a milestone, so a project that wants sprints as
+    labels just has none.
+  - `off` is for a project that uses milestones for something else, such
+    as releases: the fork ignores milestones then.
+  - Set it before the project's first sync with this version. In `native`
+    mode, milestones already on GitLab issues come in as `sprint:` labels,
+    and a dry run names them.
+  - Turned off later, git-bug drops the sprints that milestones held: the
+    forge seems to have removed them. That also cleans up release
+    milestones read as sprints by mistake.
 - **One milestone per issue, and existing labels move** (`Issue.Resend`),
   as for kind.
 

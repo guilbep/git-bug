@@ -32,9 +32,15 @@ gitlab.com/gitlab-org/api/client-go v1.46.0; golang.org/x/text/unicode/norm.
 - Labels match exactly, both ways. A type is `kind:<Slug(name)>` unless
   `kind-types` maps it; a milestone is `sprint:<Slug(title)>`. Anything else
   stays a label.
-- Mode values are `native` (the default) and `labels`, for `assignees`,
-  `kinds` and `sprints`. Any other value is an error that names it.
-- `labels` mode reads and writes nothing native: no type or milestone query.
+- Mode values:
+  - `assignees` and `kinds` take `native` (the default) or `labels`;
+  - `sprints` takes `native` (the default) or `off`;
+  - any other value is an error that names it.
+- `kinds = labels` works as `assignees = labels`: it still reads types,
+  lists the type's label in `Resend`, and the push adds it as a label and
+  clears the type. A mode that ignored types would lose kinds, as the pull
+  rebuilds labels from the forge's current set (`syncpull.go:701-744`).
+- `sprints = off` reads and writes no milestone at all.
 - No forge object is ever created: no issue type, no milestone.
 - gofmt with Go 1.26: `$(GOTOOLCHAIN=go1.26.0 go env GOROOT)/bin/gofmt -l .`
   prints nothing.
@@ -62,9 +68,9 @@ gitlab.com/gitlab-org/api/client-go v1.46.0; golang.org/x/text/unicode/norm.
 4. **A token that may label but not set types** (GitHub answers FORBIDDEN).
    The kind's label is refused (`RefusedLabels`, one warning) and the other
    labels go through. Test in Task 3.
-5. **A renamed milestone or type**: the pull gives the label of its current
-   name, so the next reconcile moves the issue's label; no error. Test in
-   Task 4, for a milestone.
+5. **A milestone event whose milestone was deleted** (`Milestone` is nil),
+   or an issue without a milestone. The event is skipped, with no panic,
+   and the issue has no sprint label. Test in Task 4.
 
 ---
 
@@ -79,8 +85,8 @@ gitlab.com/gitlab-org/api/client-go v1.46.0; golang.org/x/text/unicode/norm.
 **Interfaces:**
 - Produces:
   - constants `ConfigKeyKinds = "kinds"`, `ConfigKeySprints = "sprints"`,
-    `ConfigKeyKindTypes = "kind-types"`, `ModeNative = "native"` and
-    `ModeLabels = "labels"`;
+    `ConfigKeyKindTypes = "kind-types"`, `ModeNative = "native"`,
+    `ModeLabels = "labels"` and `ModeOff = "off"`;
   - `AssigneesNative = ModeNative` and `AssigneesLabels = ModeLabels`, kept
     because git-board uses them;
   - `SyncOptions.Config map[string]string`, bridge keys given over each
@@ -128,10 +134,11 @@ func TestOneNative(t *testing.T) {
 }
 ```
 
-`TestSyncModes`: the `TestSyncAssigneesMode` checks, repeated for
-`ConfigKeyKinds` and `ConfigKeySprints` through `WithConfig`: native by
-default, the key read, the run's value winning, and `"lables"` an error
-containing `lables`.
+`TestSyncModes`: the `TestSyncAssigneesMode` checks, repeated through
+`WithConfig` for `ConfigKeyKinds` (with `labels`) and `ConfigKeySprints`
+(with `off`): native by default, the key read, the run's value winning, and
+`"lables"` an error containing `lables`. Also `sprints = labels` is an
+error, and so is `kinds = off`.
 
 - [ ] **Step 2: Run the tests to check they fail**
 
@@ -153,8 +160,8 @@ Expected: FAIL (`undefined: core.Slug`, `core.OneNative`, `core.WithConfig`).
     - nil slices when empty.
   - `bridge.go`:
     - merge `opts.Config` over `conf` (cloned);
-    - one loop validates `ConfigKeyAssignees`, `ConfigKeyKinds` and
-      `ConfigKeySprints` (empty, native or labels);
+    - one table validates each key against its values: `assignees` and
+      `kinds` empty, native or labels; `sprints` empty, native or off;
     - then `opts.Assignees = conf[ConfigKeyAssignees]`, as now.
 
 - [ ] **Step 4: Run the tests to check they pass**
@@ -229,8 +236,12 @@ require.Equal(t, []string{"bug"}, g.Issue(ref.Number).Resend)
 alice.SetLabels(ref, []string{"feat"})
 require.Empty(t, g.Issue(ref.Number).Resend, "a second kind belongs as a label")
 
-// TestGithubKindsOff: kinds = labels
-require.Empty(t, g.Issue(ref.Number).Labels, "Bug type ignored"); require.Empty(t, g.Issue(ref.Number).Resend)
+// TestGithubKindsAsLabels: kinds = labels; the type is read, and sent again to move
+g.setType("alice", ref, "Bug")
+require.Equal(t, []string{"bug"}, g.Issue(ref.Number).Labels)
+require.Equal(t, []string{"bug"}, g.Issue(ref.Number).Resend, "held as a type, the other way")
+alice.SetLabels(ref, []string{"feat"}); g.setType("alice", ref, "")
+require.Empty(t, g.Issue(ref.Number).Resend, "a label is where labels mode holds it")
 // TestGithubUserRepoHasNoTypes: issueTypes is null
 // Labels are GitHub's labels only, no error, nothing resent.
 // TestGithubDisabledType (Review Focus 1): Feature disabled after it was set
@@ -259,9 +270,11 @@ Expected: FAIL to compile (`g.setType`, `parseKindTypes` undefined).
     Name string; IsEnabled bool } }` with `graphql:"issueTypes(first: 25)"`
     (25 at most per organization).
   - The builder keeps `issueType` (a name) through `relabel`.
-  - `issueLabels` adds `r.kindLabel(issueType)` when `r.kinds`.
-  - `finish` puts a GitHub label into `Resend` when `typeID` knows it and
-    the issue's type is none or that label's.
+  - `issueLabels` adds `r.kindLabel(issueType)` in both modes.
+  - `finish`, in native mode, puts a GitHub label into `Resend` when
+    `typeID` knows it and the issue's type is none or that label's. In
+    labels mode it puts the type's label there instead. It needs no type
+    list for that, so `readTypes` runs in native mode only.
   - `NewRemote` parses `kind-types` (an error fails the remote) and reads
     `kinds`.
 
@@ -309,10 +322,18 @@ _, typ = g.heldType(ref); require.Empty(t, typ)
 require.NoError(t, g.ChangeLabels(ctx, bot, ref, []string{"polish"}, nil)) // no Polish type: a label
 // TestGithubChangeLabelsMovesKindLabel: GitHub label "bug", no type; ChangeLabels(add bug)
 // type Bug, label bug gone from the issue
-// TestGithubChangeLabelsKindsOff (no issueTypes read at all) and on a user
-// repository (issueTypes null): bug is a label; no issueTypeOfQuery, no type
-// mutation (the fake counts both). Helpers g.setType and g.heldType live in
-// kinds_test.go, like assignees_test.go's assign and held.
+// TestGithubChangeLabelsUserRepo (issueTypes null): bug is a label; no
+// issueTypeOfQuery, no type mutation (the fake counts both). Helpers
+// g.setType and g.heldType live in kinds_test.go, like assignees_test.go's
+// assign and held.
+// TestGithubChangeLabelsKindsAsLabels: kinds = labels, issue typed Bug
+require.NoError(t, g.ChangeLabels(ctx, bot, ref, []string{"bug"}, nil))
+labels, typ = g.heldType(ref); require.Equal(t, []string{"bug"}, labels); require.Empty(t, typ, "moved to a label")
+// TestGithubKindsSwitch: an engine over the fake. In native mode, bug is
+// pushed as the type Bug. A new remote with kinds = labels: pull (bug
+// resent), then push gives the label bug and no type. Back to native: pull,
+// then push gives the type Bug and no label. git-bug keeps exactly {bug}
+// throughout, and a last sync writes nothing.
 // TestGithubTypeWriteRefused (Review Focus 4): fake refuses updateIssueIssueType
 err := g.ChangeLabels(ctx, bot, ref, []string{"bug", "a"}, nil)
 require.Equal(t, core.RefusedLabels{"bug"}, err); labels, typ = g.heldType(ref)
@@ -326,20 +347,27 @@ require.Equal(t, []string{"a"}, labels); require.Empty(t, typ)
 
 - [ ] **Step 2: Run the tests to check they fail**
 
-Run: `go test ./bridge/github/ -run 'SetsType|MovesKind|KindsOff|TypeWrite|KindsSync'`
+Run: `go test ./bridge/github/ -run 'SetsType|MovesKind|UserRepo|KindsAsLabels|TypeWrite|KindsSync|KindsSwitch'`
 Expected: FAIL (types are never set).
 
-- [ ] **Step 3: Implement `changeType`; `ChangeLabels` calls it first, when `r.kinds`**
-  - No label of `added` or `removed` with a `typeID`: return them as they
-    are, with no read.
-  - Otherwise:
-    - read the current type with `issueTypeOfQuery`
-      (`node(id:) { ... on Issue { issueType { name } } }`);
-    - call `core.OneNative(kindLabel(current), added, removed, hasType)`;
-    - if `next` changed, mutate `updateIssueIssueType` with `typeID(next)`,
-      or nil to clear it.
-  - An `ErrRefused` from that mutation refuses `next`, or the current label
-    when clearing: it leaves `add` and `remove`, joins `refused`, and
+- [ ] **Step 3: Implement `changeType`, which `ChangeLabels` calls first**
+  - In labels mode:
+    - with an added label that could be a type's (a `kind-types` label, or
+      one starting with `kind:`), read the current type;
+    - if its `kindLabel` is among `added`, clear it, and leave the labels
+      as they are;
+    - refusals are as below.
+  - In native mode:
+    - with no label of `added` or `removed` that has a `typeID`, return
+      them as they are, with no read;
+    - otherwise:
+      - read the current type with `issueTypeOfQuery`
+        (`node(id:) { ... on Issue { issueType { name } } }`);
+      - call `core.OneNative(kindLabel(current), added, removed, hasType)`;
+      - if `next` changed, mutate `updateIssueIssueType` with
+        `typeID(next)`, or nil to clear it.
+  - An `ErrRefused` from the type mutation refuses `next`, or the current
+    label when clearing: it leaves `add` and `remove`, joins `refused`, and
     `ChangeLabels` returns it with the assignees' refusals.
   - Order: type, then labels added, then assignees, then labels removed, so
     an old-way label comes off only once the type is set.
@@ -374,7 +402,7 @@ Expected: PASS.
 - Create: `bridge/gitlab/sprints_test.go`
 
 **Interfaces:**
-- Consumes: `core.Slug`, `core.ConfigKeySprints`, `core.ModeLabels`.
+- Consumes: `core.Slug`, `core.ConfigKeySprints`, `core.ModeOff`.
 - Produces:
   - `func sprintLabel(title string) string`, which is `"sprint:" +
     core.Slug(title)`;
@@ -402,9 +430,12 @@ require.Empty(t, gl.Issue(ref.Number).Labels)
 // TestGitlabSprintLabelsResent: label sprint:sprint-2 and milestone "Sprint 2" exists, none set
 require.Equal(t, []string{"sprint:sprint-2"}, gl.Issue(ref.Number).Resend)
 // label sprint:sprint-9 with no such milestone: not resent; label "sprint:Sprint 2": not resent (exact)
-// TestGitlabSprintsOff: sprints = labels: milestone ignored, no milestone request (fake counts)
+// TestGitlabSprintsOff: sprints = off: milestone ignored, no milestone request (fake counts)
+// TestGitlabDeletedMilestoneEvent (Review Focus 5): an event with a nil Milestone is skipped
+require.NotPanics(t, func() { gl.Issue(ref.Number) }); require.Empty(t, gl.Issue(ref.Number).Labels)
 // TestGitlabSameTitleMilestones (Review Focus 3): group and project "Sprint 2", the project's id is used
-// TestGitlabRenamedMilestone (Review Focus 5): rename "Sprint 2" to "Sprint 2b"
+// TestGitlabRenamedMilestone: rename "Sprint 2" to "Sprint 2b"; the pull's
+// reconcile then moves the label (syncpull.go rebuilds from Labels)
 require.Equal(t, []string{"sprint:sprint-2b"}, gl.Issue(ref.Number).Labels)
 ```
 
@@ -417,7 +448,8 @@ Expected: FAIL to compile (`setMilestone` undefined).
   - `convert`:
     - adds `sprintLabel(gi.Milestone.Title)` to `Labels`;
     - turns each milestone event into an `EventLabels`: `Added` for action
-      `add`, `Removed` for `remove`, with its milestone's current title;
+      `add`, `Removed` for `remove`, with its milestone's current title,
+      skipping an event whose milestone is nil (deleted);
     - puts a GitLab label into `Resend` when `milestoneID` knows it and the
       issue's milestone is none or that label's.
   - `Issues` and `Fetch` call `readMilestones` first, when `r.sprints`.
@@ -466,6 +498,9 @@ _, ms = f.held(ref); require.Empty(t, ms)
 require.NoError(t, gl.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-9"}, nil)) // no milestone: a label
 // TestGitlabSprintsSync: an engine over the fake; push {sprint:sprint-2, a},
 // then pull: no new operation; the label and milestone events are claimed.
+// TestGitlabSprintsOffAfterNative: pins the ruled behaviour. After a native
+// sync, a remote with sprints = off pulls, and git-bug drops sprint:sprint-2,
+// held by the milestone, while keeping a sprint label GitLab holds as a label.
 ```
 
 - [ ] **Step 3: Run the tests to check they fail**
@@ -505,7 +540,8 @@ Expected: PASS.
   - kinds are GitHub issue types where the organization has one, and
     sprints are GitLab milestones where one exists, labels otherwise;
   - the two keys, `git config git-bug.bridge.<name>.kinds labels` and
-    `….sprints labels`;
+    `….sprints off`: `off` is set before the first sync, and turned off
+    later it drops the sprints milestones held;
   - `kind-types` and its format, with co2's flat example;
   - the same every-clone warning and `--no-resume` upgrade step as for
     assignees.
@@ -539,7 +575,7 @@ tests did.
     `sprint:sprint-3` moves it, and `sprint:sprint-9` stays a label.
   - An old `sprint:sprint-2` label on a GitLab issue moves after
     `bridge pull --no-resume`, then a dry run, then a sync.
-  - Run with `sprints = labels` too.
+  - On new scratch issues, `sprints = off` ignores the milestones.
   - A second sync is empty.
 - [ ] **Step 2: GitHub, on the EPFL-ENAC scratch repository**, with
   `kind-types = bug=Bug,feat=Feature`:
@@ -548,7 +584,8 @@ tests did.
     the type Feature;
   - a type set in GitHub's UI comes in as `bug` or `kind:task`;
   - an old `bug` label moves to the type;
-  - run with `kinds = labels` too;
+  - switching to `kinds = labels` moves the types to labels, and switching
+    back moves them to types again (full pull first each time);
   - a second sync is empty.
 - [ ] **Step 3:** Record the results in sync-todo.md. Clean the scratch
   issues and milestones, or leave them, as the user says. Report to the
