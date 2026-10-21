@@ -243,6 +243,13 @@ func TestGithubTypeWriteRefused(t *testing.T) {
 	require.Equal(t, []string{"a"}, labels)
 	require.Equal(t, "Bug", typ)
 
+	// a replace is a set and a clear: both are refused
+	err = g.ChangeLabels(ctx, bot, ref, []string{"feat"}, []string{"bug"})
+	require.Equal(t, core.RefusedLabels{"feat", "bug"}, err)
+	labels, typ = g.heldType(ref)
+	require.Equal(t, []string{"a"}, labels)
+	require.Equal(t, "Bug", typ)
+
 	// with kinds = labels, the label is added before the type is cleared
 	g.kinds = false
 	err = g.ChangeLabels(ctx, bot, ref, []string{"bug"}, nil)

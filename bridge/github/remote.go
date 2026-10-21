@@ -698,9 +698,10 @@ func (r *remote) changeType(ctx context.Context, as core.Account, issue core.Ref
 	var m updateIssueIssueTypeMutation
 	err = r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID)
 	if errors.Is(err, core.ErrRefused) {
-		l := cmp.Or(next, current)
-		is := func(s string) bool { return s == l }
-		return slices.DeleteFunc(slices.Clone(add), is), slices.DeleteFunc(slices.Clone(remove), is), core.RefusedLabels{l}, nil
+		// a replace is a set and a clear: both kinds are refused
+		refused := core.RefusedLabels(slices.DeleteFunc([]string{next, current}, func(s string) bool { return s == "" }))
+		is := func(s string) bool { return slices.Contains(refused, s) }
+		return slices.DeleteFunc(slices.Clone(add), is), slices.DeleteFunc(slices.Clone(remove), is), refused, nil
 	}
 	if err != nil {
 		return nil, nil, nil, err
