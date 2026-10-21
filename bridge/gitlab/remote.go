@@ -544,6 +544,8 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 	if later = slices.DeleteFunc(later, func(l string) bool { return slices.Contains(refused, l) }); len(later) > 0 {
 		opt := gitlab.UpdateIssueOptions{RemoveLabels: (*gitlab.LabelOptions)(&later)}
 		_, _, err := c.Issues.UpdateIssue(r.projectID, iid, &opt, gitlab.WithContext(ctx))
+		// failing, it hides the sprints the first update refused: the
+		// engine retries the change, which heals both in one write
 		if err := r.confirm(ctx, mapErr(err), iid, 0); err != nil {
 			return err
 		}
