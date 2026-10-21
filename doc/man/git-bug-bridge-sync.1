@@ -69,6 +69,36 @@ A value other than native or labels stops the sync of every bridge, even
 those of forges that don't map assignees yet (Gitea).
 
 .PP
+A git-bug kind is the issue's type on a GitHub organization that has an enabled
+type for it, and a label otherwise (user-owned repositories have no types). A
+type is the label kind: unless the key kind-types maps it: a
+comma list of =, the label as git-bug stores it, for example
+co2's flat kinds, or kind:feat=Feature with git-board's default config:
+
+.EX
+git config git-bug.bridge.<name>.kind-types bug=Bug,feat=Feature
+.EE
+
+.PP
+A sprint: is the GitLab milestone, among the project's active ones,
+whose title has that slug, and a label otherwise: the fork never creates a
+milestone. GitHub's sprints are left alone: git-board syncs the Project's
+Sprint iteration. To hold kinds as labels, or to ignore milestones, for a
+project that uses them for releases:
+
+.EX
+git config git-bug.bridge.<name>.kinds labels
+git config git-bug.bridge.<name>.sprints off
+.EE
+
+.PP
+Set sprints off before the project's first sync with this version: turned off
+later, git-bug drops the sprints that milestones held. Like assignees, kinds,
+sprints and kind-types must be the same in every clone that syncs, a CI job's
+included, and the upgrade step is the same: "git bug bridge pull 
+--no-resume" once, then "bridge sync --dry-run", then "bridge sync".
+
+.PP
 Comments written for a pull request (line comments, replies and reviews,
 anchored by their review:* metadata, as git-board writes them) go to that
 pull request on GitHub, never to an issue. This command doesn't know which

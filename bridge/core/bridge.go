@@ -53,7 +53,7 @@ const (
 	ModeNative = "native"
 	// ModeLabels holds it as labels on the forge.
 	ModeLabels = "labels"
-	// ModeOff leaves it out of the forge.
+	// ModeOff neither reads nor writes the forge's own field.
 	ModeOff = "off"
 
 	// AssigneesNative holds assignees as the forge's assignees.

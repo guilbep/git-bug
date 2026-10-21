@@ -2,7 +2,8 @@
 
 Decision doc for the `native-fields` branch (off `bridge-sync` at
 `8227b073`, after `v0.11.1-sync.7`), weighed with the user on 2026-10-21.
-Nothing here is built yet. The rulings are recorded in
+Built (2026-10-21). The GitHub live test waits on the scratch repository
+of guilbep/git-board#29. The rulings are recorded in
 [sync-decisions.md](sync-decisions.md#assignees) with what they cost if
 wrong.
 

@@ -344,6 +344,47 @@ spec stays the authority.
   have removed them. *If wrong:* a project that uses milestones for
   releases and upgrades without `off` sees `v1.2` come in as
   `sprint:v1-2`, until it sets `off`, which then removes them.
+- **Labels and their prefixes match exactly, unlike assignees**, whose prefix
+  matches in any case. A pull must give back the label a push sent for its
+  echo to be claimed, so `Kind:bug` and `sprint:Sprint 2` stay labels. *If
+  wrong:* a kind or sprint spelled another way stays a label.
+- **Types and active milestones are read again at each pull** (`Issues`,
+  `Fetch`), and before a push that needs them. A failed read fails the pull
+  loudly: a silent skip would make the engine drop kinds or sprints. *If
+  wrong:* a forge whose types or milestones endpoint errors blocks syncing
+  until fixed, or until `kinds = labels` / `sprints = off`.
+- **GitLab silently ignores a closed milestone's id** (checked live on 42400,
+  2026-10-21): the issue answered with no milestone and no event was
+  emitted. So only active milestones are written. An issue's current
+  milestone gives its label whatever its state, and removing that label
+  clears it even when closed. *If wrong:* a sprint whose milestone was
+  closed stays a label on GitLab.
+- **GitLab's milestone events** (checked live): a change emits only an "add"
+  of the new milestone, and a clear emits a "remove". Deleting a milestone
+  deletes its events and silently unsets it. The adapter tracks the held
+  milestone, so a change is one event that removes the old sprint and adds
+  the new one. Event ids are `milestone-<n>`, as they may collide with label
+  events'. A project's milestone wins over a group's with the same title.
+  *If wrong:* an old sprint lingers until reconcile.
+- **Labels and native values net out**, as GitHub's assignees do. A forge
+  change that leaves the issue's labels as they were is no event. When a
+  push moves a kind or sprint label to the native value, it writes the
+  native value first and removes the label after: on GitLab in a second
+  update, only when the issue really holds the label; in `kinds = labels`
+  mode, it adds the label before clearing the type. Otherwise the forge's
+  removal event goes unclaimed, and the next pull drops the value and
+  re-adds it. *If wrong:* one extra write per moved label.
+- **A refused write refuses both labels it concerned**: a refused type
+  write, or a milestone GitLab silently ignores, refuses the new label and
+  the current one on a replace. They stay in git-bug, as not seen, with one
+  warning, and the other labels go through. Refusing only the new one
+  recorded the old one's removal as done while the forge still held it,
+  which lost the user's change. *If wrong:* a refused replace holds back
+  both until the next label change.
+- **A removed kind or sprint still clears its value** when the type is
+  disabled or the milestone closed. The adapter reads the current value when
+  a removed label could be one (a `kind-types` label, or a `kind:` /
+  `sprint:` one). *If wrong:* one extra read on such removals.
 - **A name is written as the identity spells it**: one written in another
   case in git-bug is assigned, then the next pull of that assignment
   replaces its label with the identity's spelling, in two operations
