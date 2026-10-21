@@ -273,21 +273,64 @@ spec stays the authority.
   again as labels and unassigned: each mode moves the other's way to its
   own, and switching moves them once each way, after the full pull an
   upgrade needs. Every clone must hold them the same way, or each sync
-  undoes the others' and notifies people: git-board gives the mode from
-  `.git-board.toml` with `WithAssignees` at every run, over each clone's
-  key; the command line reads the key. An unknown value is an error. A bot
+  undoes the others' and notifies people. git-board is meant to give the
+  mode from `.git-board.toml` with `WithAssignees` at every run, over each
+  clone's key; today its Settings page writes the clone's key instead
+  (`[repos] assignees` is read but unused). The command line reads the
+  key. An unknown value is an error. A bot
   GitHub won't unassign (`user(login:)` finds none) keeps its assignment
   beside its label; removing one without a user, a bot or not, warns once.
   *If wrong:* a project in labels mode loses its forges' assigned-to-me
   and notifications for its assignees.
 - **Native where the forge has the concept, labels otherwise** (the user's
-  principle, 2026-10-20): assignees first. Not built, to weigh each:
-  `kind:` and GitHub's issue types (defined per organization, so an
-  EPFL-ENAC admin creates one per kind; GitLab has none); `sprint:` and
-  GitHub's Projects iteration field, which Project 40 uses and git-board
-  already syncs, rather than milestones (per repository, a due date only,
-  no cadence; on GitLab's free edition, which has no iterations, a
-  milestone may fit: not checked).
+  principle, 2026-10-20): assignees first, then `kind:` and `sprint:`,
+  decided with the user on 2026-10-21 and not built yet
+  ([native-fields.md](native-fields.md) has the facts checked).
+- **On GitHub, a kind is the issue type when the organization has one for
+  it, a label otherwise**, value by value: nothing is refused, and a
+  user-owned repository, which has no issue types, keeps labels silently.
+  EPFL-ENAC has Bug, Feature and Task. Its other kinds wait for an org
+  owner to add types, which then show in every EPFL-ENAC repository's
+  picker. *If wrong:* GitHub's `type:` filters miss the kinds still held
+  as labels.
+- **Kinds match type names ignoring case, plus the bridge key `kind-types =
+  feat:Feature,…`**, which git-board writes from its config. A type with no
+  kind comes in as `kind:<slug of its name>` (Task as `kind:task`). An issue
+  has one type: the kind GitHub holds stays it, another goes as a label,
+  and a change on both sides follows "the later change wins". *If wrong:* a
+  kind missing from the map comes back as a second value (`kind:feature`
+  next to `kind:feat`).
+- **Existing kinds move both ways.** GitHub's types come in as kind labels
+  with the upgrade's full pull. A `kind:*` label on GitHub whose kind has a
+  type goes in `Issue.Resend`, so it comes off once the type is set. *If
+  wrong:* until the full pull, co2's 65 typed issues get their kinds only
+  when they change on GitHub.
+- **A project can switch types off with `kinds = labels`** (default
+  `native`), like `assignees`. In that mode the fork ignores types, as
+  before: it neither reads them nor clears those people set. GitLab and
+  Gitea have no equivalent, so `kind:` stays a label there. *If wrong:* a
+  project in labels mode doesn't see in git-bug the types set on GitHub.
+- **On GitHub the fork leaves `sprint:` alone**: its native home is the
+  Project's Sprint iteration, which `git-board bridge sync` already syncs.
+  GitHub has no iteration on an issue: none among issue fields, and a
+  milestone is per repository with a due date only. `sprint:*` labels keep
+  going to GitHub as labels, since co2's Project writes are off. *If
+  wrong:* a label and the Project field can disagree until git-board's next
+  `bridge sync`.
+- **On GitLab, `sprint:<slug>` is the existing milestone with that slug, a
+  label otherwise**, the same rule as kind. gitlab.epfl.ch is the free
+  edition: no iterations, milestones only. The fork looks among the
+  project's milestones and its groups' (`include_ancestors`), open or
+  closed, and slugs a title as git-board's `config.Slug` does. It creates
+  no milestone, as only people know the dates, and whether a project or a
+  group holds them. One milestone per issue, and labels move as kinds do.
+  *If wrong:* new sprints stay labels on GitLab until someone creates their
+  milestone, which on a mirror like co2's means always.
+- **A project can switch milestones off with `sprints = labels`** (default
+  `native`). Milestones already on GitLab issues come in as `sprint:`
+  labels after the full pull, and a dry run names them first. *If wrong:* a
+  project that uses milestones for releases sees `v1.2` come in as
+  `sprint:v1-2` until it sets `labels`.
 - **A name is written as the identity spells it**: one written in another
   case in git-bug is assigned, then the next pull of that assignment
   replaces its label with the identity's spelling, in two operations
