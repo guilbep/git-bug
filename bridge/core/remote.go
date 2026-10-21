@@ -151,10 +151,14 @@ type Issue struct {
 	Comments  []Comment
 	// Events are time ordered.
 	Events []Event
+	// Resend are the labels the forge holds the other way for its own
+	// fields, sent again for it to hold them its way: a kind held as a label
+	// where it has a type, or the reverse. The remote sets it.
+	Resend []string
 
-	// resend are the labels the forge holds the other way, sent again for it
-	// to hold them its way: assignee:<x> labels as labels on a forge holding
-	// assignees natively, or the reverse. The engine sets it.
+	// resend are Resend, and the assignee:<x> labels the forge holds the
+	// other way: as labels on a forge holding assignees natively, or the
+	// reverse. The engine sets it.
 	resend []string
 }
 

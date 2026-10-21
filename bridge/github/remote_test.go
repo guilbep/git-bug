@@ -35,6 +35,8 @@ type fakeGithub struct {
 	unassignable map[string]bool
 	// noUser are logins without a user
 	noUser map[string]bool
+	// types are the issue types of the owner: none, as for a user, answers null
+	types []ghType
 
 	mu       sync.Mutex
 	issues   []*ghIssue
@@ -43,6 +45,11 @@ type fakeGithub struct {
 	writes   int
 	failNext bool
 	pulls    map[int]*ghPull
+}
+
+type ghType struct {
+	name    string
+	enabled bool
 }
 
 type ghIssue struct {
@@ -55,6 +62,7 @@ type ghIssue struct {
 	closed      bool
 	labels      []string
 	assignees   []string
+	issueType   string
 	bodyEdits   []userContentEdit // oldest first
 	timeline    []timelineItem
 	edits       map[string][]userContentEdit // comment edits by comment id, oldest first
@@ -205,6 +213,29 @@ func (f *fakeGithub) setLabels(login string, issue *ghIssue, labels []string) {
 	issue.updated = now().Time
 }
 
+// setType gives an issue a type, "" for none, leaving the event GitHub does.
+func (f *fakeGithub) setType(login string, issue *ghIssue, name string) {
+	if issue.issueType == name {
+		return
+	}
+	e := issueTypeEvent{actorEvent: actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)}}
+	var item timelineItem
+	switch {
+	case name == "":
+		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(issue.issueType)}
+		item = timelineItem{Typename: "IssueTypeRemovedEvent", IssueTypeRemovedEvent: e}
+	case issue.issueType == "":
+		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(name)}
+		item = timelineItem{Typename: "IssueTypeAddedEvent", IssueTypeAddedEvent: e}
+	default:
+		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(name)}
+		item = timelineItem{Typename: "IssueTypeChangedEvent", IssueTypeChangedEvent: e}
+	}
+	issue.issueType = name
+	issue.timeline = append(issue.timeline, item)
+	issue.updated = now().Time
+}
+
 func (f *fakeGithub) setAssigned(login string, issue *ghIssue, assignee string, assigned bool) {
 	if slices.Contains(issue.assignees, assignee) == assigned || assigned && f.unassignable[assignee] {
 		return
@@ -316,6 +347,24 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 				Color       string `graphql:"color"`
 				Description string `graphql:"description"`
 			}{ID: id, Name: name})
+		}
+	case *issueTypesQuery:
+		if f.types == nil {
+			return nil
+		}
+		q.Repository.IssueTypes = &struct {
+			Nodes []struct {
+				ID        string `graphql:"id"`
+				Name      string `graphql:"name"`
+				IsEnabled bool   `graphql:"isEnabled"`
+			}
+		}{}
+		for _, t := range f.types {
+			q.Repository.IssueTypes.Nodes = append(q.Repository.IssueTypes.Nodes, struct {
+				ID        string `graphql:"id"`
+				Name      string `graphql:"name"`
+				IsEnabled bool   `graphql:"isEnabled"`
+			}{ID: "IT_" + t.name, Name: t.name, IsEnabled: t.enabled})
 		}
 	case *issueQuery:
 		since := vars["issueSince"].(githubv4.DateTime)

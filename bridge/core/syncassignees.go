@@ -158,7 +158,9 @@ func (e *Engine) accountOfIdentity(id entity.Id, meta map[string]string) (User, 
 // that the forge holds the other way.
 func (e *Engine) labeled(issue *Issue) (*Issue, error) {
 	if _, ok := e.remote.(AssigneeRemote); !ok {
-		return issue, nil
+		res := *issue
+		res.resend = issue.Resend
+		return &res, nil
 	}
 	labelOf := map[User]string{}
 	labelsOf := func(users []User) ([]string, error) {
@@ -219,12 +221,13 @@ func (e *Engine) labeled(issue *Issue) (*Issue, error) {
 	}
 
 	res.Labels = union(issue.Labels, names)
-	res.resend = nil
+	var assignees []string
 	if e.assignees() == AssigneesLabels {
-		res.resend = without(names, issue.Labels)
+		assignees = without(names, issue.Labels)
 	} else {
-		res.resend, _ = splitAssignees(issue.Labels)
+		assignees, _ = splitAssignees(issue.Labels)
 	}
+	res.resend = slices.Concat(issue.Resend, assignees)
 	return &res, nil
 }
 

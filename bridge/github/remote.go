@@ -40,7 +40,46 @@ func (g *Github) NewRemote(ctx context.Context, repo *cache.RepoCache, conf core
 	for _, cred := range creds {
 		tokens = append(tokens, cred.(*auth.Token))
 	}
-	return newRemote(ctx, conf[confKeyOwner], conf[confKeyProject], conf[confKeyDefaultLogin], tokens, graphqlClient)
+	r, err := newRemote(ctx, conf[confKeyOwner], conf[confKeyProject], conf[confKeyDefaultLogin], tokens, graphqlClient)
+	if err != nil {
+		return nil, err
+	}
+	r.kinds = conf[core.ConfigKeyKinds] != core.ModeLabels
+	if r.kindTypes, err = parseKindTypes(conf[core.ConfigKeyKindTypes]); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// parseKindTypes reads kind-types, the labels of issue types, as
+// label=Type,...: a type has one label, and a label one type. It returns the
+// labels by lowercased type name, nil for none.
+func parseKindTypes(v string) (map[string]string, error) {
+	var res map[string]string
+	labelOf := map[string]string{} // type by label, lowercased
+	for _, entry := range strings.Split(v, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		label, name, ok := strings.Cut(entry, "=")
+		label, name = strings.TrimSpace(label), strings.TrimSpace(name)
+		if !ok || label == "" || name == "" {
+			return nil, fmt.Errorf("kind-types: %q is not label=Type", entry)
+		}
+		key := strings.ToLower(name)
+		if _, ok := res[key]; ok {
+			return nil, fmt.Errorf("kind-types: %q gives type %s a second label", entry, name)
+		}
+		if _, ok := labelOf[strings.ToLower(label)]; ok {
+			return nil, fmt.Errorf("kind-types: %q gives label %s a second type", entry, label)
+		}
+		if res == nil {
+			res = map[string]string{}
+		}
+		res[key], labelOf[strings.ToLower(label)] = label, name
+	}
+	return res, nil
 }
 
 func graphqlClient(token *auth.Token) Client {
@@ -62,14 +101,23 @@ type remote struct {
 	// createLabel creates a label and returns its id: GitHub creates labels
 	// with its REST API only.
 	createLabel func(ctx context.Context, name, color string) (string, error)
+	// kinds holds the issue's kind as its GitHub type (native), not as a
+	// label (core.ModeLabels).
+	kinds bool
+	// kindTypes are the labels of types by lowercased name: kindLabel's.
+	kindTypes map[string]string
 
 	mu     sync.Mutex
 	repoID string
 	labels map[string]string // id by lowercased name
+	// types are the ids of the enabled issue types by lowercased label; none
+	// for a user's repository. typesRead tells readTypes ran.
+	types     map[string]string
+	typesRead bool
 }
 
 func newRemote(ctx context.Context, owner, project, defaultLogin string, tokens []*auth.Token, newClient func(*auth.Token) Client) (*remote, error) {
-	r := &remote{owner: owner, project: project, clients: map[string]*rateLimitHandlerClient{}}
+	r := &remote{owner: owner, project: project, kinds: true, clients: map[string]*rateLimitHandlerClient{}}
 	var readerToken *auth.Token
 	for _, token := range tokens {
 		c := &rateLimitHandlerClient{sc: newClient(token)}
@@ -112,7 +160,11 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 		// stops the mediator if the caller stops early
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		build(NewImportMediator(ctx, r.reader, r.owner, r.project, since), yield)
+		if err := r.readKinds(ctx); err != nil {
+			yield(nil, err)
+			return
+		}
+		build(NewImportMediator(ctx, r.reader, r.owner, r.project, since), r, yield)
 	}
 }
 
@@ -121,10 +173,13 @@ func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("issue %s: no number to fetch it by", cmp.Or(ref.URL, ref.ID))
 	}
+	if err := r.readKinds(ctx); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var issue *core.Issue
-	build(newIssueMediator(ctx, r.reader, r.owner, r.project, number), func(i *core.Issue, e error) bool {
+	build(newIssueMediator(ctx, r.reader, r.owner, r.project, number), r, func(i *core.Issue, e error) bool {
 		issue, err = i, e
 		return false
 	})
@@ -141,7 +196,7 @@ var trailingNumber = regexp.MustCompile(`\d+$`)
 
 // build yields the issues the mediator reads, each with its edits and
 // timeline.
-func build(mm *importMediator, yield func(*core.Issue, error) bool) {
+func build(mm *importMediator, r *remote, yield func(*core.Issue, error) bool) {
 	var cur *issueBuilder
 	for {
 		ev := mm.NextImportEvent()
@@ -160,6 +215,7 @@ func build(mm *importMediator, yield func(*core.Issue, error) bool) {
 				return
 			}
 			cur = newIssueBuilder(ev.issue)
+			cur.r = r
 		case IssueEditEvent:
 			cur.edit("", ev.userContentEdit)
 		case TimelineEvent:
@@ -182,6 +238,12 @@ type issueBuilder struct {
 	issue   *core.Issue
 	edited  map[string]bool // targets whose creation edit was seen
 	renamed bool
+	// GitHub's labels: with its type, the issue's labels
+	labels []string
+	// r holds the bridge's configuration
+	r *remote
+	// issueType is the name of the issue's type, "" for none
+	issueType string
 }
 
 func newIssueBuilder(i issue) *issueBuilder {
@@ -242,14 +304,12 @@ func (b *issueBuilder) timeline(item timelineItem) {
 		b.touch(c.CreatedAt.Time)
 	case "LabeledEvent":
 		e := item.LabeledEvent
-		l := string(e.Label.Name)
-		b.issue.Labels = append(b.issue.Labels, l)
-		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Added: []string{l}})
+		b.relabel(e.actorEvent, func() { b.labels = append(b.labels, string(e.Label.Name)) })
 	case "UnlabeledEvent":
 		e := item.UnlabeledEvent
-		l := string(e.Label.Name)
-		b.issue.Labels = slices.DeleteFunc(b.issue.Labels, func(o string) bool { return o == l })
-		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Removed: []string{l}})
+		b.relabel(e.actorEvent, func() {
+			b.labels = slices.DeleteFunc(b.labels, func(l string) bool { return l == string(e.Label.Name) })
+		})
 	case "AssignedEvent":
 		e := item.AssignedEvent
 		if login := string(e.Assignee.Actor.Login); login != "" {
@@ -264,6 +324,19 @@ func (b *issueBuilder) timeline(item timelineItem) {
 			b.issue.Assignees = slices.DeleteFunc(b.issue.Assignees, func(a core.User) bool { return a == u })
 			b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventAssignees, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Unassigned: []core.User{u}})
 		}
+	case "IssueTypeAddedEvent", "IssueTypeChangedEvent", "IssueTypeRemovedEvent":
+		e := item.IssueTypeAddedEvent
+		switch item.Typename {
+		case "IssueTypeChangedEvent":
+			e = item.IssueTypeChangedEvent
+		case "IssueTypeRemovedEvent":
+			e = item.IssueTypeRemovedEvent
+		}
+		name := ""
+		if e.IssueType != nil && item.Typename != "IssueTypeRemovedEvent" {
+			name = string(e.IssueType.Name)
+		}
+		b.relabel(e.actorEvent, func() { b.issueType = name })
 	case "ClosedEvent":
 		e := item.ClosedEvent
 		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventStatus, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Status: common.ClosedStatus})
@@ -279,6 +352,39 @@ func (b *issueBuilder) timeline(item timelineItem) {
 			b.issue.OriginalTitle = string(e.PreviousTitle)
 		}
 		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventTitle, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Title: string(e.CurrentTitle)})
+	}
+}
+
+// issueLabels are GitHub's labels, and its type as a kind label. Its
+// assignees are the engine's to make labels.
+func (b *issueBuilder) issueLabels() []string {
+	labels := slices.Clone(b.labels)
+	if b.issueType != "" {
+		labels = append(labels, b.r.kindLabel(b.issueType))
+	}
+	slices.Sort(labels)
+	return slices.Compact(labels)
+}
+
+// relabel makes a change of GitHub's labels or type an event, if it changes
+// the issue's labels: typing an issue labeled the old way doesn't.
+func (b *issueBuilder) relabel(e actorEvent, change func()) {
+	was := b.issueLabels()
+	change()
+	now := b.issueLabels()
+	ev := core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time}
+	for _, l := range now {
+		if !slices.Contains(was, l) {
+			ev.Added = append(ev.Added, l)
+		}
+	}
+	for _, l := range was {
+		if !slices.Contains(now, l) {
+			ev.Removed = append(ev.Removed, l)
+		}
+	}
+	if ev.Added != nil || ev.Removed != nil {
+		b.event(ev)
 	}
 }
 
@@ -301,9 +407,71 @@ func (b *issueBuilder) touch(t time.Time) {
 }
 
 func (b *issueBuilder) finish() *core.Issue {
-	slices.Sort(b.issue.Labels)
+	b.issue.Labels = b.issueLabels()
+	// the kind GitHub holds the other way: as a label of a type, when the
+	// issue has none or that one's, or as the type with kinds = labels
+	if b.issueType != "" && !b.r.kinds {
+		b.issue.Resend = append(b.issue.Resend, b.r.kindLabel(b.issueType))
+	}
+	for _, l := range b.issue.Labels {
+		if _, ok := b.r.typeID(l); ok && b.r.kinds && slices.Contains(b.labels, l) &&
+			(b.issueType == "" || b.r.kindLabel(b.issueType) == l) {
+			b.issue.Resend = append(b.issue.Resend, l)
+		}
+	}
 	slices.SortStableFunc(b.issue.Events, func(x, y core.Event) int { return x.Time.Compare(y.Time) })
 	return b.issue
+}
+
+// kindLabel is the label of an issue type: kind-types', else kind:<name>.
+func (r *remote) kindLabel(typeName string) string {
+	if l, ok := r.kindTypes[strings.ToLower(typeName)]; ok {
+		return l
+	}
+	return "kind:" + core.Slug(typeName)
+}
+
+// readKinds reads the issue types before a pull, as ones may have been made
+// since the last.
+func (r *remote) readKinds(ctx context.Context) error {
+	if !r.kinds {
+		return nil
+	}
+	return r.readTypes(ctx)
+}
+
+// readTypes reads the enabled issue types of the repository's organization.
+// A user's repository has none.
+func (r *remote) readTypes(ctx context.Context) error {
+	var q issueTypesQuery
+	vars := varmap{"owner": githubv4.String(r.owner), "name": githubv4.String(r.project)}
+	if err := r.reader.queryPrintMsgs(ctx, &q, vars); err != nil {
+		return err
+	}
+	var types map[string]string
+	if q.Repository.IssueTypes != nil {
+		for _, t := range q.Repository.IssueTypes.Nodes {
+			if !t.IsEnabled {
+				continue
+			}
+			if types == nil {
+				types = map[string]string{}
+			}
+			types[strings.ToLower(r.kindLabel(t.Name))] = t.ID
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.types, r.typesRead = types, true
+	return nil
+}
+
+// typeID returns the id of the enabled type a label stands for.
+func (r *remote) typeID(label string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.types[strings.ToLower(label)]
+	return id, ok
 }
 
 // actorUser returns a GitHub actor, the "ghost" user for a deleted one.
