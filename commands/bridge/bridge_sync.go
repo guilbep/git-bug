@@ -50,7 +50,7 @@ Run it from a single place, for example a CI job:
 
     git bug pull && git bug bridge sync && git bug push
 
-git-bug's assignee:<name> labels name a person, by their identity's login
+git-bug's assignee:NAME labels name a person, by their identity's login
 or the login "bridge new" tagged them with. On GitHub and GitLab, they are
 the assignees of that person's own account there: the one linked as above,
 or the one they were seen as. Someone with no account on a forge, or a
@@ -64,7 +64,7 @@ only the key:
 
     git config git-bug.bridge.<name>.assignees labels
 
-After a change, "git bug bridge pull <name> --no-resume" reads every issue
+After a change, "git bug bridge pull NAME --no-resume" reads every issue
 once, so that the next sync moves the assignees (a --dry-run lists them).
 A value other than native or labels stops the sync of every bridge, even
 those of forges that don't map assignees yet (Gitea).
@@ -91,7 +91,7 @@ them for releases:
 Set sprints off before the project's first sync with this version: turned off
 later, git-bug drops the sprints that milestones held. Like assignees, kinds,
 sprints and kind-types must be the same in every clone that syncs, a CI job's
-included, and the upgrade step is the same: "git bug bridge pull <name>
+included, and the upgrade step is the same: "git bug bridge pull NAME
 --no-resume" once, then "bridge sync --dry-run", then "bridge sync".
 
 Comments written for a pull request (line comments, replies and reviews,
