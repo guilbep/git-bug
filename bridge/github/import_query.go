@@ -116,6 +116,8 @@ type issue struct {
 	Number githubv4.Int
 	Body   githubv4.String
 	Url    githubv4.URI
+	// IssueType is the type the issue holds now: null for none
+	IssueType *struct{ Name githubv4.String }
 }
 
 type timelineItemsConnection struct {

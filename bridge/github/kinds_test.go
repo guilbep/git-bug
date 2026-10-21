@@ -380,3 +380,29 @@ func TestGithubRemovedKindClearsDisabledType(t *testing.T) {
 	require.Empty(t, typ)
 	require.NotContains(t, g.Issue(ref.Number).Labels, "feat")
 }
+
+// A type GitHub holds without a timeline event is the issue's kind too: its
+// flat label moved to the type stays in git-bug, and the push's removal of
+// it is no change.
+func TestGithubTypeWithoutEventKeepsKind(t *testing.T) {
+	g := newTypedForge(t)
+	backend, sync := syncing(t, g)
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("created with a type", "body")
+	alice.SetLabels(ref, []string{"bug"})
+	githubActor{fake: g.fake}.do(func() { githubActor{fake: g.fake}.issue(ref).issueType = "Bug" })
+
+	require.Zero(t, sync())
+	labels, typ := g.heldType(ref)
+	require.Empty(t, labels)
+	require.Equal(t, "Bug", typ)
+	b, err := backend.Bugs().ResolveBugCreateMetadata("sync:"+g.Key()+":id", ref.ID)
+	require.NoError(t, err)
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	for range 2 {
+		require.Zero(t, sync())
+		require.Equal(t, writes, g.Writes(), "nothing more sent")
+		require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+		require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
+	}
+}

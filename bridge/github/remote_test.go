@@ -289,6 +289,9 @@ func (f *fakeGithub) node(gi *ghIssue) issueNode {
 		Body:        githubv4.String(gi.body),
 		Url:         githubv4.URI{URL: u},
 	}}
+	if gi.issueType != "" {
+		n.IssueType = &struct{ Name githubv4.String }{githubv4.String(gi.issueType)}
+	}
 	n.UserContentEdits.Nodes = newest(gi.bodyEdits)
 	for _, item := range gi.timeline {
 		if item.Typename == "IssueComment" {

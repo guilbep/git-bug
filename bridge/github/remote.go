@@ -246,6 +246,10 @@ type issueBuilder struct {
 	r *remote
 	// issueType is the name of the issue's type, "" for none
 	issueType string
+	// held is the type GitHub says the issue holds now; typed tells a type
+	// event was seen
+	held  string
+	typed bool
 }
 
 func newIssueBuilder(i issue) *issueBuilder {
@@ -262,7 +266,15 @@ func newIssueBuilder(i issue) *issueBuilder {
 			Status:        common.OpenStatus,
 		},
 		edited: map[string]bool{},
+		held:   heldType(i),
 	}
+}
+
+func heldType(i issue) string {
+	if i.IssueType == nil {
+		return ""
+	}
+	return string(i.IssueType.Name)
 }
 
 // edit records an edit of the body (target "") or of a comment. GitHub lists
@@ -338,6 +350,7 @@ func (b *issueBuilder) timeline(item timelineItem) {
 		if e.IssueType != nil && item.Typename != "IssueTypeRemovedEvent" {
 			name = string(e.IssueType.Name)
 		}
+		b.typed = true
 		b.relabel(e.actorEvent, func() { b.issueType = name })
 	case "ClosedEvent":
 		e := item.ClosedEvent
@@ -409,6 +422,19 @@ func (b *issueBuilder) touch(t time.Time) {
 }
 
 func (b *issueBuilder) finish() *core.Issue {
+	// the type held wins over the events. One set without an event was held
+	// all along: removing its flat label didn't remove the kind
+	if !b.typed && b.held != "" {
+		kind := b.r.kindLabel(b.held)
+		for i := range b.issue.Events {
+			e := &b.issue.Events[i]
+			e.Removed = slices.DeleteFunc(e.Removed, func(l string) bool { return l == kind })
+		}
+		b.issue.Events = slices.DeleteFunc(b.issue.Events, func(e core.Event) bool {
+			return e.Kind == core.EventLabels && len(e.Added) == 0 && len(e.Removed) == 0
+		})
+	}
+	b.issueType = b.held
 	b.issue.Labels = b.issueLabels()
 	// the kind GitHub holds the other way: as a label of a type, when the
 	// issue has none or that one's, or as the type with kinds = labels
