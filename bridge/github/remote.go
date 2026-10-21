@@ -111,8 +111,9 @@ type remote struct {
 	mu     sync.Mutex
 	repoID string
 	labels map[string]string // id by lowercased name
-	// types are the ids of the enabled issue types by lowercased label; none
-	// for a user's repository. typesRead tells readTypes ran.
+	// types are the ids of the enabled issue types by label, matched exactly;
+	// nil for a user's repository, which has none. typesRead tells readTypes
+	// ran.
 	types     map[string]string
 	typesRead bool
 }
@@ -451,14 +452,12 @@ func (r *remote) readTypes(ctx context.Context) error {
 	}
 	var types map[string]string
 	if q.Repository.IssueTypes != nil {
+		// an organization's, even with none enabled
+		types = map[string]string{}
 		for _, t := range q.Repository.IssueTypes.Nodes {
-			if !t.IsEnabled {
-				continue
+			if t.IsEnabled {
+				types[r.kindLabel(t.Name)] = t.ID
 			}
-			if types == nil {
-				types = map[string]string{}
-			}
-			types[strings.ToLower(r.kindLabel(t.Name))] = t.ID
 		}
 	}
 	r.mu.Lock()
@@ -467,11 +466,12 @@ func (r *remote) readTypes(ctx context.Context) error {
 	return nil
 }
 
-// typeID returns the id of the enabled type a label stands for.
+// typeID returns the id of the enabled type a label stands for, matched
+// exactly: kind:Bug is no type's.
 func (r *remote) typeID(label string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id, ok := r.types[strings.ToLower(label)]
+	id, ok := r.types[label]
 	return id, ok
 }
 
@@ -637,26 +637,34 @@ func (r *remote) Assign(ctx context.Context, as core.Account, issue core.Ref, ad
 // changeType sets the issue's type from the kinds added or removed. It
 // returns the labels left to add and to remove, and the kinds GitHub refused
 // to set or clear, left out of both. The issue has one type: another kind is
-// a label, and the type's label held the old way comes off. With kinds =
-// labels, a type whose label is added or removed is cleared.
+// a label, and the type's label held the old way comes off. A removed kind
+// clears its type even disabled. With kinds = labels, a type whose label is
+// added or removed is cleared.
 func (r *remote) changeType(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) (add, remove []string, refused core.RefusedLabels, err error) {
-	hasType := func(l string) bool { _, ok := r.typeID(l); return ok }
-	if !r.kinds {
-		// types aren't read in labels mode
-		hasType = func(l string) bool {
-			return strings.HasPrefix(l, "kind:") || slices.Contains(slices.Collect(maps.Values(r.kindTypes)), l)
-		}
-	} else {
+	// mayBeType tells a label that may be a type's, as types aren't read in
+	// labels mode, and a disabled one has no id
+	mayBeType := func(l string) bool {
+		return strings.HasPrefix(l, "kind:") || slices.Contains(slices.Collect(maps.Values(r.kindTypes)), l)
+	}
+	hasType := mayBeType
+	read := slices.ContainsFunc(added, mayBeType) || slices.ContainsFunc(removed, mayBeType)
+	if r.kinds {
 		r.mu.Lock()
-		read := r.typesRead
+		typesRead := r.typesRead
 		r.mu.Unlock()
-		if !read {
+		if !typesRead {
 			if err := r.readTypes(ctx); err != nil {
 				return nil, nil, nil, err
 			}
 		}
+		r.mu.Lock()
+		org := r.types != nil
+		r.mu.Unlock()
+		hasType = func(l string) bool { _, ok := r.typeID(l); return ok }
+		// a user's repository has no type to clear
+		read = slices.ContainsFunc(added, hasType) || org && slices.ContainsFunc(removed, mayBeType)
 	}
-	if !slices.ContainsFunc(added, hasType) && !slices.ContainsFunc(removed, hasType) {
+	if !read {
 		return added, removed, nil, nil
 	}
 

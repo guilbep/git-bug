@@ -337,3 +337,39 @@ func TestGithubKindsSwitch(t *testing.T) {
 	require.Equal(t, writes, g.Writes(), "nothing more sent")
 	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
 }
+
+// Labels match types exactly: kind:Bug is a label, kind:bug the type Bug.
+// GitHub's labels ignore case, so each is on its own issue.
+func TestGithubKindLabelsMatchExactly(t *testing.T) {
+	ctx := context.Background()
+	g := newGithubForge(t, "owner")
+	g.fake.types = []ghType{{"Bug", true}}
+	bot := g.accounts[0]
+	alice := g.UserAct("alice")
+	label, kind := alice.CreateIssue("label", "body"), alice.CreateIssue("kind", "body")
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, label, []string{"kind:Bug"}, nil))
+	labels, typ := g.heldType(label)
+	require.Equal(t, []string{"kind:Bug"}, labels)
+	require.Empty(t, typ)
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, kind, []string{"kind:bug"}, nil))
+	labels, typ = g.heldType(kind)
+	require.Empty(t, labels)
+	require.Equal(t, "Bug", typ)
+}
+
+// Removing the kind of a disabled type clears it: else the next pull would
+// bring the kind back.
+func TestGithubRemovedKindClearsDisabledType(t *testing.T) {
+	g := newTypedForge(t)
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.setType("alice", ref, "Feature")
+	g.fake.types[1].enabled = false
+	require.Equal(t, []string{"feat"}, g.Issue(ref.Number).Labels)
+
+	require.NoError(t, g.ChangeLabels(context.Background(), g.accounts[0], ref, nil, []string{"feat"}))
+	_, typ := g.heldType(ref)
+	require.Empty(t, typ)
+	require.NotContains(t, g.Issue(ref.Number).Labels, "feat")
+}
