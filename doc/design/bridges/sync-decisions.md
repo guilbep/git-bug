@@ -293,16 +293,20 @@ spec stays the authority.
   owner to add types, which then show in every EPFL-ENAC repository's
   picker. *If wrong:* GitHub's `type:` filters miss the kinds still held
   as labels.
-- **Kinds match type names ignoring case, plus the bridge key `kind-types =
-  feat:Feature,…`**, which git-board writes from its config. A type with no
-  kind comes in as `kind:<slug of its name>` (Task as `kind:task`). An issue
-  has one type: the kind GitHub holds stays it, another goes as a label,
-  and a change on both sides follows "the later change wins". *If wrong:* a
-  kind missing from the map comes back as a second value (`kind:feature`
-  next to `kind:feat`).
+- **Each enabled type is one label: `kind:<slug of its name>`, or what the
+  bridge key `kind-types` maps it to**, as git-bug stores it (co2's flat
+  `bug=Bug,feat=Feature`, or `kind:feat=Feature`). git-board writes the key
+  from its config. Revised on 2026-10-21 with the user, as co2 stores kinds
+  as flat labels. Type names match ignoring case. Labels match exactly, as
+  a pull must give back the label pushed for its echo to be claimed. An
+  issue has one type: the kind GitHub holds stays it, another goes as a
+  label, and a change on both sides follows "the later change wins". *If
+  wrong:* a kind missing from the map comes back as a second value
+  (`kind:feature` next to `feat`), and `Kind:bug` stays a label.
 - **Existing kinds move both ways.** GitHub's types come in as kind labels
-  with the upgrade's full pull. A `kind:*` label on GitHub whose kind has a
-  type goes in `Issue.Resend`, so it comes off once the type is set. *If
+  with the upgrade's full pull. A type's label held as a label on GitHub
+  goes in `Issue.Resend` when the issue has no type or that one, so it
+  comes off once the type is set. *If
   wrong:* until the full pull, co2's 65 typed issues get their kinds only
   when they change on GitHub.
 - **A project can switch types off with `kinds = labels`** (default

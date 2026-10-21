@@ -65,9 +65,20 @@ refusals, the per-project `assignees = labels` switch).
   - always a type, others refused: six new types org-wide first, and kinds
     that don't show on GitHub until then;
   - labels only: co2's 65 types would never come in.
-- **Names match ignoring case, plus a bridge key** `kind-types =
-  feat:Feature,…`, which git-board writes from its config. A type with no
-  kind comes in as `kind:<slug of its name>`: Task is `kind:task`.
+- **Each enabled type is one label**:
+  - By default a type is `kind:<slug of its name>`: Bug is `kind:bug`, Task
+    is `kind:task`.
+  - The bridge key `kind-types` maps types to labels as git-bug stores them,
+    over that default: `bug=Bug,feat=Feature` for co2, whose kinds are
+    flat labels (no `[fields.kind]`), or `kind:feat=Feature` with
+    git-board's default config. git-board writes the key from its config.
+  - Type names match ignoring case. Labels match exactly, as the pull must
+    give back the very label pushed for its echo to be recognized, so
+    `Kind:bug` stays a label.
+  - Revised with the user on 2026-10-21, once co2's flat kinds were found.
+    Weighed and left: any label named like a type becomes that type, which
+    would turn every synced repository's `documentation` into a type; and
+    co2 moving to `kind:` labels first.
 - **One type per issue**: the kind GitHub holds stays the type, and another
   goes as a label, so the round trip is stable. A change made on both sides
   follows "the later change wins", as labels do. Project 40's Category
@@ -75,8 +86,9 @@ refusals, the per-project `assignees = labels` switch).
 - **Existing data**:
   - Types already on GitHub come in as kind labels after the upgrade's full
     pull (`git bug bridge pull <bridge> --no-resume`). A dry run names them.
-  - A `kind:*` label on GitHub whose kind has a type goes in
-    `Issue.Resend`: the push sets the type, and the label comes off.
+  - A type's label held as a label on GitHub goes in `Issue.Resend` when
+    the issue has no type or that one: the push sets the type, and the
+    label comes off.
 - **Switch: `kinds = native|labels`**, default `native`, like `assignees`.
   In `labels` mode the fork ignores types, as today: it neither reads them
   nor clears those people set.
@@ -96,8 +108,9 @@ refusals, the per-project `assignees = labels` switch).
   stays a label when there is none**, the same rule as kind.
   - The fork looks through the project's milestones and its groups'
     (`include_ancestors`), open or closed.
-  - A milestone's slug is git-board's `Slug` of its title: lower case,
-    accents dropped, other characters' runs as `-`.
+  - A milestone's label is `sprint:` and git-board's `Slug` of its title:
+    lower case, accents dropped, other characters' runs as `-`. It is
+    matched exactly, as for kinds, so `sprint:Sprint 2` stays a label.
   - The fork creates no milestone. People set the dates, and choose project
     or group.
   - Weighed and left: creating missing milestones, as the fork knows
@@ -117,20 +130,23 @@ refusals, the per-project `assignees = labels` switch).
    picker of every EPFL-ENAC repository, so the organization decides. All
    six make 9 of the 25 allowed.
 
-   | kind | EPFL-ENAC type | To add (name: description) | `kind-types` |
+   | kind | EPFL-ENAC type | To add (name: description) | co2's `kind-types` entry |
    |---|---|---|---|
-   | bug | Bug | none | none, the name matches |
-   | feat | Feature | none | `feat:Feature` |
-   | polish | none | Polish: a small improvement to something that works | none |
-   | perf | none | Performance: faster or lighter, same behaviour | `perf:Performance` |
-   | refactor | none | Refactor: a code change with no change in behaviour | none |
-   | docs | none | Documentation: docs only | `docs:Documentation` |
-   | style | none | Style: formatting only | none |
-   | test | none | Test: tests only | none |
-   | none | Task | none | comes in as `kind:task`; add `task` to `[branches] kinds` to make it a kind |
+   | bug | Bug | none | `bug=Bug` |
+   | feat | Feature | none | `feat=Feature` |
+   | polish | none | Polish: a small improvement to something that works | `polish=Polish` |
+   | perf | none | Performance: faster or lighter, same behaviour | `perf=Performance` |
+   | refactor | none | Refactor: a code change with no change in behaviour | `refactor=Refactor` |
+   | docs | none | Documentation: docs only | `docs=Documentation` |
+   | style | none | Style: formatting only | `style=Style` |
+   | test | none | Test: tests only | `test=Test` |
+   | none | Task | none | none: comes in as `kind:task` |
 
-   Naming them Perf and Docs drops those entries from the map, but puts
-   those names in every repository's picker.
+   co2's kinds are flat labels, so every kind needs an entry. A project
+   with `kind:` labels needs one only where the slug of the type differs
+   from its kind (`kind:feat=Feature`).
+   EPFL-ENAC's Priority issue field (Urgent, High, Medium, Low) could
+   hold `prio:p0`–`p3` natively; that's a later build.
 2. **A private scratch repository in EPFL-ENAC** for the live test, such as
    `EPFL-ENAC/git-bug-native-fields-test`:
    - guilbep can write to it;
@@ -143,7 +159,8 @@ refusals, the per-project `assignees = labels` switch).
    milestones there. Group milestones are tested with the fake only.
 4. **With the build, later**:
    - git-board writes `kind-types`, `kinds` and `sprints` into every clone,
-     CI's included, as for `assignees`;
+     CI's included, as for `assignees`. For `kind-types` it needs each
+     kind's type name (feat is Feature), which its config doesn't hold yet;
    - co2 upgrades with a full pull, then a dry run, then the user's sync.
 
 ## Building it
