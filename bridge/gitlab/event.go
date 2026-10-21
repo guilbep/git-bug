@@ -138,6 +138,25 @@ func (l LabelEvent) Kind() EventKind {
 	}
 }
 
+var _ Event = &MilestoneEvent{}
+
+type MilestoneEvent struct{ gitlab.MilestoneEvent }
+
+// ID is prefixed: milestone events' ids may collide with label events'.
+func (m MilestoneEvent) ID() string           { return fmt.Sprintf("milestone-%d", m.MilestoneEvent.ID) }
+func (m MilestoneEvent) UserID() int64        { return m.User.ID }
+func (m MilestoneEvent) CreatedAt() time.Time { return *m.MilestoneEvent.CreatedAt }
+func (m MilestoneEvent) Kind() EventKind {
+	switch m.Action {
+	case "add":
+		return EventChangedMilestone
+	case "remove":
+		return EventRemovedMilestone
+	default:
+		return EventUnknown
+	}
+}
+
 var _ Event = &StateEvent{}
 
 type StateEvent struct{ gitlab.StateEvent }

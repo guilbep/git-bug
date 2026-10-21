@@ -77,6 +77,8 @@ func TestGithubImporterIntegration(t *testing.T) {
 }
 
 func setupExpectations(t *testing.T, mock *mocks.Client) {
+	// a user's repository has no issue types
+	mock.On("Query", m.Anything, m.AnythingOfType("*github.issueTypesQuery"), m.Anything).Return(nil)
 	rateLimitingError(mock)
 	expectIssueQuery1(mock)
 	expectIssueQuery2(mock)

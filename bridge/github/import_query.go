@@ -34,6 +34,20 @@ type labelsQuery struct {
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
+// issueTypesQuery reads the types of an organization's repository: null for a
+// user's.
+type issueTypesQuery struct {
+	Repository struct {
+		IssueTypes *struct {
+			Nodes []struct {
+				ID        string `graphql:"id"`
+				Name      string `graphql:"name"`
+				IsEnabled bool   `graphql:"isEnabled"`
+			}
+		} `graphql:"issueTypes(first: 25)"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
 type loginQuery struct {
 	Viewer struct {
 		Login string `graphql:"login"`
@@ -102,6 +116,8 @@ type issue struct {
 	Number githubv4.Int
 	Body   githubv4.String
 	Url    githubv4.URI
+	// IssueType is the type the issue holds now: null for none
+	IssueType *struct{ Name githubv4.String }
 }
 
 type timelineItemsConnection struct {
@@ -151,6 +167,20 @@ type assignedEvent struct {
 	}
 }
 
+// issueTypeEvent is an IssueTypeAddedEvent, an IssueTypeChangedEvent (the new
+// type) or an IssueTypeRemovedEvent (the removed one). Null for a deleted type.
+type issueTypeEvent struct {
+	actorEvent
+	IssueType *struct{ Name githubv4.String }
+}
+
+// issueTypeChangedEvent is an IssueTypeChangedEvent, with the type it
+// replaced: only that event has one.
+type issueTypeChangedEvent struct {
+	issueTypeEvent
+	PrevIssueType *struct{ Name githubv4.String }
+}
+
 type renamedTitleEvent struct {
 	actorEvent
 	CurrentTitle  githubv4.String
@@ -170,6 +200,11 @@ type timelineItem struct {
 	// Assignees
 	AssignedEvent   assignedEvent `graphql:"... on AssignedEvent"`
 	UnassignedEvent assignedEvent `graphql:"... on UnassignedEvent"`
+
+	// Type
+	IssueTypeAddedEvent   issueTypeEvent        `graphql:"... on IssueTypeAddedEvent"`
+	IssueTypeChangedEvent issueTypeChangedEvent `graphql:"... on IssueTypeChangedEvent"`
+	IssueTypeRemovedEvent issueTypeEvent        `graphql:"... on IssueTypeRemovedEvent"`
 
 	// Status
 	ClosedEvent struct {

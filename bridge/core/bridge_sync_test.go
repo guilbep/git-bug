@@ -118,13 +118,14 @@ func TestSyncAll(t *testing.T) {
 	require.Equal(t, "from a", b.Issue("1").Title, "pulled from a, pushed to b in one run")
 }
 
-// How a forge holds assignees comes from the run, as git-board gives it from
-// the project's shared configuration, over each clone's bridge key: clones
-// holding them differently would undo each other's syncs.
-func TestSyncAssigneesMode(t *testing.T) {
+// How a forge holds assignees, kinds and sprints comes from the run, as
+// git-board gives it from the project's shared configuration, over each
+// clone's bridge key: clones holding them differently would undo each
+// other's syncs.
+func TestSyncModes(t *testing.T) {
 	repo := newRepo(t)
 	newSyncForge(t, repo, "solo")
-	sync := func(opts ...core.Option) (string, error) {
+	sync := func(key string, opts ...core.Option) (string, error) {
 		results, err := core.SyncAll(context.Background(), repo, nil, true, opts...)
 		if err != nil {
 			return "", err
@@ -132,25 +133,41 @@ func TestSyncAssigneesMode(t *testing.T) {
 		for r := range results {
 			require.False(t, r.IsError(), r.String())
 		}
-		return remoteConfs["solo"][core.ConfigKeyAssignees], nil
+		return remoteConfs["solo"][key], nil
+	}
+	for _, c := range []struct{ key, other string }{
+		{core.ConfigKeyAssignees, core.ModeLabels},
+		{core.ConfigKeyKinds, core.ModeLabels},
+		{core.ConfigKeySprints, core.ModeOff},
+	} {
+		require.NoError(t, core.SetBridgeConfig(repo, "solo", c.key, ""))
+		mode, err := sync(c.key)
+		require.NoError(t, err)
+		require.Empty(t, mode, c.key+": native by default")
+		require.NoError(t, core.SetBridgeConfig(repo, "solo", c.key, c.other))
+		mode, err = sync(c.key)
+		require.NoError(t, err)
+		require.Equal(t, c.other, mode, c.key)
+		mode, err = sync(c.key, core.WithConfig(c.key, core.ModeNative))
+		require.NoError(t, err)
+		require.Equal(t, core.ModeNative, mode, c.key+": the run's mode wins")
+
+		require.NoError(t, core.SetBridgeConfig(repo, "solo", c.key, "lables"))
+		_, err = sync(c.key)
+		require.ErrorContains(t, err, "lables")
+		_, err = sync(c.key, core.WithConfig(c.key, "lables"))
+		require.ErrorContains(t, err, "lables")
+		require.NoError(t, core.SetBridgeConfig(repo, "solo", c.key, ""))
 	}
 
-	mode, err := sync()
+	mode, err := sync(core.ConfigKeyAssignees, core.WithAssignees(core.AssigneesLabels))
 	require.NoError(t, err)
-	require.Empty(t, mode, "native by default")
-	require.NoError(t, core.SetBridgeConfig(repo, "solo", core.ConfigKeyAssignees, core.AssigneesLabels))
-	mode, err = sync()
-	require.NoError(t, err)
-	require.Equal(t, core.AssigneesLabels, mode)
-	mode, err = sync(core.WithAssignees(core.AssigneesNative))
-	require.NoError(t, err)
-	require.Equal(t, core.AssigneesNative, mode, "the run's mode wins")
+	require.Equal(t, core.AssigneesLabels, mode, "WithAssignees still works")
 
-	require.NoError(t, core.SetBridgeConfig(repo, "solo", core.ConfigKeyAssignees, "lables"))
-	_, err = sync()
-	require.ErrorContains(t, err, "lables")
-	_, err = sync(core.WithAssignees("lables"))
-	require.ErrorContains(t, err, "lables")
+	_, err = sync(core.ConfigKeySprints, core.WithConfig(core.ConfigKeySprints, core.ModeLabels))
+	require.ErrorContains(t, err, core.ModeLabels, "sprints have no labels mode")
+	_, err = sync(core.ConfigKeyKinds, core.WithConfig(core.ConfigKeyKinds, core.ModeOff))
+	require.ErrorContains(t, err, core.ModeOff, "kinds have no off mode")
 }
 
 func TestSyncAllDryRun(t *testing.T) {

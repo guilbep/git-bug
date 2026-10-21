@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,14 +36,30 @@ const (
 	// to the login it has on the forge: login-<identity> = <login>.
 	ConfigKeyLoginPrefix = "login-"
 	// ConfigKeyAssignees is how the forge holds git-bug's assignee:<login>
-	// labels: AssigneesNative (the default) or AssigneesLabels. Every clone
-	// must hold them the same way, or each sync undoes the others':
-	// WithAssignees gives it from a shared configuration.
+	// labels: ModeNative (the default) or ModeLabels. Every clone must hold
+	// them the same way, or each sync undoes the others': WithAssignees
+	// gives it from a shared configuration.
 	ConfigKeyAssignees = "assignees"
-	// AssigneesNative holds them as the forge's assignees.
-	AssigneesNative = "native"
+	// ConfigKeyKinds is how the forge holds kinds: ModeNative (the default,
+	// as issue types where the forge has them) or ModeLabels.
+	ConfigKeyKinds = "kinds"
+	// ConfigKeySprints is how the forge holds sprints: ModeNative (the
+	// default, as milestones where the forge has them) or ModeOff.
+	ConfigKeySprints = "sprints"
+	// ConfigKeyKindTypes maps kinds to the forge's types.
+	ConfigKeyKindTypes = "kind-types"
+
+	// ModeNative holds it as the forge's own field.
+	ModeNative = "native"
+	// ModeLabels holds it as labels on the forge.
+	ModeLabels = "labels"
+	// ModeOff neither reads nor writes the forge's own field.
+	ModeOff = "off"
+
+	// AssigneesNative holds assignees as the forge's assignees.
+	AssigneesNative = ModeNative
 	// AssigneesLabels holds them as labels on the forge too.
-	AssigneesLabels = "labels"
+	AssigneesLabels = ModeLabels
 
 	MetaKeyOrigin = "origin"
 
@@ -481,15 +498,25 @@ func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
 		o(&opts)
 	}
 
-	conf := b.conf
-	if opts.Assignees != "" {
-		conf = maps.Clone(conf)
-		conf[ConfigKeyAssignees] = opts.Assignees
+	conf := maps.Clone(b.conf)
+	if conf == nil {
+		conf = map[string]string{}
 	}
-	if v := conf[ConfigKeyAssignees]; v != "" && v != AssigneesNative && v != AssigneesLabels {
-		return nil, fmt.Errorf("%s: %q is neither %s nor %s", ConfigKeyAssignees, v, AssigneesNative, AssigneesLabels)
+	for k, v := range opts.Config {
+		if v != "" {
+			conf[k] = v
+		}
 	}
-	opts.Assignees = conf[ConfigKeyAssignees]
+	for key, modes := range map[string][]string{
+		ConfigKeyAssignees: {ModeNative, ModeLabels},
+		ConfigKeyKinds:     {ModeNative, ModeLabels},
+		ConfigKeySprints:   {ModeNative, ModeOff},
+	} {
+		if v := conf[key]; v != "" && !slices.Contains(modes, v) {
+			return nil, fmt.Errorf("%s: %q is neither %s", key, v, strings.Join(modes, " nor "))
+		}
+	}
+	opts.Assignees, opts.Kinds, opts.Sprints = conf[ConfigKeyAssignees], conf[ConfigKeyKinds], conf[ConfigKeySprints]
 	remote, err := b.impl.(RemoteBridge).NewRemote(ctx, b.repo, conf)
 	if err != nil {
 		return nil, err

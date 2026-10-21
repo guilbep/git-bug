@@ -35,6 +35,10 @@ type fakeGithub struct {
 	unassignable map[string]bool
 	// noUser are logins without a user
 	noUser map[string]bool
+	// types are the issue types of the owner: none, as for a user, answers null
+	types []ghType
+	// refuseTypes refuses to change an issue's type
+	refuseTypes bool
 
 	mu       sync.Mutex
 	issues   []*ghIssue
@@ -43,6 +47,13 @@ type fakeGithub struct {
 	writes   int
 	failNext bool
 	pulls    map[int]*ghPull
+	// typeReads and typeWrites count the reads and changes of an issue's type
+	typeReads, typeWrites int
+}
+
+type ghType struct {
+	name    string
+	enabled bool
 }
 
 type ghIssue struct {
@@ -55,6 +66,7 @@ type ghIssue struct {
 	closed      bool
 	labels      []string
 	assignees   []string
+	issueType   string
 	bodyEdits   []userContentEdit // oldest first
 	timeline    []timelineItem
 	edits       map[string][]userContentEdit // comment edits by comment id, oldest first
@@ -205,6 +217,31 @@ func (f *fakeGithub) setLabels(login string, issue *ghIssue, labels []string) {
 	issue.updated = now().Time
 }
 
+// setType gives an issue a type, "" for none, leaving the event GitHub does.
+func (f *fakeGithub) setType(login string, issue *ghIssue, name string) {
+	if issue.issueType == name {
+		return
+	}
+	e := issueTypeEvent{actorEvent: actorEvent{Id: githubv4.ID(f.nextID("E")), CreatedAt: now(), Actor: actorOf(login)}}
+	var item timelineItem
+	switch {
+	case name == "":
+		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(issue.issueType)}
+		item = timelineItem{Typename: "IssueTypeRemovedEvent", IssueTypeRemovedEvent: e}
+	case issue.issueType == "":
+		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(name)}
+		item = timelineItem{Typename: "IssueTypeAddedEvent", IssueTypeAddedEvent: e}
+	default:
+		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(name)}
+		item = timelineItem{Typename: "IssueTypeChangedEvent", IssueTypeChangedEvent: issueTypeChangedEvent{
+			issueTypeEvent: e, PrevIssueType: &struct{ Name githubv4.String }{githubv4.String(issue.issueType)},
+		}}
+	}
+	issue.issueType = name
+	issue.timeline = append(issue.timeline, item)
+	issue.updated = now().Time
+}
+
 func (f *fakeGithub) setAssigned(login string, issue *ghIssue, assignee string, assigned bool) {
 	if slices.Contains(issue.assignees, assignee) == assigned || assigned && f.unassignable[assignee] {
 		return
@@ -254,6 +291,9 @@ func (f *fakeGithub) node(gi *ghIssue) issueNode {
 		Body:        githubv4.String(gi.body),
 		Url:         githubv4.URI{URL: u},
 	}}
+	if gi.issueType != "" {
+		n.IssueType = &struct{ Name githubv4.String }{githubv4.String(gi.issueType)}
+	}
 	n.UserContentEdits.Nodes = newest(gi.bodyEdits)
 	for _, item := range gi.timeline {
 		if item.Typename == "IssueComment" {
@@ -316,6 +356,35 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 				Color       string `graphql:"color"`
 				Description string `graphql:"description"`
 			}{ID: id, Name: name})
+		}
+	case *issueTypesQuery:
+		if f.types == nil {
+			return nil
+		}
+		q.Repository.IssueTypes = &struct {
+			Nodes []struct {
+				ID        string `graphql:"id"`
+				Name      string `graphql:"name"`
+				IsEnabled bool   `graphql:"isEnabled"`
+			}
+		}{}
+		for _, t := range f.types {
+			q.Repository.IssueTypes.Nodes = append(q.Repository.IssueTypes.Nodes, struct {
+				ID        string `graphql:"id"`
+				Name      string `graphql:"name"`
+				IsEnabled bool   `graphql:"isEnabled"`
+			}{ID: "IT_" + t.name, Name: t.name, IsEnabled: t.enabled})
+		}
+	case *issueTypeOfQuery:
+		f.typeReads++
+		issue, err := f.find(vars["id"].(githubv4.ID))
+		if err != nil {
+			return err
+		}
+		if issue.issueType != "" {
+			q.Node.Issue.IssueType = &struct {
+				Name string `graphql:"name"`
+			}{Name: issue.issueType}
 		}
 	case *issueQuery:
 		since := vars["issueSince"].(githubv4.DateTime)
@@ -418,6 +487,21 @@ func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 		f.setLabels(c.login, issue, slices.DeleteFunc(slices.Clone(issue.labels), func(l string) bool {
 			return slices.ContainsFunc(in.LabelIDs, func(id githubv4.ID) bool { return f.labels[fmt.Sprint(id)] == l })
 		}))
+	case *updateIssueIssueTypeMutation:
+		in := input.(UpdateIssueIssueTypeInput)
+		f.typeWrites++
+		if f.refuseTypes {
+			return errors.New("FORBIDDEN: can't change the type of this issue")
+		}
+		issue, err := f.find(in.IssueID)
+		if err != nil {
+			return err
+		}
+		name := ""
+		if in.IssueTypeID != nil {
+			name = strings.TrimPrefix(fmt.Sprint(*in.IssueTypeID), "IT_")
+		}
+		f.setType(c.login, issue, name)
 	case *addAssigneesToAssignableMutation:
 		in := input.(githubv4.AddAssigneesToAssignableInput)
 		return f.assignees(c.login, in.AssignableID, in.AssigneeIDs, true, &m.AddAssignees.Assignable)

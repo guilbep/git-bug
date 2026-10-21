@@ -130,6 +130,37 @@ func LabelEvents(ctx context.Context, client *gitlab.Client, issue *gitlab.Issue
 	return out
 }
 
+// MilestoneEvents returns a channel with milestone events.
+func MilestoneEvents(ctx context.Context, client *gitlab.Client, issue *gitlab.Issue) <-chan Event {
+	out := make(chan Event)
+
+	go func() {
+		defer close(out)
+
+		opts := gitlab.ListMilestoneEventsOptions{}
+
+		for {
+			events, resp, err := client.ResourceMilestoneEvents.ListIssueMilestoneEvents(issue.ProjectID, issue.IID, &opts, gitlab.WithContext(ctx))
+			if err != nil {
+				out <- ErrorEvent{Err: err, Time: time.Now()}
+				return
+			}
+
+			for _, e := range events {
+				out <- MilestoneEvent{*e}
+			}
+
+			if resp.CurrentPage >= resp.TotalPages {
+				break
+			}
+
+			opts.Page = resp.NextPage
+		}
+	}()
+
+	return out
+}
+
 // StateEvents returns a channel with state change events.
 func StateEvents(ctx context.Context, client *gitlab.Client, issue *gitlab.Issue) <-chan Event {
 	out := make(chan Event)

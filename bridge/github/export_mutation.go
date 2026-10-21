@@ -1,5 +1,7 @@
 package github
 
+import "github.com/shurcooL/githubv4"
+
 type createIssueMutation struct {
 	CreateIssue struct {
 		Issue struct {
@@ -96,3 +98,30 @@ type createLabelInput struct {
 	ClientMutationID *githubv4.String `json:"clientMutationId,omitempty"`
 }
 */
+
+// UpdateIssueIssueTypeInput is updateIssueIssueType's input, which githubv4
+// lacks. It is exported, as githubv4 names the variable's type after the Go
+// type. A nil IssueTypeID goes as null, which clears the type.
+type UpdateIssueIssueTypeInput struct {
+	IssueID     githubv4.ID  `json:"issueId"`
+	IssueTypeID *githubv4.ID `json:"issueTypeId"`
+}
+
+type updateIssueIssueTypeMutation struct {
+	UpdateIssueIssueType struct {
+		Issue struct {
+			ID string `graphql:"id"`
+		}
+	} `graphql:"updateIssueIssueType(input:$input)"`
+}
+
+// issueTypeOfQuery reads the type of an issue.
+type issueTypeOfQuery struct {
+	Node struct {
+		Issue struct {
+			IssueType *struct {
+				Name string `graphql:"name"`
+			} `graphql:"issueType"`
+		} `graphql:"... on Issue"`
+	} `graphql:"node(id: $id)"`
+}

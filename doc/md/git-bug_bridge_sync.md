@@ -28,7 +28,7 @@ Run it from a single place, for example a CI job:
 
     git bug pull && git bug bridge sync && git bug push
 
-git-bug's assignee:<name> labels name a person, by their identity's login
+git-bug's assignee:NAME labels name a person, by their identity's login
 or the login "bridge new" tagged them with. On GitHub and GitLab, they are
 the assignees of that person's own account there: the one linked as above,
 or the one they were seen as. Someone with no account on a forge, or a
@@ -42,10 +42,35 @@ only the key:
 
     git config git-bug.bridge.<name>.assignees labels
 
-After a change, "git bug bridge pull <name> --no-resume" reads every issue
+After a change, "git bug bridge pull NAME --no-resume" reads every issue
 once, so that the next sync moves the assignees (a --dry-run lists them).
 A value other than native or labels stops the sync of every bridge, even
 those of forges that don't map assignees yet (Gitea).
+
+A git-bug kind is the issue's type on a GitHub organization that has an enabled
+type for it, and a label otherwise (user-owned repositories have no types). A
+type is the label kind:SLUG, SLUG being its name slugged, unless the key
+kind-types maps it: a comma list of LABEL=TYPE, the label as git-bug stores it.
+co2's labels are flat (bug, feat), git-board's default is kind:feat:
+
+    git config git-bug.bridge.<name>.kind-types bug=Bug,feat=Feature
+
+A sprint:SLUG is the GitLab milestone whose title has that slug, among the
+project's active milestones and its groups' (the project's wins on a tie), and
+a label otherwise: the fork never creates a milestone. GitHub's sprints are
+left alone: git-board syncs the Project's Sprint iteration. The key kinds is
+native (the default) or labels, which holds kinds as labels; the key sprints is
+native (the default) or off, which ignores milestones, for a project that uses
+them for releases:
+
+    git config git-bug.bridge.<name>.kinds labels
+    git config git-bug.bridge.<name>.sprints off
+
+Set sprints off before the project's first sync with this version: turned off
+later, git-bug drops the sprints that milestones held. Like assignees, kinds,
+sprints and kind-types must be the same in every clone that syncs, a CI job's
+included, and the upgrade step is the same: "git bug bridge pull NAME
+--no-resume" once, then "bridge sync --dry-run", then "bridge sync".
 
 Comments written for a pull request (line comments, replies and reviews,
 anchored by their review:* metadata, as git-board writes them) go to that
