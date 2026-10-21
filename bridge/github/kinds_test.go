@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -405,4 +406,26 @@ func TestGithubTypeWithoutEventKeepsKind(t *testing.T) {
 		require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
 		require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
 	}
+}
+
+// typeLagClient doesn't resolve the issue whose type it reads, as GitHub may
+// not for a moment.
+type typeLagClient struct{ fakeClient }
+
+func (c typeLagClient) Query(ctx context.Context, q interface{}, vars map[string]interface{}) error {
+	if _, ok := q.(*issueTypeOfQuery); ok {
+		return fmt.Errorf("Could not resolve to a node with the global id of '%v'", vars["id"])
+	}
+	return c.fakeClient.Query(ctx, q, vars)
+}
+
+// A type read that doesn't find the issue is checked, as writes are: the
+// issue still there, it isn't gone.
+func TestGithubTypeReadNotFoundIsChecked(t *testing.T) {
+	g := newTypedForge(t)
+	g.reader.sc = typeLagClient{fakeClient{f: g.fake, login: "bot"}}
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+
+	err := g.ChangeLabels(context.Background(), g.accounts[0], ref, []string{"bug"}, nil)
+	require.ErrorIs(t, err, core.ErrRefused)
 }

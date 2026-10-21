@@ -696,9 +696,9 @@ func (r *remote) changeType(ctx context.Context, as core.Account, issue core.Ref
 
 	var q issueTypeOfQuery
 	// no retries: a deleted issue is an answer
-	err = mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
+	err = r.confirm(ctx, mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
 		return r.reader.sc.Query(ctx, &q, varmap{"id": githubv4.ID(issue.ID)})
-	}, func(string) {}))
+	}, func(string) {})), githubv4.ID(issue.ID))
 	if err != nil {
 		return nil, nil, nil, err
 	}
