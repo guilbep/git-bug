@@ -1,6 +1,7 @@
 package core
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -23,8 +24,8 @@ var ErrGone = errors.New("deleted on the forge")
 // edit of someone else's comment on GitLab.
 var ErrRefused = errors.New("refused by the forge")
 
-// RefusedLabels is returned by ChangeLabels when the forge took the change
-// but these labels, added or removed, like assignees GitHub can't assign or
+// RefusedLabels tells that a label change went through but for these
+// labels, added or removed, like assignees the forge can't assign or
 // unassign. It is an ErrRefused.
 type RefusedLabels []string
 
@@ -33,6 +34,21 @@ func (r RefusedLabels) Error() string {
 }
 
 func (r RefusedLabels) Is(target error) bool { return target == ErrRefused }
+
+// RefusedUsers is returned by Assign when the forge took the change but for
+// these users, as given: someone it can't assign (no access, an edition's
+// limit, no such user) or can't unassign. It is an ErrRefused.
+type RefusedUsers []User
+
+func (r RefusedUsers) Error() string {
+	logins := make([]string, len(r))
+	for i, u := range r {
+		logins[i] = cmp.Or(u.Login, u.ID)
+	}
+	return fmt.Sprintf("%s: assignees %s", ErrRefused, strings.Join(logins, ", "))
+}
+
+func (r RefusedUsers) Is(target error) bool { return target == ErrRefused }
 
 // ErrRateLimited is returned by a Remote when the forge asks to slow down.
 type ErrRateLimited struct {
@@ -130,13 +146,16 @@ type Issue struct {
 	BodyUpdated time.Time
 	Status      common.Status
 	Labels      []string
-	// Resend are the labels the forge holds the old way, sent again for it
-	// to hold them the new way, like GitHub's assignee:<login> labels, now
-	// its assignees.
-	Resend   []string
-	Comments []Comment
+	// Assignees are the forge's own, of an AssigneeRemote.
+	Assignees []User
+	Comments  []Comment
 	// Events are time ordered.
 	Events []Event
+
+	// resend are the labels the forge holds the other way, sent again for it
+	// to hold them its way: assignee:<x> labels as labels on a forge holding
+	// assignees natively, or the reverse. The engine sets it.
+	resend []string
 }
 
 // Comment is a comment on a forge issue.
@@ -157,6 +176,7 @@ const (
 	EventTitle
 	EventLabels
 	EventTextEdit
+	EventAssignees
 )
 
 // Event is a change on a forge issue.
@@ -172,10 +192,25 @@ type Event struct {
 	// EventLabels
 	Added   []string
 	Removed []string
+	// EventAssignees
+	Assigned   []User
+	Unassigned []User
 	// EventTextEdit: Target is "" for the issue's body, else a comment ID.
 	// Text is the text after the edit.
 	Target string
 	Text   string
+}
+
+// AssigneeRemote is a Remote whose forge has assignees, which hold git-bug's
+// assignee:<x> labels unless its bridge says to hold them as labels
+// (AssigneesLabels). Its Issues and Fetch give the issues' Assignees, and
+// EventAssignees when the forge reports them. The engine translates people
+// from one forge to another. Remotes without it hold them as labels.
+type AssigneeRemote interface {
+	Remote
+	// Assign adds and removes assignees, leaving the issue's others alone.
+	// It returns RefusedUsers for those the forge didn't take.
+	Assign(ctx context.Context, as Account, issue Ref, added, removed []User) error
 }
 
 // ErrOutsideDiff is returned by a PullRemote for a line comment it can't put

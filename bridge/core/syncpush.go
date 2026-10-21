@@ -229,6 +229,9 @@ func (e *Engine) planPush(b *cache.BugCache, snap *bug.Snapshot, refs *refIndex,
 			labels += " -" + l
 		}
 		changes = append(changes, labels)
+		for _, l := range e.wouldRefuse(added, removed) {
+			out <- NewExportNothing(b.Id(), "would refuse: "+l)
+		}
 	}
 	if len(changes) > 0 {
 		slices.Sort(changes)
@@ -422,7 +425,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		}, NewExportStatusChange},
 		{slotLabels, labelsValue(labelStrings(snap.Labels)), func(as Account) error {
 			// the changes only: the forge's own since it was last seen stay
-			return e.remote.ChangeLabels(ctx, as, issue, added, removed)
+			return e.changeLabels(ctx, as, issue, added, removed)
 		}, NewExportLabelChange},
 	} {
 		baseValue, _, ok := base(snap, e.remote, s(sc.kind, ""))
@@ -454,6 +457,9 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			records[e.key(string(sc.kind))] = labelsValue(seen)
 			records[e.key("refused")] = "1"
 			records[e.key("refused-as")] = e.assignees()
+			if n, ok := errors.AsType[notSent](err); ok && n.unknown != nil {
+				records[e.key("refused-unknown")] = labelsValue(n.unknown)
+			}
 			err = nil
 		}
 		if errors.Is(err, ErrRefused) {
@@ -489,7 +495,8 @@ func (e *Engine) accountFor(author identity.Interface) (as Account, onBehalf boo
 // labelsHeldBack tells whether a push leaves a bug's labels alone: the forge
 // refused them at the last push, and nothing about them was recorded since,
 // while the forge holds assignees the same way. A refusal under the other
-// way doesn't hold, as the forge may take them now (as labels).
+// way doesn't hold, as the forge may take them now (as labels), nor one of
+// someone without an account on the forge who has one now.
 func (e *Engine) labelsHeldBack(snap *bug.Snapshot) bool {
 	local := lastSlotOp(snap, slot{kind: slotLabels})
 	held := false
@@ -500,7 +507,12 @@ func (e *Engine) labelsHeldBack(snap *bug.Snapshot) bool {
 		}
 		if _, ok := sm.NewMetadata[e.key("refused")]; ok {
 			mode := sm.NewMetadata[e.key("refused-as")]
-			held = mode == "" || mode == e.assignees()
+			held = (mode == "" || mode == e.assignees()) &&
+				!slices.ContainsFunc(splitLabels(sm.NewMetadata[e.key("refused-unknown")]), func(l common.Label) bool {
+					name, _ := assigneeName(l.String())
+					_, why := e.accountOf(name)
+					return why == ""
+				})
 		} else if _, ok := sm.NewMetadata[e.key(string(slotLabels))]; ok {
 			held = false
 		}

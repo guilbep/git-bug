@@ -108,6 +108,10 @@ func (e *Engine) pullMarked(ctx context.Context, b *cache.BugCache, out chan<- I
 }
 
 func (e *Engine) pullIssue(ctx context.Context, issue *Issue, out chan<- ImportResult) error {
+	issue, err := e.labeled(issue)
+	if err != nil {
+		return err
+	}
 	b, duplicate, err := e.findBug(issue, out)
 	if err != nil {
 		return err
@@ -235,7 +239,7 @@ func seenLabels(issue *Issue, resend []string) string {
 // planPull reports what pulling an issue would do, without doing it.
 func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResult) {
 	var id entity.Id
-	resend := issue.Resend
+	resend := issue.resend
 	if b != nil {
 		id = b.Id()
 		snap := b.Snapshot()
@@ -284,7 +288,7 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 // resent returns the labels the forge holds the old way that git-bug has,
 // which a push sends again.
 func resent(issue *Issue, has []string) []string {
-	return slices.DeleteFunc(slices.Clone(issue.Resend), func(l string) bool { return !slices.Contains(has, l) })
+	return slices.DeleteFunc(slices.Clone(issue.resend), func(l string) bool { return !slices.Contains(has, l) })
 }
 
 // pickDuplicate returns, of bugs that are the same forge issue, the one
@@ -713,7 +717,7 @@ func (e *Engine) reconcile(ctx context.Context, b *cache.BugCache, issue *Issue,
 			was = snap.Labels
 		} else {
 			// the forge held them all along, whatever was recorded
-			for _, l := range issue.Resend {
+			for _, l := range issue.resend {
 				was = append(was, common.Label(l))
 			}
 		}

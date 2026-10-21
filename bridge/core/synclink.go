@@ -138,6 +138,9 @@ func (e *Engine) link(ctx context.Context, b *cache.BugCache, bridge, arg string
 	if errors.Is(err, ErrGone) {
 		return Ref{}, fmt.Errorf("bridge %s has no issue %s", bridge, arg)
 	}
+	if err == nil {
+		issue, err = e.labeled(issue)
+	}
 	if err != nil {
 		return Ref{}, err
 	}

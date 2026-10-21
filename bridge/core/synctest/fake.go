@@ -45,6 +45,23 @@ type Actor interface {
 	Delete(issue core.Ref)
 }
 
+// AssigneeForge is a Forge with assignees, that people set directly on the
+// forge too.
+type AssigneeForge interface {
+	Forge
+	core.AssigneeRemote
+	// Assignee returns someone acting directly on the forge, who also
+	// assigns.
+	Assignee(login string) Assigner
+}
+
+// Assigner is an Actor who also assigns.
+type Assigner interface {
+	Actor
+	// SetAssignees sets an issue's assignees, by login.
+	SetAssignees(issue core.Ref, logins []string)
+}
+
 // Quirks are behaviors of real forges the fake can reproduce.
 type Quirks struct {
 	// NoEditEvents: editing a text leaves no event (GitLab).
@@ -55,16 +72,17 @@ type Quirks struct {
 	FailAfterWrite bool
 	// RateLimitOnce: the next write is refused with ErrRateLimited.
 	RateLimitOnce bool
-	// RefuseLabels: ChangeLabels doesn't add these, and returns
-	// RefusedLabels (assignees GitHub can't assign).
-	RefuseLabels []string
-	// OldLabels: the labels of this prefix that people add on the forge are
-	// held the old way, until ChangeLabels adds them (GitHub's assignee:*
-	// labels).
-	OldLabels string
+	// NoAssigneeEvents: assigning leaves no event (GitLab).
+	NoAssigneeEvents bool
+	// MaxAssignees: an issue has at most this many assignees, the first
+	// ones kept, if not 0 (GitLab's free edition: 1).
+	MaxAssignees int
+	// Unassignable are logins the forge leaves out of assignees, and can't
+	// unassign (GitHub: someone without access, a bot).
+	Unassignable []string
 }
 
-var _ Forge = &Fake{}
+var _ AssigneeForge = &Fake{}
 var _ core.PullRemote = &Fake{}
 
 // Fake is an in-memory forge with one project.
@@ -200,31 +218,63 @@ func (f *Fake) SetTitle(_ context.Context, as core.Account, issue core.Ref, titl
 }
 
 func (f *Fake) ChangeLabels(_ context.Context, as core.Account, ref core.Ref, added, removed []string) error {
-	var refused core.RefusedLabels
+	return f.write(func() error {
+		issue, err := f.find(ref)
+		if err != nil {
+			return err
+		}
+		labels := slices.Compact(slices.Sorted(slices.Values(slices.Concat(issue.Labels, added))))
+		labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(removed, l) })
+		return f.setLabels(as.User, ref, labels)
+	})
+}
+
+// Assign assigns the users it has, as GitHub and GitLab do: by id, else by
+// login.
+func (f *Fake) Assign(_ context.Context, as core.Account, ref core.Ref, added, removed []core.User) error {
+	var refused core.RefusedUsers
 	err := f.write(func() error {
 		issue, err := f.find(ref)
 		if err != nil {
 			return err
 		}
-		added = slices.DeleteFunc(slices.Clone(added), func(l string) bool {
-			if slices.Contains(f.quirks.RefuseLabels, l) {
-				refused = append(refused, l)
-				return true
+		assignees := slices.Clone(issue.Assignees)
+		for _, u := range removed {
+			known, ok := f.userOf(u)
+			if !ok {
+				refused = append(refused, u)
+				continue
 			}
-			return false
-		})
-		// now held the new way
-		issue.Resend = slices.DeleteFunc(issue.Resend, func(l string) bool {
-			return slices.Contains(added, l) || slices.Contains(removed, l)
-		})
-		labels := slices.Compact(slices.Sorted(slices.Values(slices.Concat(issue.Labels, added))))
-		labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(removed, l) })
-		return f.setLabels(as.User, ref, labels)
+			assignees = slices.DeleteFunc(assignees, func(a core.User) bool { return a.ID == known.ID })
+		}
+		for _, u := range added {
+			known, ok := f.userOf(u)
+			switch {
+			case !ok, f.quirks.MaxAssignees > 0 && len(assignees) >= f.quirks.MaxAssignees:
+				refused = append(refused, u)
+			case !slices.ContainsFunc(assignees, func(a core.User) bool { return a.ID == known.ID }):
+				assignees = append(assignees, known)
+			}
+		}
+		f.setAssignees(as.User, issue, assignees)
+		return nil
 	})
 	if err == nil && refused != nil {
 		return refused
 	}
 	return err
+}
+
+// userOf returns the forge's user given by id, else by login, if it can be
+// assigned.
+func (f *Fake) userOf(u core.User) (core.User, bool) {
+	for _, known := range f.users {
+		if (u.ID != "" && known.ID == u.ID || u.ID == "" && strings.EqualFold(known.Login, u.Login)) &&
+			!slices.Contains(f.quirks.Unassignable, known.Login) {
+			return known, true
+		}
+	}
+	return core.User{}, false
 }
 
 func (f *Fake) PullComments(_ context.Context, pr string) ([]core.PullComment, error) {
@@ -317,16 +367,25 @@ func (f *Fake) LegacyUser() (string, bool)                   { return "", false 
 // UserAct returns someone acting directly on the forge. A token owner's login
 // gives their account's user: they also act on the forge themselves.
 func (f *Fake) UserAct(login string) Actor {
+	return f.Assignee(login)
+}
+
+func (f *Fake) Assignee(login string) Assigner {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return actor{f: f, u: f.user(login)}
+}
+
+// user returns the user of a login, created if there's none.
+func (f *Fake) user(login string) core.User {
 	for _, u := range f.users {
 		if u.Login == login {
-			return actor{f: f, u: u}
+			return u
 		}
 	}
 	u := core.User{ID: "u-" + login, Login: login, Name: login}
 	f.users[u.ID] = u
-	return actor{f: f, u: u}
+	return u
 }
 
 func (f *Fake) Issue(number string) *core.Issue {
@@ -548,10 +607,36 @@ func (f *Fake) setLabels(u core.User, ref core.Ref, labels []string) error {
 	return nil
 }
 
+func (f *Fake) setAssignees(u core.User, issue *fakeIssue, assignees []core.User) {
+	has := func(list []core.User, a core.User) bool {
+		return slices.ContainsFunc(list, func(o core.User) bool { return o.ID == a.ID })
+	}
+	e := core.Event{Kind: core.EventAssignees, Author: u}
+	for _, a := range assignees {
+		if !has(issue.Assignees, a) {
+			e.Assigned = append(e.Assigned, a)
+		}
+	}
+	for _, a := range issue.Assignees {
+		if !has(assignees, a) {
+			e.Unassigned = append(e.Unassigned, a)
+		}
+	}
+	if e.Assigned == nil && e.Unassigned == nil {
+		return
+	}
+	issue.Assignees = assignees
+	if f.quirks.NoAssigneeEvents {
+		issue.Updated = f.now()
+		return
+	}
+	f.event(issue, e)
+}
+
 func (i *fakeIssue) clone() *core.Issue {
 	c := i.Issue
 	c.Labels = slices.Clone(i.Labels)
-	c.Resend = slices.Clone(i.Resend)
+	c.Assignees = slices.Clone(i.Assignees)
 	c.Comments = slices.Clone(i.Comments)
 	c.Events = slices.Clone(i.Events)
 	return &c
@@ -593,18 +678,21 @@ func (a actor) SetTitle(issue core.Ref, title string) {
 }
 
 func (a actor) SetLabels(issue core.Ref, labels []string) {
+	a.do(func() error { return a.f.setLabels(a.u, issue, labels) })
+}
+
+func (a actor) SetAssignees(issue core.Ref, logins []string) {
 	a.do(func() error {
 		i, err := a.f.find(issue)
 		if err != nil {
 			return err
 		}
-		i.Resend = slices.DeleteFunc(i.Resend, func(l string) bool { return !slices.Contains(labels, l) })
-		for _, l := range labels {
-			if a.f.quirks.OldLabels != "" && strings.HasPrefix(l, a.f.quirks.OldLabels) && !slices.Contains(i.Labels, l) {
-				i.Resend = append(i.Resend, l)
-			}
+		var assignees []core.User
+		for _, l := range logins {
+			assignees = append(assignees, a.f.user(l))
 		}
-		return a.f.setLabels(a.u, issue, labels)
+		a.f.setAssignees(a.u, i, assignees)
+		return nil
 	})
 }
 
