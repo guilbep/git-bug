@@ -59,6 +59,8 @@ git config git-bug.bridge.<name>.assignees labels
 .PP
 After a change, "git bug bridge pull  --no-resume" reads every issue
 once, so that the next sync moves the assignees (a --dry-run lists them).
+A value other than native or labels stops the sync of every bridge, even
+those of forges that don't map assignees yet (GitLab, Gitea).
 
 .PP
 Comments written for a pull request (line comments, replies and reviews,

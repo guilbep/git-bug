@@ -154,13 +154,15 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       refused before, as one; back to native reassigned guilbep, kept
       torvalds and guilbep-gbtest as labels (one warning); full pull and
       sync twice after each switch: quiet.
-- [ ] Review of the switch, for sync.8 (git-board session, 2026-10-20):
-      a dry run announces "would send again" while a bot's echo isn't
-      claimed yet (the sync writes nothing); a whole-call refusal
-      (`e.refused`, no `refused-as`) holds in either mode; a bot from
-      labels to native leaves its `assignee:` label on GitHub (one
-      warning); `WithAssignees` with an unknown value stops every bridge,
-      GitLab's and Gitea's too.
+- [x] Review of the switch, for sync.8 (git-board session, 2026-10-20):
+      a dry run took a push's echo, not claimed yet, for a change to pull
+      (now `echoOf`); a whole refusal records the mode too; an unknown
+      mode stopping every bridge is kept, and the help says so.
+- [ ] A bot from labels to native leaves its `assignee:` label on GitHub,
+      with one warning: GitHub's `assignees` lists users only, and
+      `user(login:)` finds no bot, so the adapter can't tell that the bot
+      is assigned already. Needs `assignedActors` and a bot's id, which
+      only a live GitHub with a bot assignee can check.
 - [ ] `kind:` ↔ GitHub issue types, `sprint:` ↔ Projects iteration (GitHub)
       or milestones (GitLab): weigh each (sync-decisions.md, Assignees).
 - [ ] GitLab native assignees, every forge's login translated per person

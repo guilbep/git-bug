@@ -60,6 +60,8 @@ its own runs the project's setting, but this command reads only the key:
 
 After a change, "git bug bridge pull <name> --no-resume" reads every issue
 once, so that the next sync moves the assignees (a --dry-run lists them).
+A value other than native or labels stops the sync of every bridge, even
+those of forges that don't map assignees yet (GitLab, Gitea).
 
 Comments written for a pull request (line comments, replies and reviews,
 anchored by their review:* metadata, as git-board writes them) go to that
