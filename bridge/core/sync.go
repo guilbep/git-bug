@@ -43,6 +43,8 @@ type SyncOptions struct {
 	// Assignees is how the forge holds assignees, from the bridge's
 	// ConfigKeyAssignees once merged with Config.
 	Assignees string
+	// Kinds and Sprints are how it holds kinds and sprints, the same way.
+	Kinds, Sprints string
 }
 
 // Option sets SyncOptions that a bridge's configuration doesn't give, for

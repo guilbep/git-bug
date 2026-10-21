@@ -429,3 +429,32 @@ func TestGithubTypeReadNotFoundIsChecked(t *testing.T) {
 	err := g.ChangeLabels(context.Background(), g.accounts[0], ref, []string{"bug"}, nil)
 	require.ErrorIs(t, err, core.ErrRefused)
 }
+
+// A kind GitHub refused as a type goes out as a label once the project holds
+// kinds as labels: switching is the remedy.
+func TestGithubSwitchSendsRefusedKindAsLabel(t *testing.T) {
+	g := newTypedForge(t)
+	g.fake.refuseTypes = true
+	backend, sync := syncing(t, g)
+	b, _, err := backend.Bugs().New("local", "body")
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"bug"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Equal(t, 1, sync(), "the type refused")
+	require.Zero(t, sync())
+	ref := g.Issue("1").Ref
+
+	g.kinds = false
+	require.Zero(t, sync())
+	labels, typ := g.heldType(ref)
+	require.Equal(t, []string{"bug"}, labels)
+	require.Empty(t, typ)
+	writes := g.Writes()
+	require.Zero(t, sync(), "the label's echo claimed")
+	ops := len(b.Snapshot().Operations)
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
+}

@@ -516,7 +516,7 @@ func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
 			return nil, fmt.Errorf("%s: %q is neither %s", key, v, strings.Join(modes, " nor "))
 		}
 	}
-	opts.Assignees = conf[ConfigKeyAssignees]
+	opts.Assignees, opts.Kinds, opts.Sprints = conf[ConfigKeyAssignees], conf[ConfigKeyKinds], conf[ConfigKeySprints]
 	remote, err := b.impl.(RemoteBridge).NewRemote(ctx, b.repo, conf)
 	if err != nil {
 		return nil, err

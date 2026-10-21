@@ -113,6 +113,9 @@ func syncing(t *testing.T, g githubForge, mode ...*string) (*cache.RepoCache, fu
 		if len(mode) > 0 {
 			opts.Assignees = *mode[0]
 		}
+		if !g.kinds {
+			opts.Kinds = core.ModeLabels
+		}
 		e, err := core.NewEngine(context.Background(), backend, g, opts)
 		require.NoError(t, err)
 		warnings := 0

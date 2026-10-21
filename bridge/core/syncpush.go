@@ -457,7 +457,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			}
 			records[e.key(string(sc.kind))] = labelsValue(seen)
 			records[e.key("refused")] = "1"
-			records[e.key("refused-as")] = e.assignees()
+			records[e.key("refused-as")] = e.labelModes()
 			if n, ok := errors.AsType[notSent](err); ok && n.unknown != nil {
 				records[e.key("refused-unknown")] = labelsValue(n.unknown)
 			}
@@ -498,9 +498,9 @@ func (e *Engine) accountFor(author identity.Interface) (as Account, onBehalf boo
 
 // labelsHeldBack tells whether a push leaves a bug's labels alone: the forge
 // refused them at the last push, and nothing about them was recorded since,
-// while the forge holds assignees the same way. A refusal under the other
-// way doesn't hold, as the forge may take them now (as labels), nor one of
-// someone without an account on the forge who has one now.
+// while the forge holds labels the same way (labelModes). A refusal under
+// another way doesn't hold, as the forge may take them now (as labels), nor
+// one of someone without an account on the forge who has one now.
 func (e *Engine) labelsHeldBack(snap *bug.Snapshot) bool {
 	local := lastSlotOp(snap, slot{kind: slotLabels})
 	held := false
@@ -511,7 +511,7 @@ func (e *Engine) labelsHeldBack(snap *bug.Snapshot) bool {
 		}
 		if _, ok := sm.NewMetadata[e.key("refused")]; ok {
 			mode := sm.NewMetadata[e.key("refused-as")]
-			held = (mode == "" || mode == e.assignees()) &&
+			held = (mode == "" || mode == e.labelModes()) &&
 				!slices.ContainsFunc(splitLabels(sm.NewMetadata[e.key("refused-unknown")]), func(l common.Label) bool {
 					name, _ := assigneeName(l.String())
 					_, why := e.accountOf(name)
@@ -529,13 +529,27 @@ func (e *Engine) assignees() string {
 	return cmp.Or(e.opts.Assignees, AssigneesNative)
 }
 
+// labelModes is how the forge holds what labels carry, as a refusal records
+// it: the assignees mode, then kinds and sprints when not native, as in
+// "labels;kinds=labels".
+func (e *Engine) labelModes() string {
+	modes := e.assignees()
+	if k := cmp.Or(e.opts.Kinds, ModeNative); k != ModeNative {
+		modes += ";" + ConfigKeyKinds + "=" + k
+	}
+	if s := cmp.Or(e.opts.Sprints, ModeNative); s != ModeNative {
+		modes += ";" + ConfigKeySprints + "=" + s
+	}
+	return modes
+}
+
 // refused records that the forge refused a value, warns, and doesn't try it
 // again: a later change of the value will be tried.
 func (e *Engine) refused(b *cache.BugCache, opId entity.Id, err error, out chan<- ExportResult) error {
 	out <- NewExportWarning(err, b.Id())
-	// with how the forge held assignees: a refusal of labels holds in that
-	// mode only (labelsHeldBack)
-	_, err = b.SetMetadata(opId, map[string]string{e.key("refused"): "1", e.key("refused-as"): e.assignees()})
+	// with how the forge held labels: a refusal of labels holds in those
+	// modes only (labelsHeldBack)
+	_, err = b.SetMetadata(opId, map[string]string{e.key("refused"): "1", e.key("refused-as"): e.labelModes()})
 	return err
 }
 
