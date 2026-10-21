@@ -247,9 +247,12 @@ type issueBuilder struct {
 	// issueType is the name of the issue's type, "" for none
 	issueType string
 	// held is the type GitHub says the issue holds now; typed tells a type
-	// event was seen
-	held  string
-	typed bool
+	// event was seen, and initial is the type held before the first
+	initial, held string
+	typed         bool
+	// changes of GitHub's labels and type, replayed by finish once the type
+	// the issue was created with is known
+	changes []func()
 }
 
 func newIssueBuilder(i issue) *issueBuilder {
@@ -266,15 +269,16 @@ func newIssueBuilder(i issue) *issueBuilder {
 			Status:        common.OpenStatus,
 		},
 		edited: map[string]bool{},
-		held:   heldType(i),
+		held:   typeName(i.IssueType),
 	}
 }
 
-func heldType(i issue) string {
-	if i.IssueType == nil {
+// typeName is a type's name, "" for none or a deleted one.
+func typeName(t *struct{ Name githubv4.String }) string {
+	if t == nil {
 		return ""
 	}
-	return string(i.IssueType.Name)
+	return string(t.Name)
 }
 
 // edit records an edit of the body (target "") or of a comment. GitHub lists
@@ -338,20 +342,15 @@ func (b *issueBuilder) timeline(item timelineItem) {
 			b.issue.Assignees = slices.DeleteFunc(b.issue.Assignees, func(a core.User) bool { return a == u })
 			b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventAssignees, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Unassigned: []core.User{u}})
 		}
-	case "IssueTypeAddedEvent", "IssueTypeChangedEvent", "IssueTypeRemovedEvent":
+	case "IssueTypeAddedEvent":
 		e := item.IssueTypeAddedEvent
-		switch item.Typename {
-		case "IssueTypeChangedEvent":
-			e = item.IssueTypeChangedEvent
-		case "IssueTypeRemovedEvent":
-			e = item.IssueTypeRemovedEvent
-		}
-		name := ""
-		if e.IssueType != nil && item.Typename != "IssueTypeRemovedEvent" {
-			name = string(e.IssueType.Name)
-		}
-		b.typed = true
-		b.relabel(e.actorEvent, func() { b.issueType = name })
+		b.retype(e.actorEvent, "", typeName(e.IssueType))
+	case "IssueTypeChangedEvent":
+		e := item.IssueTypeChangedEvent
+		b.retype(e.actorEvent, typeName(e.PrevIssueType), typeName(e.IssueType))
+	case "IssueTypeRemovedEvent":
+		e := item.IssueTypeRemovedEvent
+		b.retype(e.actorEvent, typeName(e.IssueType), "")
 	case "ClosedEvent":
 		e := item.ClosedEvent
 		b.event(core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventStatus, Author: actorUser(e.Actor), Time: e.CreatedAt.Time, Status: common.ClosedStatus})
@@ -381,13 +380,30 @@ func (b *issueBuilder) issueLabels() []string {
 	return slices.Compact(labels)
 }
 
-// relabel makes a change of GitHub's labels or type an event, if it changes
-// the issue's labels: typing an issue labeled the old way doesn't.
+// retype records a change of the issue's type. The first tells the type it
+// was created with.
+func (b *issueBuilder) retype(e actorEvent, from, to string) {
+	if !b.typed {
+		b.typed, b.initial = true, from
+	}
+	b.relabel(e, func() { b.issueType = to })
+}
+
+// relabel records a change of GitHub's labels or type as an event in its
+// place, which finish fills.
 func (b *issueBuilder) relabel(e actorEvent, change func()) {
+	ev := core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time}
+	i := len(b.issue.Events)
+	b.issue.Events = append(b.issue.Events, ev)
+	b.changes = append(b.changes, func() { b.replay(&b.issue.Events[i], change) })
+}
+
+// replay fills a change's event with the issue's labels it added and
+// removed: typing an issue labeled the old way changes none.
+func (b *issueBuilder) replay(ev *core.Event, change func()) {
 	was := b.issueLabels()
 	change()
 	now := b.issueLabels()
-	ev := core.Event{ID: fmt.Sprint(e.Id), Kind: core.EventLabels, Author: actorUser(e.Actor), Time: e.CreatedAt.Time}
 	for _, l := range now {
 		if !slices.Contains(was, l) {
 			ev.Added = append(ev.Added, l)
@@ -399,7 +415,7 @@ func (b *issueBuilder) relabel(e actorEvent, change func()) {
 		}
 	}
 	if ev.Added != nil || ev.Removed != nil {
-		b.event(ev)
+		b.touch(ev.Time)
 	}
 }
 
@@ -422,18 +438,27 @@ func (b *issueBuilder) touch(t time.Time) {
 }
 
 func (b *issueBuilder) finish() *core.Issue {
-	// the type held wins over the events. One set without an event was held
-	// all along: removing its flat label didn't remove the kind
-	if !b.typed && b.held != "" {
-		kind := b.r.kindLabel(b.held)
-		for i := range b.issue.Events {
-			e := &b.issue.Events[i]
-			e.Removed = slices.DeleteFunc(e.Removed, func(l string) bool { return l == kind })
-		}
-		b.issue.Events = slices.DeleteFunc(b.issue.Events, func(e core.Event) bool {
-			return e.Kind == core.EventLabels && len(e.Added) == 0 && len(e.Removed) == 0
+	// the type held before the first type event, or all along without one,
+	// came with the issue: GitHub sets one without an event
+	if !b.typed {
+		b.initial = b.held
+	}
+	b.issueType = b.initial
+	for _, change := range b.changes {
+		change()
+	}
+	// a change that leaves the issue's labels as they were is no event
+	b.issue.Events = slices.DeleteFunc(b.issue.Events, func(e core.Event) bool {
+		return e.Kind == core.EventLabels && e.Added == nil && e.Removed == nil
+	})
+	if b.initial != "" {
+		// first, with an id kept across pulls
+		b.issue.Events = slices.Insert(b.issue.Events, 0, core.Event{
+			ID: b.issue.ID + ":type", Kind: core.EventLabels, Author: b.issue.Author,
+			Time: b.issue.Created, Added: []string{b.r.kindLabel(b.initial)},
 		})
 	}
+	// the type held wins over the events
 	b.issueType = b.held
 	b.issue.Labels = b.issueLabels()
 	// the kind GitHub holds the other way: as a label of a type, when the

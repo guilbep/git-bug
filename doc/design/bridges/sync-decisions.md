@@ -400,13 +400,15 @@ spec stays the authority.
   under the issue's author and update time. *If wrong:* that removal shows
   them, not who removed the label and when.
 - **A GitHub issue's current type wins over its type events**: GitHub can
-  hold a type with no timeline event. With no type event, the type was
-  held all along, so removing its flat label removed no kind: the push
-  that moves the label to the type sees its removal as no change. The pull
-  reads `issueType` with each issue, as GitLab's adapter reads the issue's
+  hold a type with no timeline event. The type an issue held before its
+  first type event (the current one without any, else that event's
+  previous type) comes in as its creation's kind, by the issue's author,
+  and the label replay starts from it. So the push that moves its flat
+  label to the type is no change, in both `kinds` modes. The pull reads
+  `issueType` with each issue, as GitLab's adapter reads the issue's
   milestone. Before, the next pull dropped the kind for good. *If wrong:*
-  for a type set without an event after its flat label came off, git-bug's
-  history misses that removal; the kind it ends with is right.
+  a type GitHub set later without an event is dated at the issue's
+  creation.
 - **A label refusal records every mode that shapes labels**: `refused-as`
   is the assignees mode, then `kinds=` and `sprints=` when not `native`
   (`labels;kinds=labels`), so it reads as before with both native.

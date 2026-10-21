@@ -391,7 +391,7 @@ func TestGithubTypeWithoutEventKeepsKind(t *testing.T) {
 	alice := g.UserAct("alice")
 	ref := alice.CreateIssue("created with a type", "body")
 	alice.SetLabels(ref, []string{"bug"})
-	githubActor{fake: g.fake}.do(func() { githubActor{fake: g.fake}.issue(ref).issueType = "Bug" })
+	g.setTypeQuietly(ref, "Bug")
 
 	require.Zero(t, sync())
 	labels, typ := g.heldType(ref)
@@ -406,6 +406,88 @@ func TestGithubTypeWithoutEventKeepsKind(t *testing.T) {
 		require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
 		require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
 	}
+}
+
+// setTypeQuietly gives an issue a type with no timeline event, as GitHub may.
+func (g githubForge) setTypeQuietly(ref core.Ref, name string) {
+	githubActor{fake: g.fake}.do(func() { githubActor{fake: g.fake}.issue(ref).issueType = name })
+}
+
+// With kinds = labels, a type GitHub holds without an event moves to its
+// label, and the kind stays on both sides.
+func TestGithubKindsAsLabelsEventlessType(t *testing.T) {
+	g := newTypedForge(t)
+	g.kinds = false
+	backend, sync := syncing(t, g)
+	ref := g.UserAct("alice").CreateIssue("created with a type", "body")
+	g.setTypeQuietly(ref, "Bug")
+
+	require.Zero(t, sync())
+	labels, typ := g.heldType(ref)
+	require.Equal(t, []string{"bug"}, labels)
+	require.Empty(t, typ)
+	b, err := backend.Bugs().ResolveBugCreateMetadata("sync:"+g.Key()+":id", ref.ID)
+	require.NoError(t, err)
+	require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	for range 2 {
+		require.Zero(t, sync())
+		require.Equal(t, writes, g.Writes(), "nothing more sent")
+		require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+		require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
+	}
+}
+
+// A type changed with an event after one held without: the kind changes, and
+// the bot's move of the flat label to the type never shows as a removal.
+func TestGithubTypeChangedAfterEventlessType(t *testing.T) {
+	g := newTypedForge(t)
+	backend, sync := syncing(t, g)
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("created with a type", "body")
+	alice.SetLabels(ref, []string{"bug"})
+	g.setTypeQuietly(ref, "Bug")
+	require.Zero(t, sync())
+	b, err := backend.Bugs().ResolveBugCreateMetadata("sync:"+g.Key()+":id", ref.ID)
+	require.NoError(t, err)
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+
+	g.setType("alice", ref, "Feature")
+	require.Zero(t, sync())
+	require.Equal(t, []common.Label{"feat"}, b.Snapshot().Labels)
+	for _, op := range b.Snapshot().Operations {
+		if lc, ok := op.(*bug.LabelChangeOperation); ok && slices.Contains(lc.Removed, "bug") {
+			require.Equal(t, "Alice", lc.Author().Name(), "only alice removed bug")
+		}
+	}
+	writes, ops = g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+}
+
+// An issue's first type event replacing a type held before it: the replay
+// starts from that type, which came with the issue.
+func TestGithubFirstTypeEventChanged(t *testing.T) {
+	g := newTypedForge(t)
+	ref := g.UserAct("alice").CreateIssue("created with a type", "body")
+	g.setTypeQuietly(ref, "Bug")
+	g.setType("alice", ref, "Feature")
+
+	issue := g.Issue(ref.Number)
+	require.Equal(t, []string{"feat"}, issue.Labels)
+	require.Len(t, issue.Events, 2)
+	created := issue.Events[0]
+	require.Equal(t, ref.ID+":type", created.ID)
+	require.Equal(t, "alice", created.Author.Login)
+	require.Equal(t, issue.Created, created.Time)
+	require.Equal(t, []string{"bug"}, created.Added)
+	require.Empty(t, created.Removed)
+	require.Equal(t, []string{"feat"}, issue.Events[1].Added)
+	require.Equal(t, []string{"bug"}, issue.Events[1].Removed)
 }
 
 // typeLagClient doesn't resolve the issue whose type it reads, as GitHub may

@@ -233,7 +233,9 @@ func (f *fakeGithub) setType(login string, issue *ghIssue, name string) {
 		item = timelineItem{Typename: "IssueTypeAddedEvent", IssueTypeAddedEvent: e}
 	default:
 		e.IssueType = &struct{ Name githubv4.String }{githubv4.String(name)}
-		item = timelineItem{Typename: "IssueTypeChangedEvent", IssueTypeChangedEvent: e}
+		item = timelineItem{Typename: "IssueTypeChangedEvent", IssueTypeChangedEvent: issueTypeChangedEvent{
+			issueTypeEvent: e, PrevIssueType: &struct{ Name githubv4.String }{githubv4.String(issue.issueType)},
+		}}
 	}
 	issue.issueType = name
 	issue.timeline = append(issue.timeline, item)

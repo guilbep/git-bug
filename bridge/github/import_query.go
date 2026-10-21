@@ -174,6 +174,13 @@ type issueTypeEvent struct {
 	IssueType *struct{ Name githubv4.String }
 }
 
+// issueTypeChangedEvent is an IssueTypeChangedEvent, with the type it
+// replaced: only that event has one.
+type issueTypeChangedEvent struct {
+	issueTypeEvent
+	PrevIssueType *struct{ Name githubv4.String }
+}
+
 type renamedTitleEvent struct {
 	actorEvent
 	CurrentTitle  githubv4.String
@@ -195,9 +202,9 @@ type timelineItem struct {
 	UnassignedEvent assignedEvent `graphql:"... on UnassignedEvent"`
 
 	// Type
-	IssueTypeAddedEvent   issueTypeEvent `graphql:"... on IssueTypeAddedEvent"`
-	IssueTypeChangedEvent issueTypeEvent `graphql:"... on IssueTypeChangedEvent"`
-	IssueTypeRemovedEvent issueTypeEvent `graphql:"... on IssueTypeRemovedEvent"`
+	IssueTypeAddedEvent   issueTypeEvent        `graphql:"... on IssueTypeAddedEvent"`
+	IssueTypeChangedEvent issueTypeChangedEvent `graphql:"... on IssueTypeChangedEvent"`
+	IssueTypeRemovedEvent issueTypeEvent        `graphql:"... on IssueTypeRemovedEvent"`
 
 	// Status
 	ClosedEvent struct {
