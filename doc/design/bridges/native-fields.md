@@ -114,8 +114,10 @@ refusals, the per-project `assignees = labels` switch).
     which would be one more key in every clone.
 - **GitLab: `sprint:<slug>` is the existing milestone with that slug, and
   stays a label when there is none**, the same rule as kind.
-  - The fork looks through the project's milestones and its groups'
-    (`include_ancestors`), open or closed.
+  - The fork looks through the project's active milestones and its
+    groups' (`include_ancestors`): GitLab silently ignores a closed
+    milestone's id. An issue's current milestone gives its label whatever
+    its state.
   - A milestone's label is `sprint:` and git-board's `Slug` of its title:
     lower case, accents dropped, other characters' runs as `-`. It is
     matched exactly, as for kinds, so `sprint:Sprint 2` stays a label.
@@ -123,8 +125,8 @@ refusals, the per-project `assignees = labels` switch).
     or group.
   - Weighed and left: creating missing milestones, as the fork knows
     neither their dates nor their titles; labels only.
-  - Whether the API assigns a closed milestone isn't checked: the build
-    checks it first.
+  - Checked live on 42400, 2026-10-21: the API doesn't assign a closed
+    milestone. The issue answers with none, and no event is emitted.
 - **Switch: `sprints = native|off`**, default `native` (decided with the
   user on 2026-10-21).
   - The fork never creates a milestone, so a project that wants sprints as
