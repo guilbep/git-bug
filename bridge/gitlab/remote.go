@@ -245,28 +245,16 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 		}
 	}
 
-	for e := range LabelEvents(ctx, r.reader, gi) {
-		switch e := e.(type) {
-		case ErrorEvent:
-			return nil, e.Err
-		case LabelEvent:
-			ev := core.Event{ID: e.ID(), Kind: core.EventLabels, Author: basicUser(&e.User), Time: e.CreatedAt()}
-			switch e.Kind() {
-			case EventAddLabel:
-				ev.Added = []string{e.Label.Name}
-			case EventRemoveLabel:
-				ev.Removed = []string{e.Label.Name}
-			default:
-				continue
-			}
-			issue.Events = append(issue.Events, ev)
-		}
+	// label and milestone events, netted as the engine sees labels: GitLab's
+	// and the milestone's, so a label moved to the milestone is no change
+	type relabel struct {
+		ev     core.Event
+		change func()
 	}
-
+	var changes []relabel
+	var labels []string
+	held := ""
 	if r.sprints {
-		// the sprint label the issue holds, as the events go by: a change
-		// gives an add of the new milestone only
-		held := ""
 		for e := range MilestoneEvents(ctx, r.reader, gi) {
 			switch e := e.(type) {
 			case ErrorEvent:
@@ -280,22 +268,61 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 				ev := core.Event{ID: e.ID(), Kind: core.EventLabels, Author: basicUser(e.User), Time: e.CreatedAt()}
 				switch e.Kind() {
 				case EventChangedMilestone:
-					if l == held {
-						continue
-					}
-					ev.Added = []string{l}
-					if held != "" {
-						ev.Removed = []string{held}
-					}
-					held = l
+					// a change gives an add of the new milestone only
+					changes = append(changes, relabel{ev, func() { held = l }})
 				case EventRemovedMilestone:
-					ev.Removed = []string{l}
-					held = ""
-				default:
-					continue
+					changes = append(changes, relabel{ev, func() { held = "" }})
 				}
-				issue.Events = append(issue.Events, ev)
 			}
+		}
+	}
+	for e := range LabelEvents(ctx, r.reader, gi) {
+		switch e := e.(type) {
+		case ErrorEvent:
+			return nil, e.Err
+		case LabelEvent:
+			l := e.Label.Name
+			ev := core.Event{ID: e.ID(), Kind: core.EventLabels, Author: basicUser(&e.User), Time: e.CreatedAt()}
+			switch e.Kind() {
+			case EventAddLabel:
+				changes = append(changes, relabel{ev, func() {
+					if !slices.Contains(labels, l) {
+						labels = append(labels, l)
+					}
+				}})
+			case EventRemoveLabel:
+				changes = append(changes, relabel{ev, func() {
+					labels = slices.DeleteFunc(labels, func(x string) bool { return x == l })
+				}})
+			}
+		}
+	}
+	// ponytail: on a tie the milestone's go first, as a moved label comes off
+	// after it; a milestone cleared and its label added at once show as a
+	// removal and an add
+	slices.SortStableFunc(changes, func(a, b relabel) int { return a.ev.Time.Compare(b.ev.Time) })
+	union := func() []string {
+		if held == "" || slices.Contains(labels, held) {
+			return slices.Clone(labels)
+		}
+		return append(slices.Clone(labels), held)
+	}
+	for _, c := range changes {
+		was := union()
+		c.change()
+		now := union()
+		for _, l := range now {
+			if !slices.Contains(was, l) {
+				c.ev.Added = append(c.ev.Added, l)
+			}
+		}
+		for _, l := range was {
+			if !slices.Contains(now, l) {
+				c.ev.Removed = append(c.ev.Removed, l)
+			}
+		}
+		if c.ev.Added != nil || c.ev.Removed != nil {
+			issue.Events = append(issue.Events, c.ev)
 		}
 	}
 
@@ -445,9 +472,10 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 // ChangeLabels adds and removes labels in one update; GitLab creates the
 // missing ones it adds. A sprint with a milestone is set as the issue's
 // milestone in the same update: the issue has one, another sprint is a
-// label, and the milestone's label held the old way comes off. A removed
-// sprint clears its milestone even closed. GitLab silently ignores a
-// milestone it can't assign: that sprint is refused.
+// label, and the milestone's label held the old way comes off, in a second
+// update once the milestone holds it. A removed sprint clears its milestone
+// even closed. GitLab silently ignores a milestone it can't assign: that
+// sprint is refused, and its label left.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
 	c, iid, err := r.writerOn(as, issue)
 	if err != nil {
@@ -461,6 +489,8 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 	}
 	var opt gitlab.UpdateIssueOptions
 	current, next := "", ""
+	// later are the removals sent after the milestone
+	var later []string
 	if r.sprints {
 		r.mu.Lock()
 		read := r.milestonesRead
@@ -481,6 +511,11 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 			}
 			current = held(gi)
 			next, added, removed = core.OneNative(current, added, removed, hasMilestone)
+			// the old-way label comes off once the milestone holds it: no
+			// pull sees the sprint gone
+			if next != current && slices.Contains(gi.Labels, next) {
+				later, removed = removed, nil
+			}
 		}
 	}
 	switch {
@@ -501,11 +536,22 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 	if err := r.confirm(ctx, mapErr(err), iid, 0); err != nil {
 		return err
 	}
-	if next == current || held(gi) == next {
-		return nil
+	var refused core.RefusedLabels
+	if next != current && held(gi) != next {
+		// a replace is a set and a clear: both sprints are refused
+		refused = slices.DeleteFunc([]string{next, current}, func(s string) bool { return s == "" })
 	}
-	// a replace is a set and a clear: both sprints are refused
-	return core.RefusedLabels(slices.DeleteFunc([]string{next, current}, func(s string) bool { return s == "" }))
+	if later = slices.DeleteFunc(later, func(l string) bool { return slices.Contains(refused, l) }); len(later) > 0 {
+		opt := gitlab.UpdateIssueOptions{RemoveLabels: (*gitlab.LabelOptions)(&later)}
+		_, _, err := c.Issues.UpdateIssue(r.projectID, iid, &opt, gitlab.WithContext(ctx))
+		if err := r.confirm(ctx, mapErr(err), iid, 0); err != nil {
+			return err
+		}
+	}
+	if refused != nil {
+		return refused
+	}
+	return nil
 }
 
 // Assign writes the issue's assignees whole, as GitLab's API takes them,

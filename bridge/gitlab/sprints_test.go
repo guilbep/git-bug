@@ -229,6 +229,38 @@ func TestGitlabChangeLabelsSetsMilestone(t *testing.T) {
 	require.Equal(t, "Sprint 2", milestone)
 }
 
+// A sprint's label held as a label moves to the milestone, with no change
+// for the engine: the label comes off once the milestone holds it.
+func TestGitlabChangeLabelsMovesSprintLabel(t *testing.T) {
+	ctx := t.Context()
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	m := g.addMilestone("Sprint 3", false)
+	alice := g.UserAct("alice")
+	ref := alice.CreateIssue("title", "body")
+	alice.SetLabels(ref, []string{"sprint:sprint-2"})
+	events := len(g.Issue(ref.Number).Events)
+
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, []string{"sprint:sprint-2"}, nil))
+	labels, milestone := g.held(ref)
+	require.Empty(t, labels)
+	require.Equal(t, "Sprint 2", milestone)
+	require.Len(t, g.Issue(ref.Number).Events, events, "no change for the engine")
+
+	// a milestone GitLab ignores keeps the label
+	other := alice.CreateIssue("other", "body")
+	alice.SetLabels(other, []string{"sprint:sprint-3"})
+	require.NoError(t, g.readMilestones(ctx))
+	g.fake.mu.Lock()
+	m.State = "closed"
+	g.fake.mu.Unlock()
+	err := g.ChangeLabels(ctx, g.accounts[0], other, []string{"sprint:sprint-3"}, nil)
+	require.Equal(t, core.RefusedLabels{"sprint:sprint-3"}, err)
+	labels, milestone = g.held(other)
+	require.Equal(t, []string{"sprint:sprint-3"}, labels)
+	require.Empty(t, milestone)
+}
+
 // A removed sprint clears its milestone, even closed, so not known.
 func TestGitlabRemovedSprintClearsClosedMilestone(t *testing.T) {
 	ctx := t.Context()
@@ -348,13 +380,10 @@ func TestGitlabSprintsSync(t *testing.T) {
 	require.Equal(t, "Sprint 2", milestone)
 	ob, err := backend.Bugs().ResolveBugCreateMetadata("sync:"+g.Key()+":id", old.ID)
 	require.NoError(t, err)
-	require.Equal(t, []common.Label{"sprint:sprint-2"}, ob.Snapshot().Labels)
-	// the move's label removal isn't claimed: the next pull takes it, and
-	// gives the sprint back from the milestone, once (convert doesn't net
-	// label and milestone events, as GitHub's relabel does)
-	writes := g.Writes()
+	writes, ops := g.Writes(), len(ob.Snapshot().Operations)
 	require.Zero(t, sync(g))
 	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, ob.Snapshot().Operations, ops, "nothing more pulled")
 	require.Equal(t, []common.Label{"sprint:sprint-2"}, ob.Snapshot().Labels)
 }
 
