@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -416,4 +417,83 @@ func TestGitlabSprintsOffAfterNative(t *testing.T) {
 	writes := off.Writes()
 	require.Zero(t, sync(off))
 	require.Equal(t, writes, off.Writes(), "nothing more sent")
+}
+
+// An assignee and a sprint in one label change both go native, as GitLab's
+// assignee and milestone: two updates, as the engine assigns apart from the
+// labels. Then nothing more to do.
+func TestGitlabSyncAssigneeAndSprint(t *testing.T) {
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.UserAct("bob").Comment(ref, "on it") // someone git-bug knows
+	backend, sync := syncing(t)
+	require.Zero(t, sync(g))
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"assignee:bob", "sprint:sprint-2"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	writes := g.Writes()
+	require.Zero(t, sync(g))
+	require.Equal(t, writes+2, g.Writes(), "the assignees' update, then the milestone's")
+	labels, milestone := g.held(ref)
+	require.Empty(t, labels)
+	require.Equal(t, "Sprint 2", milestone)
+	require.Equal(t, []string{"bob"}, g.assignees(ref))
+
+	require.Zero(t, sync(g))
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync(g))
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	require.Equal(t, []common.Label{"assignee:bob", "sprint:sprint-2"}, b.Snapshot().Labels)
+}
+
+// The free edition keeps one assignee: a second one is refused, alone, and
+// the sprint of the same label change sets the milestone.
+func TestGitlabSyncRefusedAssigneeAndSprint(t *testing.T) {
+	ctx := context.Background()
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.UserAct("bob").Comment(ref, "on it")
+	g.UserAct("carol").Comment(ref, "me too")
+	g.assign("alice", ref, "bob")
+	backend, sync := syncing(t)
+	require.Zero(t, sync(g))
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"assignee:carol", "sprint:sprint-2"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	e, err := core.NewEngine(ctx, backend, g, core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGitlabLogin})
+	require.NoError(t, err)
+	for r := range e.Pull(ctx, time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+		require.NotEqual(t, core.ImportEventWarning, r.Event, r.String())
+	}
+	var refused []core.RefusedLabels
+	for r := range e.Push(ctx) {
+		require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+		if r.Event == core.ExportEventWarning {
+			l, ok := errors.AsType[core.RefusedLabels](r.Err)
+			require.True(t, ok, r.String())
+			refused = append(refused, l)
+		}
+	}
+	require.Equal(t, []core.RefusedLabels{{"assignee:carol"}}, refused)
+	labels, milestone := g.held(ref)
+	require.Empty(t, labels)
+	require.Equal(t, "Sprint 2", milestone)
+	require.Equal(t, []string{"bob"}, g.assignees(ref))
+
+	require.Zero(t, sync(g), "the refusal holds")
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync(g))
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	require.Equal(t, []common.Label{"assignee:bob", "assignee:carol", "sprint:sprint-2"}, b.Snapshot().Labels)
 }

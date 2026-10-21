@@ -543,3 +543,64 @@ func TestGithubSwitchSendsRefusedKindAsLabel(t *testing.T) {
 	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
 	require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
 }
+
+// An assignee and a kind in one label change both go native, as GitHub's
+// assignee and type. Then nothing more to do.
+func TestGithubSyncAssigneeAndKind(t *testing.T) {
+	g := newTypedForge(t)
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.UserAct("bob").Comment(ref, "on it") // someone git-bug knows
+	backend, sync := syncing(t, g)
+	require.Zero(t, sync())
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"assignee:bob", "bug"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	require.Zero(t, sync())
+	labels, typ := g.heldType(ref)
+	require.Empty(t, labels)
+	require.Equal(t, "Bug", typ)
+	_, assignees := g.held(ref)
+	require.Equal(t, []string{"bob"}, assignees)
+
+	require.Zero(t, sync())
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	require.Equal(t, []common.Label{"assignee:bob", "bug"}, b.Snapshot().Labels)
+}
+
+// A kind whose type GitHub refuses and an assignee it refuses, in one label
+// change, are refused together, with one warning: git-bug keeps both, and the
+// other labels go through.
+func TestGithubSyncRefusedAssigneeAndKind(t *testing.T) {
+	g := newTypedForge(t)
+	g.fake.refuseTypes = true
+	g.fake.unassignable["eve"] = true
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.UserAct("eve").Comment(ref, "hi")
+	backend, sync := syncing(t, g)
+	require.Zero(t, sync())
+	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"assignee:eve", "bug", "polish"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+
+	require.Equal(t, 1, sync(), "one warning for both")
+	labels, typ := g.heldType(ref)
+	require.Equal(t, []string{"polish"}, labels)
+	require.Empty(t, typ)
+	_, assignees := g.held(ref)
+	require.Empty(t, assignees)
+
+	require.Zero(t, sync(), "the refusal holds")
+	writes, ops := g.Writes(), len(b.Snapshot().Operations)
+	require.Zero(t, sync())
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	require.Equal(t, []common.Label{"assignee:eve", "bug", "polish"}, b.Snapshot().Labels)
+}
