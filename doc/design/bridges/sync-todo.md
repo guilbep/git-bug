@@ -165,9 +165,23 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       only a live GitHub with a bot assignee can check.
 - [ ] `kind:` ↔ GitHub issue types, `sprint:` ↔ Projects iteration (GitHub)
       or milestones (GitLab): weigh each (sync-decisions.md, Assignees).
-- [ ] GitLab native assignees, every forge's login translated per person
-      (sync-decisions.md, Assignees): needed before a sync of GitHub and
-      GitLab together carries assignees, as the wiki's would.
+- [x] GitLab native assignees, every forge's login translated per person
+      (sync-decisions.md, Assignees). Live, 2026-10-21, one bug synced with
+      `--issue` to guilbep/git-bug-sync-test #13 and gitlab.epfl.ch 42400
+      #11 from a hand-made identity tagged `guilbep`/`guilbert`: one
+      `assignee:guilbep` label assigned guilbep on GitHub and guilbert on
+      GitLab; unassigning on GitLab unassigned on GitHub, assigning on
+      GitHub assigned on GitLab; an old way's `assignee:guilbep` label on
+      GitLab moved to its assignees; `assignee:zed` (no one) refused on
+      both, `assignee:guilbep-gbtest` (no access) refused by GitHub and as
+      no one on GitLab, one warning each; every sync after them quiet.
+      Not live: GitLab's free edition with two valid assignees (one member).
+- [ ] git-board: when its picker writes `assignee:<login>` for someone
+      git-bug has never pulled, create their identity from the forge it
+      picked them on (the engine refuses a name of no one, 2026-10-21).
+- [ ] The wiki's first sync after this: its GitLab mirror's `assignee:`
+      labels move (two writes each); link the team's GitLab logins
+      (`login-<identity>`) before, as a dry run lists who would be refused.
 - [ ] Issue numbers of git-bug's own, to name an issue across forges:
       discussed apart, not built.
 - [ ] CI on the fork: draft PR guilbep/git-bug#1 (`bridge-sync` → the

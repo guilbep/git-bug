@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"errors"
-	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -38,7 +37,9 @@ func (g githubForge) held(ref core.Ref) (labels, assignees []string) {
 	return slices.Clone(issue.labels), slices.Sorted(slices.Values(issue.assignees))
 }
 
-func TestGithubAssigneesAreLabels(t *testing.T) {
+// GitHub's assignees are users, its assignee:* labels labels: the engine
+// makes them git-bug's labels.
+func TestGithubAssigneesAreUsers(t *testing.T) {
 	g := newGithubForge(t, "owner")
 	alice := g.UserAct("alice")
 	ref := alice.CreateIssue("title", "body")
@@ -46,98 +47,61 @@ func TestGithubAssigneesAreLabels(t *testing.T) {
 	alice.SetLabels(ref, []string{"assignee:carol", "bug"})
 
 	issue := g.Issue(ref.Number)
-	require.Equal(t, []string{"assignee:bob", "assignee:carol", "bug"}, issue.Labels)
-	require.Equal(t, []string{"assignee:carol"}, issue.Resend, "held the old way")
-	require.Equal(t, []string{"assignee:bob"}, issue.Events[0].Added)
+	require.Equal(t, []string{"assignee:carol", "bug"}, issue.Labels)
+	require.Equal(t, []core.User{{ID: "bob", Login: "bob"}}, issue.Assignees)
+	require.Equal(t, core.EventAssignees, issue.Events[0].Kind)
+	require.Equal(t, []core.User{{ID: "bob", Login: "bob"}}, issue.Events[0].Assigned)
 	require.Equal(t, "alice", issue.Events[0].Author.Login)
 
 	g.assign("alice", ref, "bob", false)
 	issue = g.Issue(ref.Number)
-	require.Equal(t, []string{"assignee:carol", "bug"}, issue.Labels)
-	require.Equal(t, []string{"assignee:bob"}, issue.Events[len(issue.Events)-1].Removed)
+	require.Empty(t, issue.Assignees)
+	require.Equal(t, []core.User{{ID: "bob", Login: "bob"}}, issue.Events[len(issue.Events)-1].Unassigned)
 }
 
-// Someone both assigned and labeled the old way is one label: assigning or
-// unlabeling them then is no change.
-func TestGithubAssigneeAndOldWayLabelAreOne(t *testing.T) {
-	g := newGithubForge(t, "owner")
-	alice := g.UserAct("alice")
-	ref := alice.CreateIssue("title", "body")
-	alice.SetLabels(ref, []string{"assignee:bob"})
-	g.assign("alice", ref, "bob", true)
-	alice.SetLabels(ref, nil)
-
-	issue := g.Issue(ref.Number)
-	require.Equal(t, []string{"assignee:bob"}, issue.Labels)
-	require.Empty(t, issue.Resend)
-	require.Len(t, issue.Events, 1)
-}
-
-func TestGithubChangeLabelsAssigns(t *testing.T) {
+// Assign reads GitHub's assignees back: who it silently leaves out, and a
+// login without a user, like a bot's, are refused.
+func TestGithubAssign(t *testing.T) {
 	ctx := context.Background()
 	g := newGithubForge(t, "owner")
 	g.fake.unassignable["eve"] = true
 	g.fake.noUser["nobody"] = true
 	bot := g.accounts[0]
 	ref := g.UserAct("alice").CreateIssue("title", "body")
+	bob, eve, nobody := core.User{ID: "bob"}, core.User{Login: "eve"}, core.User{ID: "nobody", Login: "nobody"}
 
-	err := g.ChangeLabels(ctx, bot, ref, []string{"a", "assignee:bob", "assignee:eve", "assignee:nobody"}, nil)
-	var refused core.RefusedLabels
+	err := g.Assign(ctx, bot, ref, []core.User{bob, eve, nobody}, nil)
+	var refused core.RefusedUsers
 	require.True(t, errors.As(err, &refused), "%v", err)
-	require.Equal(t, core.RefusedLabels{"assignee:eve", "assignee:nobody"}, refused)
+	require.ElementsMatch(t, core.RefusedUsers{eve, nobody}, refused)
 	require.ErrorIs(t, err, core.ErrRefused)
 	labels, assignees := g.held(ref)
-	require.Equal(t, []string{"a"}, labels)
+	require.Empty(t, labels)
 	require.Equal(t, []string{"bob"}, assignees)
-	require.Equal(t, []string{"a"}, slices.Collect(maps.Values(g.fake.labels)), "no assignee label on GitHub")
 
-	err = g.ChangeLabels(ctx, bot, ref, nil, []string{"assignee:bob", "assignee:nobody"})
-	require.Equal(t, core.RefusedLabels{"assignee:nobody"}, err, "without a user, like a bot, it may still be assigned")
-	labels, assignees = g.held(ref)
-	require.Equal(t, []string{"a"}, labels)
+	err = g.Assign(ctx, bot, ref, nil, []core.User{bob, nobody})
+	require.Equal(t, core.RefusedUsers{nobody}, err, "without a user, like a bot, it may still be assigned")
+	_, assignees = g.held(ref)
 	require.Empty(t, assignees)
 }
 
-// One rule both ways: an assignee's label has a login, and its prefix in any
-// case; it is kept as spelled. Without a login, it is a label.
-func TestGithubAssigneeLabelSpellings(t *testing.T) {
+// ChangeLabels changes labels only: an assignee's label is a label.
+func TestGithubChangeLabelsLeavesAssignees(t *testing.T) {
+	ctx := context.Background()
 	g := newGithubForge(t, "owner")
-	g.fake.unassignable["eve"] = true
-	alice := g.UserAct("alice")
-	ref := alice.CreateIssue("title", "body")
-	alice.SetLabels(ref, []string{"Assignee:carol", "assignee:"})
-	require.Equal(t, []string{"Assignee:carol"}, g.Issue(ref.Number).Resend)
-
-	err := g.ChangeLabels(context.Background(), g.accounts[0], ref, []string{"ASSIGNEE:bob", "Assignee:carol", "Assignee:eve"}, nil)
-	require.Equal(t, core.RefusedLabels{"Assignee:eve"}, err)
-	labels, assignees := g.held(ref)
-	require.Equal(t, []string{"assignee:"}, labels)
-	require.Equal(t, []string{"bob", "carol"}, assignees)
-}
-
-// Sent again, an old way's label comes off the issue once its login is
-// assigned, and stays when GitHub can't assign it.
-func TestGithubChangeLabelsMovesOldWayLabels(t *testing.T) {
-	g := newGithubForge(t, "owner")
-	g.fake.unassignable["eve"] = true
 	ref := g.UserAct("alice").CreateIssue("title", "body")
-	g.UserAct("alice").SetLabels(ref, []string{"assignee:bob", "assignee:eve"})
-	events := len(g.Issue(ref.Number).Events)
+	g.assign("alice", ref, "bob", true)
 
-	err := g.ChangeLabels(context.Background(), g.accounts[0], ref, []string{"assignee:bob", "assignee:eve"}, nil)
-	require.Equal(t, core.RefusedLabels{"assignee:eve"}, err)
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, []string{"assignee:carol"}, []string{"assignee:bob"}))
 	labels, assignees := g.held(ref)
-	require.Equal(t, []string{"assignee:eve"}, labels)
+	require.Equal(t, []string{"assignee:carol"}, labels)
 	require.Equal(t, []string{"bob"}, assignees)
-	issue := g.Issue(ref.Number)
-	require.Equal(t, []string{"assignee:bob", "assignee:eve"}, issue.Labels)
-	require.Equal(t, []string{"assignee:eve"}, issue.Resend)
-	require.Len(t, issue.Events, events, "no change for the engine")
 }
 
 // syncing returns a git-bug repository, and a sync of it with GitHub that
 // returns its number of warnings.
-func syncing(t *testing.T, g githubForge) (*cache.RepoCache, func() int) {
+// mode is how GitHub holds assignees, AssigneesNative when nil.
+func syncing(t *testing.T, g githubForge, mode ...*string) (*cache.RepoCache, func() int) {
 	backend, err := cache.NewRepoCacheNoEvents(repotest.NewGoGitRepo(t, false), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
@@ -145,13 +109,11 @@ func syncing(t *testing.T, g githubForge) (*cache.RepoCache, func() int) {
 	require.NoError(t, err)
 	require.NoError(t, backend.SetUserIdentity(me))
 	return backend, func() int {
-		mode := core.AssigneesNative
-		if g.labelAssignees {
-			mode = core.AssigneesLabels
+		opts := core.SyncOptions{Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin}
+		if len(mode) > 0 {
+			opts.Assignees = *mode[0]
 		}
-		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{
-			Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGithubLogin, Assignees: mode,
-		})
+		e, err := core.NewEngine(context.Background(), backend, g, opts)
 		require.NoError(t, err)
 		warnings := 0
 		for r := range e.Pull(context.Background(), time.Time{}) {
@@ -177,6 +139,9 @@ func TestGithubSyncAssignees(t *testing.T) {
 	alice := g.UserAct("alice")
 	ref := alice.CreateIssue("title", "body")
 	alice.SetLabels(ref, []string{"assignee:bob", "bug"})
+	// people git-bug knows
+	g.UserAct("bob").Comment(ref, "on it")
+	g.UserAct("carol").Comment(ref, "me too")
 
 	backend, sync := syncing(t, g)
 	sync()
@@ -225,8 +190,7 @@ func TestGithubSyncUnassignBot(t *testing.T) {
 	require.Equal(t, []string{"Copilot"}, assignees)
 }
 
-// An old way's label of a login without a user, removed in git-bug, comes
-// off GitHub; refused as a bot would be, it settles at the next sync.
+// An old way's label of no one, removed in git-bug, comes off GitHub.
 func TestGithubSyncRemovesOldWayLabelWithoutUser(t *testing.T) {
 	g := newGithubForge(t, "owner")
 	g.fake.noUser["nobody"] = true
@@ -234,15 +198,15 @@ func TestGithubSyncRemovesOldWayLabelWithoutUser(t *testing.T) {
 	ref := alice.CreateIssue("title", "body")
 	alice.SetLabels(ref, []string{"assignee:nobody"})
 	backend, sync := syncing(t, g)
-	require.Equal(t, 1, sync(), "can't be assigned")
+	require.Equal(t, 1, sync(), "no one")
 
 	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
 	require.NoError(t, err)
 	_, _, err = b.ChangeLabels(nil, []string{"assignee:nobody"})
 	require.NoError(t, err)
 	require.NoError(t, b.Commit())
-	require.Equal(t, 1, sync())
 	require.Zero(t, sync())
+	require.Zero(t, sync(), "claims the removal's echo")
 	writes, ops := g.Writes(), len(b.Snapshot().Operations)
 	require.Zero(t, sync())
 	require.Equal(t, writes, g.Writes(), "nothing more sent")
@@ -253,39 +217,13 @@ func TestGithubSyncRemovesOldWayLabelWithoutUser(t *testing.T) {
 	require.Empty(t, assignees)
 }
 
-// With assignees held as labels, an assignee's label is a label on GitHub,
-// for anyone, and GitHub's own assignees move to labels.
-func TestGithubLabelsModeChangeLabels(t *testing.T) {
-	ctx := context.Background()
-	g := newGithubForge(t, "owner")
-	g.labelAssignees = true
-	g.fake.noUser["jane"] = true
-	ref := g.UserAct("alice").CreateIssue("title", "body")
-	g.assign("alice", ref, "carol", true)
-	issue := g.Issue(ref.Number)
-	require.Equal(t, []string{"assignee:carol"}, issue.Labels)
-	require.Equal(t, []string{"assignee:carol"}, issue.Resend, "held the other way")
-	events := len(issue.Events)
-
-	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, []string{"assignee:bob", "assignee:carol", "assignee:jane"}, nil))
-	labels, assignees := g.held(ref)
-	require.Equal(t, []string{"assignee:bob", "assignee:carol", "assignee:jane"}, labels)
-	require.Empty(t, assignees)
-	issue = g.Issue(ref.Number)
-	require.Empty(t, issue.Resend)
-	require.Len(t, issue.Events, events+2, "bob's and jane's labels; carol's moved, no change")
-
-	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, nil, []string{"assignee:bob"}))
-	labels, _ = g.held(ref)
-	require.Equal(t, []string{"assignee:carol", "assignee:jane"}, labels)
-}
-
 // Switching how GitHub holds assignees moves them, once each way.
 func TestGithubSyncSwitchesAssigneesMode(t *testing.T) {
 	g := newGithubForge(t, "owner")
 	ref := g.UserAct("alice").CreateIssue("title", "body")
 	g.assign("alice", ref, "bob", true)
-	backend, sync := syncing(t, g)
+	mode := core.AssigneesNative
+	backend, sync := syncing(t, g, &mode)
 	require.Zero(t, sync())
 	steady := func() {
 		t.Helper()
@@ -298,14 +236,14 @@ func TestGithubSyncSwitchesAssigneesMode(t *testing.T) {
 		require.Equal(t, []common.Label{"assignee:bob"}, b.Snapshot().Labels)
 	}
 
-	g.labelAssignees = true
+	mode = core.AssigneesLabels
 	require.Zero(t, sync())
 	labels, assignees := g.held(ref)
 	require.Equal(t, []string{"assignee:bob"}, labels)
 	require.Empty(t, assignees)
 	steady()
 
-	g.labelAssignees = false
+	mode = core.AssigneesNative
 	require.Zero(t, sync())
 	labels, assignees = g.held(ref)
 	require.Empty(t, labels)
@@ -317,11 +255,11 @@ func TestGithubSyncSwitchesAssigneesMode(t *testing.T) {
 // beside, once.
 func TestGithubLabelsModeBot(t *testing.T) {
 	g := newGithubForge(t, "owner")
-	g.labelAssignees = true
 	g.fake.noUser["Copilot"] = true
 	ref := g.UserAct("alice").CreateIssue("title", "body")
 	g.assign("alice", ref, "Copilot", true)
-	_, sync := syncing(t, g)
+	mode := core.AssigneesLabels
+	_, sync := syncing(t, g, &mode)
 	require.Zero(t, sync())
 	labels, assignees := g.held(ref)
 	require.Equal(t, []string{"assignee:Copilot"}, labels)
@@ -337,8 +275,10 @@ func TestGithubSwitchSendsRefusedAsLabels(t *testing.T) {
 	g := newGithubForge(t, "owner")
 	g.fake.unassignable["eve"] = true
 	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.UserAct("eve").Comment(ref, "hi")
 	g.assign("alice", ref, "bob", true)
-	backend, sync := syncing(t, g)
+	mode := core.AssigneesNative
+	backend, sync := syncing(t, g, &mode)
 	require.Zero(t, sync())
 	b, err := backend.Bugs().Resolve(backend.Bugs().AllIds()[0])
 	require.NoError(t, err)
@@ -348,7 +288,7 @@ func TestGithubSwitchSendsRefusedAsLabels(t *testing.T) {
 	require.Equal(t, 1, sync(), "eve refused")
 	require.Zero(t, sync())
 
-	g.labelAssignees = true
+	mode = core.AssigneesLabels
 	require.Zero(t, sync())
 	labels, assignees := g.held(ref)
 	require.Equal(t, []string{"assignee:bob", "assignee:eve"}, labels)
@@ -357,7 +297,7 @@ func TestGithubSwitchSendsRefusedAsLabels(t *testing.T) {
 	require.Zero(t, sync())
 	require.Equal(t, writes, g.Writes())
 
-	g.labelAssignees = false
+	mode = core.AssigneesNative
 	require.Equal(t, 1, sync(), "eve refused again")
 	labels, assignees = g.held(ref)
 	require.Equal(t, []string{"assignee:eve"}, labels, "kept, as GitHub can't assign her")

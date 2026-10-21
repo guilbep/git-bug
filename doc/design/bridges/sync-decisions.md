@@ -151,78 +151,135 @@ spec stays the authority.
 
 ## Assignees
 
-- **A GitHub assignee is an `assignee:<login>` label in git-bug, and only an
-  assignee on GitHub** (decided with the git-board user, 2026-10-20): never
-  an `assignee:*` label there. The adapter alone maps them: an issue's
-  labels are GitHub's and its assignees as labels, read from
-  `AssignedEvent` and `UnassignedEvent`; `ChangeLabels` sends `assignee:*`
-  to `addAssigneesToAssignable` and `removeAssigneesFromAssignable`. The
-  engine merges them as labels, so person by person. A GitHub change that
-  leaves the labels as they were (assigning someone labeled the old way, or
-  removing that label then) is no event. One rule both ways: the prefix in
-  any case, kept as spelled, and a login; `assignee:` alone is a label.
-  *If wrong:* nothing for the engine; GitLab maps its own when it comes.
-- **A login GitHub can't assign keeps its label in git-bug, with a warning**:
-  GitHub silently leaves out who has no access to the repository, so the
-  adapter reads the assignees back (logins compared without case), and
-  returns `RefusedLabels` for the missing ones, a login without a user
-  included. The engine records the other labels as sent and the refused
-  ones as not seen, so the next pull doesn't drop them, and marks the
-  change refused, with the way the forge holds assignees then
-  (`refused-as`): the issue's labels wait until a label change on either
-  side, or a pull recording something new about them (a move to send), or
-  the forge holding assignees the other way (as labels, it takes them).
-  Unassigning a login without a user, like a bot (GitHub's
-  `user(login:)` finds none), is refused the same way: the engine records
-  the label as the forge's, so the next pull doesn't put it back. *If
-  wrong:* the warning comes back with each label change of that issue on
-  GitHub.
-- **An `assignee:<login>` label already on GitHub (the old way) moves to the
-  assignees**: the adapter lists it in `Issue.Resend`; while git-bug has
-  it, the pull records the labels without it, so the push sends it again,
-  and once its login is assigned it comes off the issue. Removed in
-  git-bug, it is recorded as seen, so the push removes it. When GitHub
-  can't assign it, the label stays on GitHub as well: a clone that hasn't
-  pulled the record of it wouldn't drop it then. A dry run names the labels
-  it would send again.
-  *If wrong:* an old label of someone without access stays on GitHub; a
-  clone without the record drops git-bug's label at its next pull.
+- **An `assignee:<name>` label names a git-bug person, and each forge holds
+  them its own way** (decided with the user, 2026-10-20; built 2026-10-21).
+  On GitHub and GitLab (`AssigneeRemote`) it is an assignee of that
+  person's own account on the forge, never an `assignee:*` label there;
+  elsewhere (Gitea) a label. Adapters speak forge users: an issue's
+  `Assignees`, `EventAssignees` when the forge reports them, and `Assign`.
+  The engine translates, as it does `#n` in titles. Where issues enter it,
+  it turns each issue into git-bug's labels: the forge's labels and its
+  assignees' labels, assignment events as label events, one that changes
+  neither left out (assigning someone labeled the old way, or the echo of
+  a move). Claims, conflicts and refusals then work on labels as before.
+  One rule both ways: the prefix in any case, kept as spelled, and a name;
+  `assignee:` alone is a label. *If wrong:* the translation moves back to
+  each adapter; labels in git-bug stay as they are.
+- **A person's name is their identity's login, else the login `bridge new`
+  tags them with** (`github-login`, `gitlab-login`, `gitea-login`, in that
+  order, as git-board's `@me`), else the forge's login. So a pull from any
+  forge writes the same label for one person, and the user's own identity,
+  made by hand without a login, is named by their GitHub login. A pull
+  creates the identity of an assignee, as of an author; a dry run creates
+  none. *If wrong:* a person with neither login nor tag gets each forge's
+  login as name, two labels for one person if both forges assign them.
+  Someone linked to an identity whose login isn't their GitHub login (so
+  far `assignee:<GitHub login>`) gets their labels rewritten once in
+  git-bug, at the next pull of each issue: no forge writes.
+- **The account a name is sent as is that identity's on the forge**, found
+  as `identitiesFor` finds people, the other way: the bridge's
+  `login-<identity>` link, a token owner, the user id
+  (`sync:<instance>:user`), then the bridge's legacy key. A name is never
+  sent as a login: on another forge, it may be someone else's. *If
+  wrong:* a legacy key names a kind of forge, not a server: an old
+  bridge's `gitlab-id` from another GitLab server would assign, and
+  notify, whoever has that id on this one (as it already finds authors;
+  this repository's GitLab is only ever gitlab.epfl.ch).
+- **A name of no one on a forge is refused there**: no identity has it
+  (like a label git-board's picker wrote for someone never pulled: the
+  user's ruling, 2026-10-21), or it has no account there. The label stays
+  in git-bug, with one warning naming why ("not sent: assignee:zed, no one
+  on gitlab.epfl.ch"); the refusal holds, as the forge's own do, until a
+  label change, a new record or the other mode, or until the person has
+  an account there (`refused-unknown`), say once linked. A dry run says
+  "would refuse". Unassigning a name of no one there just removes the
+  label: nobody of theirs can be assigned. *If wrong:* git-board's picker
+  no longer assigns someone git-bug has never seen on GitHub (git-board
+  can create their identity when they're picked); the warning comes back
+  with each label change of that issue.
+- **A name of several people is refused everywhere, unless they're one user
+  on the forge**: two identities with one login (two people sharing it,
+  or one person seen on both forges and never linked) can't tell which is
+  meant; identities found as one user of the forge, by id or by login
+  (duplicates the old bridges left, or the user's own made by hand beside
+  the one their token owner got), are that user. Assigning and unassigning
+  are both refused. *If wrong:* such people's assignments stay in git-bug
+  until their identities are told apart; nothing in git-bug merges two
+  identities yet. One found by user id only and the other by login only
+  (a link, a GitHub legacy login) count as two.
+- **A forge's refusal is read back**: GitHub silently leaves out who has no
+  access, GitLab's free edition all but one, and both drop users that
+  aren't; the adapters read the assignees back after writing and return
+  `RefusedUsers`, as given. A login without a user (GitHub's
+  `user(login:)` finds no bot) is refused, assigning or unassigning. The
+  engine refuses those labels with its own, in one warning, and records
+  the others as sent and the refused ones as not seen, so the next pull
+  doesn't drop them, with the way the forge holds assignees then
+  (`refused-as`). *If wrong:* the warning comes back with each label
+  change of that issue.
+- **Writes go in an order whose echoes are never unassignments**: holding
+  assignees natively, assign, then remove the old way's labels of those
+  assigned; as labels, add the labels, then unassign. *If wrong:* a label
+  dropped and taken again at the next pull, two operations.
+- **An `assignee:<name>` label on a forge that holds assignees natively (the
+  old way) moves to the assignees**: the engine sends it again while
+  git-bug has it, and once its person is assigned it comes off the issue;
+  removed in git-bug, it is recorded as seen, so the push removes it. When
+  the forge can't assign them, or they're no one there, the label stays on
+  the forge as well: a clone that hasn't pulled the record of it wouldn't
+  drop it then. A dry run names the labels it would send again. This is
+  the GitLab mirror of a sync.7 project of both forges (the wiki), whose
+  GitHub assignees reached GitLab as labels: each moves in two writes, and
+  each person not linked on GitLab is refused once per issue. Assignments
+  sync.7 made on GitHub from GitLab logins aren't undone. *If wrong:* an
+  old label of someone without access stays on the forge; a clone without
+  the record drops git-bug's label at its next pull.
+- **GitLab's assignees come from the issue, through reconciling**: GitLab
+  records assignments as system notes only, so its replay of label events
+  takes the issue's assignees as held all along, and their changes are
+  reconciled like an edit without event. *If wrong:* a GitLab assignment
+  is attributed to the issue's author at its last update; an old way's
+  label removed on GitLab before its person was assigned there counts as
+  never removed.
+- **GitLab assigns by writing the whole set**, with `assignee_ids`, the only
+  way its API takes them: the adapter reads the assignees, changes them,
+  writes only on a change, and reads the answer back. An unknown login is
+  looked up with `ListUsers(username)`, its case aside. Checked live on
+  gitlab.epfl.ch (19.4, free edition) on project 42400, 2026-10-21: `[]`
+  and `[0]` both unassign, an id of no user is dropped wherever it is, a
+  system note is all an assignment leaves, and removing a label the issue
+  lacks writes nothing. Not checked live: two valid ids (42400 has one
+  member, and assigning anyone else would notify them); the read-back
+  tells whatever GitLab keeps. *If wrong:* an assignment made on GitLab
+  between the adapter's read and write is lost.
+- **GitLab issues are listed from two minutes before the time asked**:
+  gitlab.epfl.ch moves `updated_at` at most about once a minute for label
+  and assignee changes (still at the earlier time 26 s after a bump, moved
+  after 71 s; a close always moves it), so an issue changed just after a
+  sync could be dated before it and never pulled. *If wrong:* a few
+  issues read again at each sync.
 - **Upgrading reads every issue once, by hand**: a sync only lists the
   issues updated since the last one, so the assignees and old labels of the
   others come with `git bug bridge pull <bridge> --no-resume` (local only),
-  then `bridge sync --dry-run` names what would move, then `bridge sync`.
-  No automatic full pull: nothing goes out unasked. *If wrong:* until then,
-  an issue's assignees come in, and its old labels move, only when it
-  changes on GitHub.
-- **GitLab: native assignees, translated per person** (decided with the
-  user, 2026-10-20; not built). `assignee:<x>` names a git-bug person, and
-  each forge gets that person's own account there: the engine translates,
-  as it does `#n` in titles, through the identity's user id on that forge
-  (`sync:<instance>:user`) or the bridge's `login-<identity>` link. A
-  person unknown on a forge is refused there (label kept, one warning): a
-  login is never sent as is to another forge, where it may be someone
-  else. gitlab.epfl.ch is the free edition, one assignee per issue: the
-  others are refused the same way. This moves the GitHub adapter's union of
-  assignees and old labels into the engine, as an old label holds git-bug's
-  value, not necessarily a GitHub login. *Until then:* with GitHub and
-  GitLab in one sync, a GitLab login in an `assignee:` label is sent to
-  GitHub as that GitHub login, and GitHub assignees reach GitLab as plain
-  labels.
+  then `bridge sync --dry-run` names what would move and who would be
+  refused, then `bridge sync`. No automatic full pull: nothing goes out
+  unasked. *If wrong:* until then, an issue's assignees come in, and its
+  old labels move, only when it changes on the forge.
 - **A project can hold its assignees as labels instead** (decided with the
   user, 2026-10-20): the bridge key `assignees = labels` (default `native`),
   for a project that wants several assignees, or people without access.
-  GitHub's adapter then adds an assignee's label as a label, for anyone,
-  and unassigns them on GitHub; those GitHub assigns, as people click there,
-  are sent again and so move to labels: each mode moves the other's way to
-  its own, and switching moves them once each way, after the full pull an
+  An assignee's label is then a label on every forge, for anyone, and not
+  translated; the forge's own assignees, as people click there, are sent
+  again as labels and unassigned: each mode moves the other's way to its
+  own, and switching moves them once each way, after the full pull an
   upgrade needs. Every clone must hold them the same way, or each sync
   undoes the others' and notifies people: git-board gives the mode from
   `.git-board.toml` with `WithAssignees` at every run, over each clone's
   key; the command line reads the key. An unknown value is an error. A bot
   GitHub won't unassign (`user(login:)` finds none) keeps its assignment
   beside its label; removing one without a user, a bot or not, warns once.
-  *If wrong:* a project in labels mode loses GitHub's assigned-to-me and
-  notifications for its assignees.
+  *If wrong:* a project in labels mode loses its forges' assigned-to-me
+  and notifications for its assignees.
 - **Native where the forge has the concept, labels otherwise** (the user's
   principle, 2026-10-20): assignees first. Not built, to weigh each:
   `kind:` and GitHub's issue types (defined per organization, so an
@@ -231,10 +288,10 @@ spec stays the authority.
   already syncs, rather than milestones (per repository, a due date only,
   no cadence; on GitLab's free edition, which has no iterations, a
   milestone may fit: not checked).
-- **A login is written as GitHub spells it**: one written in another case in
-  git-bug is assigned, then the next pull replaces its label with GitHub's
-  spelling, in two operations (traced, not tested: the fake GitHub keeps
-  logins as given). *If wrong:* two extra operations; git-board writes
+- **A name is written as the identity spells it**: one written in another
+  case in git-bug is assigned, then the next pull of that assignment
+  replaces its label with the identity's spelling, in two operations
+  (traced, not tested). *If wrong:* two extra operations; git-board writes
   logins as the forges give them.
 
 ## Rendering and identities

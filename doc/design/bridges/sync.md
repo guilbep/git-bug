@@ -176,9 +176,11 @@ type Remote interface {
   texts, and the events the forge exposes (comment added or edited, status,
   title, labels), each with its id, author and time. Events can be
   partial: what a forge doesn't report is caught by reconciling.
-  `Issue.Resend` names labels the forge holds an old way, which a push sends
-  again; `ChangeLabels` returns `RefusedLabels` for labels the forge didn't
-  add or remove. GitHub's assignees are both (see
+- A forge with assignees (GitHub, GitLab) also implements `AssigneeRemote`:
+  an issue's `Assignees` and their events, as forge users, and `Assign`,
+  which returns `RefusedUsers` for those the forge didn't take. The engine
+  holds them as git-bug's `assignee:<name>` labels, translating each person
+  to their account on each forge (see
   [sync-decisions.md](sync-decisions.md#assignees)).
 - A forge with pull requests (GitHub) also implements `PullRemote`: their
   line comments, reviews and comments, and resolving a thread. The engine
