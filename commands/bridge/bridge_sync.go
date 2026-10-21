@@ -50,9 +50,15 @@ Run it from a single place, for example a CI job:
 
     git bug pull && git bug bridge sync && git bug push
 
-git-bug's assignee:<login> labels are GitHub's assignees. To hold them as
-labels on GitHub instead, for a project that wants several or people
-without access, set it in every clone that syncs, a CI job's included:
+git-bug's assignee:<name> labels name a person, by their identity's login
+or the login "bridge new" tagged them with. On GitHub and GitLab, they are
+the assignees of that person's own account there: the one linked as above,
+or the one they were seen as. Someone with no account on a forge, or a
+name several people share, isn't assigned there, with a warning; a
+--dry-run lists them. GitLab's free edition takes one assignee per issue.
+To hold them as labels on every forge instead, for a project that wants
+several or people without access, set it in every clone that syncs, a CI
+job's included:
 clones holding them differently undo each other's syncs. git-board gives
 its own runs the project's setting, but this command reads only the key:
 

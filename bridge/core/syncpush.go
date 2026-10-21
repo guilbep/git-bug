@@ -445,6 +445,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		}
 		err := e.call(ctx, func() error { return sc.write(as) })
 		records := map[string]string{e.key("pushed"): now, e.key(string(sc.kind)): sc.local}
+		sent := true
 		if refused, ok := errors.AsType[RefusedLabels](err); ok {
 			// the others went through: the forge holds these as it did
 			out <- NewExportWarning(err, b.Id())
@@ -460,6 +461,7 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 			if n, ok := errors.AsType[notSent](err); ok && n.unknown != nil {
 				records[e.key("refused-unknown")] = labelsValue(n.unknown)
 			}
+			sent = len(refused) < len(added)+len(removed)
 			err = nil
 		}
 		if errors.Is(err, ErrRefused) {
@@ -475,7 +477,9 @@ func (e *Engine) pushChanges(ctx context.Context, b *cache.BugCache, issue Ref, 
 		if err != nil {
 			return err
 		}
-		out <- sc.event(b.Id())
+		if sent {
+			out <- sc.event(b.Id())
+		}
 	}
 	return e.pushPulls(ctx, b, refs, out)
 }

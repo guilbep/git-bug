@@ -278,7 +278,13 @@ func TestSyncRefusesLabelOfNoOne(t *testing.T) {
 	require.Zero(t, p.sync())
 
 	p.changeLabels("title", []string{"assignee:zed"}, nil)
-	require.Equal(t, 2, p.sync())
+	var results []string
+	for _, f := range p.fakes {
+		for r := range p.engine(f, false).Push(context.Background()) {
+			results = append(results, r.String())
+		}
+	}
+	require.Len(t, results, 2, "a warning each, and no label changed: %v", results)
 	p.steady()
 	require.Equal(t, []common.Label{"assignee:zed"}, p.labels("title"))
 	require.Empty(t, gh.Issue(ref.Number).Assignees)
