@@ -39,6 +39,10 @@ type fakeGitlab struct {
 	lastID    int64
 	writes    int
 	failNext  bool
+	// milestones of the project (ProjectID set) and of its group (GroupID)
+	milestones []*gitlab.Milestone
+	// milestoneRequests counts the requests about milestones
+	milestoneRequests int
 }
 
 type fakeIssue struct {
@@ -46,7 +50,9 @@ type fakeIssue struct {
 	notes       []*gitlab.Note
 	labelEvents []*gitlab.LabelEvent
 	stateEvents []*gitlab.StateEvent
-	deleted     bool
+	// Issue.Milestone is the current one
+	milestoneEvents []*gitlab.MilestoneEvent
+	deleted         bool
 }
 
 func newFakeGitlab(t *testing.T) *fakeGitlab {
@@ -182,6 +188,26 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 	mux.HandleFunc("GET /api/v4/projects/{pid}/issues/{iid}/resource_state_events", func(w http.ResponseWriter, r *http.Request) {
 		if issue := f.issue(r); issue != nil {
 			reply(w, issue.stateEvents)
+			return
+		}
+		notFound(w)
+	})
+
+	mux.HandleFunc("GET /api/v4/projects/{pid}/milestones", func(w http.ResponseWriter, r *http.Request) {
+		f.milestoneRequests++
+		q := r.URL.Query()
+		var res []*gitlab.Milestone
+		for _, m := range f.milestones {
+			if (m.ProjectID != 0 || q.Get("include_ancestors") == "true") && (q.Get("state") == "" || q.Get("state") == m.State) {
+				res = append(res, m)
+			}
+		}
+		reply(w, res)
+	})
+	mux.HandleFunc("GET /api/v4/projects/{pid}/issues/{iid}/resource_milestone_events", func(w http.ResponseWriter, r *http.Request) {
+		f.milestoneRequests++
+		if issue := f.issue(r); issue != nil {
+			reply(w, issue.milestoneEvents)
 			return
 		}
 		notFound(w)
@@ -387,6 +413,61 @@ func (f *fakeGitlab) setAssignees(u *gitlab.User, issue *fakeIssue, ids []any) {
 	}
 	issue.Assignees = assignees
 	f.addNote(u, issue, "changed the assignees", true)
+}
+
+// addMilestone makes an active milestone of the project, or of its group.
+func (f *fakeGitlab) addMilestone(title string, group bool) *gitlab.Milestone {
+	m := &gitlab.Milestone{ID: f.nextID(), Title: title, State: "active"}
+	if group {
+		m.GroupID = 7
+	} else {
+		m.ProjectID = 1
+	}
+	f.milestones = append(f.milestones, m)
+	return m
+}
+
+// setMilestone sets an issue's milestone by title, "" for none. A closed
+// milestone is silently ignored, a change leaves an add of the new one only.
+func (f *fakeGitlab) setMilestone(u *gitlab.User, issue *fakeIssue, title string) {
+	event := func(action string, m *gitlab.Milestone) {
+		issue.milestoneEvents = append(issue.milestoneEvents, &gitlab.MilestoneEvent{
+			ID: f.nextID(), Action: action, CreatedAt: f.now(), Milestone: m,
+			User: &gitlab.BasicUser{ID: u.ID, Username: u.Username, Name: u.Name},
+		})
+		issue.UpdatedAt = f.now()
+	}
+	if title == "" {
+		if issue.Milestone != nil {
+			event("remove", issue.Milestone)
+			issue.Milestone = nil
+		}
+		return
+	}
+	var found *gitlab.Milestone
+	for _, m := range f.milestones {
+		// the project's first
+		if m.Title == title && m.State == "active" && (found == nil || m.ProjectID != 0) {
+			found = m
+		}
+	}
+	if found == nil || found == issue.Milestone {
+		return
+	}
+	event("add", found)
+	issue.Milestone = found
+}
+
+// deleteMilestone deletes a milestone with its events, and unsets it on the
+// issues, all without event.
+func (f *fakeGitlab) deleteMilestone(m *gitlab.Milestone) {
+	f.milestones = slices.DeleteFunc(f.milestones, func(x *gitlab.Milestone) bool { return x == m })
+	for _, issue := range f.issues {
+		issue.milestoneEvents = slices.DeleteFunc(issue.milestoneEvents, func(e *gitlab.MilestoneEvent) bool { return e.Milestone == m })
+		if issue.Milestone == m {
+			issue.Milestone = nil
+		}
+	}
 }
 
 // gitlabForge is the adapter on a fake GitLab, for the conformance suite.

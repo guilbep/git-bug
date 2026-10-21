@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"gitlab.com/gitlab-org/api/client-go"
@@ -34,7 +35,12 @@ func (g *Gitlab) NewRemote(ctx context.Context, repo *cache.RepoCache, conf core
 	for _, cred := range creds {
 		tokens = append(tokens, cred.(*auth.Token))
 	}
-	return newRemote(ctx, conf[confKeyGitlabBaseUrl], conf[confKeyProjectID], conf[confKeyDefaultLogin], tokens)
+	r, err := newRemote(ctx, conf[confKeyGitlabBaseUrl], conf[confKeyProjectID], conf[confKeyDefaultLogin], tokens)
+	if err != nil {
+		return nil, err
+	}
+	r.sprints = conf[core.ConfigKeySprints] != core.ModeOff
+	return r, nil
 }
 
 var _ core.AssigneeRemote = &remote{}
@@ -52,6 +58,12 @@ type remote struct {
 	writers map[string]*gitlab.Client
 	// reader lists the project, with the default login's token if any.
 	reader *gitlab.Client
+
+	// sprints: milestones are sprint labels
+	sprints bool
+	mu      sync.Mutex
+	// milestones are the active ones' ids, by sprint label
+	milestones map[string]int64
 }
 
 func newRemote(ctx context.Context, baseURL, projectID, defaultLogin string, tokens []*auth.Token) (*remote, error) {
@@ -64,6 +76,7 @@ func newRemote(ctx context.Context, baseURL, projectID, defaultLogin string, tok
 		projectID: projectID,
 		instance:  u.Host,
 		writers:   map[string]*gitlab.Client{},
+		sprints:   true,
 	}
 	for _, token := range tokens {
 		reader, err := buildClient(baseURL, token)
@@ -110,6 +123,10 @@ func (r *remote) Accounts(context.Context) ([]core.Account, error) {
 
 func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Issue, error] {
 	return func(yield func(*core.Issue, error) bool) {
+		if err := r.readMilestones(ctx); err != nil {
+			yield(nil, err)
+			return
+		}
 		// stops the listing if the caller stops early
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
@@ -141,6 +158,9 @@ func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("issue %q: %w", cmp.Or(ref.ID, ref.Number), err)
 	}
+	if err := r.readMilestones(ctx); err != nil {
+		return nil, err
+	}
 	gi, _, err := r.reader.Issues.GetIssue(r.projectID, iid, gitlab.WithContext(ctx))
 	if err != nil {
 		return nil, mapErr(err)
@@ -171,6 +191,20 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 	}
 	for _, a := range gi.Assignees {
 		issue.Assignees = append(issue.Assignees, core.User{ID: strconv.FormatInt(a.ID, 10), Login: a.Username, Name: a.Name})
+	}
+	if r.sprints {
+		if gi.Milestone != nil {
+			if l := sprintLabel(gi.Milestone.Title); !slices.Contains(issue.Labels, l) {
+				issue.Labels = append(issue.Labels, l)
+			}
+		}
+		// a sprint label GitLab holds as a label, sent again as the milestone
+		// when the issue has none or that one's
+		for _, l := range gi.Labels {
+			if _, ok := r.milestoneID(l); ok && (gi.Milestone == nil || sprintLabel(gi.Milestone.Title) == l) {
+				issue.Resend = append(issue.Resend, l)
+			}
+		}
 	}
 
 	for e := range Notes(ctx, r.reader, gi) {
@@ -226,6 +260,42 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 		}
 	}
 
+	if r.sprints {
+		// the sprint label the issue holds, as the events go by: a change
+		// gives an add of the new milestone only
+		held := ""
+		for e := range MilestoneEvents(ctx, r.reader, gi) {
+			switch e := e.(type) {
+			case ErrorEvent:
+				return nil, e.Err
+			case MilestoneEvent:
+				// a deleted milestone leaves no title
+				if e.Milestone == nil {
+					continue
+				}
+				l := sprintLabel(e.Milestone.Title)
+				ev := core.Event{ID: e.ID(), Kind: core.EventLabels, Author: basicUser(e.User), Time: e.CreatedAt()}
+				switch e.Kind() {
+				case EventChangedMilestone:
+					if l == held {
+						continue
+					}
+					ev.Added = []string{l}
+					if held != "" {
+						ev.Removed = []string{held}
+					}
+					held = l
+				case EventRemovedMilestone:
+					ev.Removed = []string{l}
+					held = ""
+				default:
+					continue
+				}
+				issue.Events = append(issue.Events, ev)
+			}
+		}
+	}
+
 	for e := range StateEvents(ctx, r.reader, gi) {
 		switch e := e.(type) {
 		case ErrorEvent:
@@ -246,6 +316,58 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 
 	slices.SortStableFunc(issue.Events, func(a, b core.Event) int { return a.Time.Compare(b.Time) })
 	return issue, nil
+}
+
+// sprintLabel is the label of a milestone: sprint:<slug of its title>.
+func sprintLabel(title string) string {
+	return "sprint:" + core.Slug(title)
+}
+
+// readMilestones reads the active milestones of the project and of its
+// groups, before a pull, as ones may have been made since the last. A
+// project's wins over a group's of the same label.
+func (r *remote) readMilestones(ctx context.Context) error {
+	if !r.sprints {
+		return nil
+	}
+	milestones := map[string]int64{}
+	fromProject := map[string]bool{}
+	opts := gitlab.ListMilestonesOptions{
+		State:            gitlab.Ptr("active"),
+		IncludeAncestors: gitlab.Ptr(true),
+		ListOptions:      gitlab.ListOptions{PerPage: 100},
+	}
+	for {
+		list, resp, err := r.reader.Milestones.ListMilestones(r.projectID, &opts, gitlab.WithContext(ctx))
+		if err != nil {
+			return mapErr(err)
+		}
+		for _, m := range list {
+			l := sprintLabel(m.Title)
+			_, seen := milestones[l]
+			if !seen || (m.ProjectID != 0 && !fromProject[l]) {
+				milestones[l] = m.ID
+				fromProject[l] = m.ProjectID != 0
+			}
+		}
+		if resp.CurrentPage >= resp.TotalPages {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.milestones = milestones
+	return nil
+}
+
+// milestoneID returns the id of the active milestone a label stands for,
+// matched exactly: "sprint:Sprint 2" is no milestone's.
+func (r *remote) milestoneID(label string) (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.milestones[label]
+	return id, ok
 }
 
 func (r *remote) User(ctx context.Context, id string) (core.User, error) {
