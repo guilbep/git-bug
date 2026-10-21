@@ -57,6 +57,15 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 	mux.HandleFunc("GET /api/v4/user", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, f.users[r.Header.Get("PRIVATE-TOKEN")])
 	})
+	mux.HandleFunc("GET /api/v4/users", func(w http.ResponseWriter, r *http.Request) {
+		res := []*gitlab.User{}
+		for _, u := range f.users {
+			if strings.EqualFold(u.Username, r.URL.Query().Get("username")) {
+				res = append(res, u)
+			}
+		}
+		reply(w, res)
+	})
 	mux.HandleFunc("GET /api/v4/users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		for _, u := range f.users {
 			if strconv.FormatInt(u.ID, 10) == r.PathValue("id") {
@@ -119,6 +128,9 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 		}
 		if v, ok := opt["state_event"].(string); ok {
 			f.setState(u, issue, v == "close")
+		}
+		if ids, ok := opt["assignee_ids"].([]any); ok {
+			f.setAssignees(u, issue, ids)
 		}
 		if add, remove := labelList(opt["add_labels"]), labelList(opt["remove_labels"]); len(add)+len(remove) > 0 {
 			labels := slices.Compact(slices.Sorted(slices.Values(append(add, issue.Labels...))))
@@ -356,6 +368,25 @@ func (f *fakeGitlab) setLabels(u *gitlab.User, issue *fakeIssue, labels []string
 		}
 	}
 	issue.Labels = slices.Sorted(slices.Values(labels))
+}
+
+// setAssignees sets an issue's assignees, given as user ids, as GitLab's
+// free edition does: ids of no user left out, then the first one kept. Like
+// GitLab, it leaves a system note and no event.
+func (f *fakeGitlab) setAssignees(u *gitlab.User, issue *fakeIssue, ids []any) {
+	var assignees []*gitlab.IssueAssignee
+	for _, id := range ids {
+		for _, a := range f.users {
+			if float64(a.ID) == id && len(assignees) == 0 {
+				assignees = append(assignees, &gitlab.IssueAssignee{ID: a.ID, Username: a.Username, Name: a.Name})
+			}
+		}
+	}
+	if slices.EqualFunc(assignees, issue.Assignees, func(a, b *gitlab.IssueAssignee) bool { return a.ID == b.ID }) {
+		return
+	}
+	issue.Assignees = assignees
+	f.addNote(u, issue, "changed the assignees", true)
 }
 
 // gitlabForge is the adapter on a fake GitLab, for the conformance suite.

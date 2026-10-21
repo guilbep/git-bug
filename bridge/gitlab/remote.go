@@ -37,7 +37,7 @@ func (g *Gitlab) NewRemote(ctx context.Context, repo *cache.RepoCache, conf core
 	return newRemote(ctx, conf[confKeyGitlabBaseUrl], conf[confKeyProjectID], conf[confKeyDefaultLogin], tokens)
 }
 
-var _ core.Remote = &remote{}
+var _ core.AssigneeRemote = &remote{}
 
 // remote is a GitLab project, as the sync engine sees it.
 type remote struct {
@@ -113,6 +113,9 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 		// stops the listing if the caller stops early
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		if !since.IsZero() {
+			since = since.Add(-updatedMargin)
+		}
 		for res := range Issues(ctx, r.reader, r.projectID, since) {
 			if res.Err != nil {
 				yield(nil, res.Err)
@@ -125,6 +128,12 @@ func (r *remote) Issues(ctx context.Context, since time.Time) iter.Seq2[*core.Is
 		}
 	}
 }
+
+// updatedMargin is how much earlier than asked issues are listed: GitLab
+// moves an issue's updated_at at most about once a minute for label and
+// assignee changes (gitlab.epfl.ch 19.4, checked 2026-10-21), so one
+// changed just after a sync can be dated before it.
+const updatedMargin = 2 * time.Minute
 
 func (r *remote) Fetch(ctx context.Context, ref core.Ref) (*core.Issue, error) {
 	// an issue's ID is its number
@@ -159,6 +168,9 @@ func (r *remote) convert(ctx context.Context, gi *gitlab.Issue) (*core.Issue, er
 		Body:          gi.Description,
 		Status:        status,
 		Labels:        slices.Clone(gi.Labels),
+	}
+	for _, a := range gi.Assignees {
+		issue.Assignees = append(issue.Assignees, core.User{ID: strconv.FormatInt(a.ID, 10), Login: a.Username, Name: a.Name})
 	}
 
 	for e := range Notes(ctx, r.reader, gi) {
@@ -316,6 +328,88 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 		opt.RemoveLabels = (*gitlab.LabelOptions)(&removed)
 	}
 	return r.update(ctx, as, issue, &opt)
+}
+
+// Assign writes the issue's assignees whole, as GitLab's API takes them,
+// then reads them back: the free edition keeps the first id of a user, and
+// drops ids of no user. A login without a user is refused.
+// ponytail: an assignee set on GitLab between the read and the write is
+// lost; GitLab has no add or remove for them
+func (r *remote) Assign(ctx context.Context, as core.Account, issue core.Ref, added, removed []core.User) error {
+	c, iid, err := r.writerOn(as, issue)
+	if err != nil {
+		return err
+	}
+	gi, _, err := r.reader.Issues.GetIssue(r.projectID, iid, gitlab.WithContext(ctx))
+	if err != nil {
+		return mapErr(err)
+	}
+	ids := []int64{}
+	for _, a := range gi.Assignees {
+		ids = append(ids, a.ID)
+	}
+	was := slices.Clone(ids)
+
+	var refused core.RefusedUsers
+	idOf := map[core.User]int64{}
+	for _, u := range slices.Concat(removed, added) {
+		id, ok, err := r.userID(ctx, u)
+		if err != nil {
+			return err
+		}
+		if ok {
+			idOf[u] = id
+		}
+	}
+	for _, u := range removed {
+		if id, ok := idOf[u]; ok {
+			ids = slices.DeleteFunc(ids, func(a int64) bool { return a == id })
+		}
+	}
+	for _, u := range added {
+		id, ok := idOf[u]
+		switch {
+		case !ok:
+			refused = append(refused, u)
+		case !slices.Contains(ids, id):
+			ids = append(ids, id)
+		}
+	}
+
+	after := was
+	if !slices.Equal(ids, was) {
+		gi, _, err := c.Issues.UpdateIssue(r.projectID, iid, &gitlab.UpdateIssueOptions{AssigneeIDs: &ids}, gitlab.WithContext(ctx))
+		if err != nil {
+			return r.confirm(ctx, mapErr(err), iid, 0)
+		}
+		after = nil
+		for _, a := range gi.Assignees {
+			after = append(after, a.ID)
+		}
+	}
+	for _, u := range slices.Concat(added, removed) {
+		id, ok := idOf[u]
+		if ok && slices.Contains(after, id) != slices.Contains(added, u) {
+			refused = append(refused, u)
+		}
+	}
+	if refused != nil {
+		return refused
+	}
+	return nil
+}
+
+// userID returns a user's id, found by login when not known.
+func (r *remote) userID(ctx context.Context, u core.User) (int64, bool, error) {
+	if u.ID != "" {
+		id, err := strconv.ParseInt(u.ID, 10, 64)
+		return id, err == nil, nil
+	}
+	found, _, err := r.reader.Users.ListUsers(&gitlab.ListUsersOptions{Username: &u.Login}, gitlab.WithContext(ctx))
+	if err != nil || len(found) == 0 {
+		return 0, false, mapErr(err)
+	}
+	return found[0].ID, true, nil
 }
 
 func (r *remote) update(ctx context.Context, as core.Account, issue core.Ref, opt *gitlab.UpdateIssueOptions) error {
