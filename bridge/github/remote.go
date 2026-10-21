@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"net/http"
 	neturl "net/url"
 	"regexp"
@@ -554,7 +555,18 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 }
 
 // ChangeLabels adds labels, creating the missing ones, then removes labels.
+// A kind is the issue's type, set first, so that its old way's label comes
+// off once it is. With kinds = labels, a type is cleared once its label is
+// added: the issue keeps its kind throughout, which makes no event. The
+// kinds GitHub refuses are RefusedLabels; the other labels go through.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
+	var refused core.RefusedLabels
+	var err error
+	if r.kinds {
+		if added, removed, refused, err = r.changeType(ctx, as, issue, added, removed); err != nil {
+			return err
+		}
+	}
 	add, err := r.labelIDs(ctx, added, true)
 	if err != nil {
 		return err
@@ -566,6 +578,12 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 			return r.confirm(ctx, err, issue.ID)
 		}
 	}
+	if !r.kinds {
+		// a refused type keeps its label, already added
+		if _, removed, refused, err = r.changeType(ctx, as, issue, added, removed); err != nil {
+			return err
+		}
+	}
 	// ponytail: an assignee's label missing from the repository, as most are,
 	// reads every label again; cache the misses if pushes get slow
 	remove, err := r.labelIDs(ctx, removed, false)
@@ -575,7 +593,12 @@ func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.R
 	if len(remove) > 0 {
 		var m removeLabelsFromLabelableMutation
 		input := githubv4.RemoveLabelsFromLabelableInput{LabelableID: issue.ID, LabelIDs: remove}
-		return r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID)
+		if err := r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID); err != nil {
+			return err
+		}
+	}
+	if refused != nil {
+		return refused
 	}
 	return nil
 }
@@ -609,6 +632,72 @@ func (r *remote) Assign(ctx context.Context, as core.Account, issue core.Ref, ad
 		return refused
 	}
 	return nil
+}
+
+// changeType sets the issue's type from the kinds added or removed. It
+// returns the labels left to add and to remove, and the kinds GitHub refused
+// to set or clear, left out of both. The issue has one type: another kind is
+// a label, and the type's label held the old way comes off. With kinds =
+// labels, a type whose label is added or removed is cleared.
+func (r *remote) changeType(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) (add, remove []string, refused core.RefusedLabels, err error) {
+	hasType := func(l string) bool { _, ok := r.typeID(l); return ok }
+	if !r.kinds {
+		// types aren't read in labels mode
+		hasType = func(l string) bool {
+			return strings.HasPrefix(l, "kind:") || slices.Contains(slices.Collect(maps.Values(r.kindTypes)), l)
+		}
+	} else {
+		r.mu.Lock()
+		read := r.typesRead
+		r.mu.Unlock()
+		if !read {
+			if err := r.readTypes(ctx); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
+	if !slices.ContainsFunc(added, hasType) && !slices.ContainsFunc(removed, hasType) {
+		return added, removed, nil, nil
+	}
+
+	var q issueTypeOfQuery
+	// no retries: a deleted issue is an answer
+	err = mapErr(r.reader.callAPIDealWithLimit(ctx, func(ctx context.Context) error {
+		return r.reader.sc.Query(ctx, &q, varmap{"id": githubv4.ID(issue.ID)})
+	}, func(string) {}))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	current := ""
+	if t := q.Node.Issue.IssueType; t != nil {
+		current = r.kindLabel(t.Name)
+	}
+	next, add, remove := current, added, removed
+	if r.kinds {
+		next, add, remove = core.OneNative(current, added, removed, hasType)
+	} else if current != "" && (slices.Contains(added, current) || slices.Contains(removed, current)) {
+		next = ""
+	}
+	if next == current {
+		return add, remove, nil, nil
+	}
+
+	input := UpdateIssueIssueTypeInput{IssueID: githubv4.ID(issue.ID)}
+	if next != "" {
+		id, _ := r.typeID(next)
+		input.IssueTypeID = githubv4.NewID(id)
+	}
+	var m updateIssueIssueTypeMutation
+	err = r.confirm(ctx, r.mutate(ctx, as, &m, input), issue.ID)
+	if errors.Is(err, core.ErrRefused) {
+		l := cmp.Or(next, current)
+		is := func(s string) bool { return s == l }
+		return slices.DeleteFunc(slices.Clone(add), is), slices.DeleteFunc(slices.Clone(remove), is), core.RefusedLabels{l}, nil
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return add, remove, nil, nil
 }
 
 // loginOf is a user's login: their id when only it is known.

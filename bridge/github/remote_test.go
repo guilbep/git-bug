@@ -37,6 +37,8 @@ type fakeGithub struct {
 	noUser map[string]bool
 	// types are the issue types of the owner: none, as for a user, answers null
 	types []ghType
+	// refuseTypes refuses to change an issue's type
+	refuseTypes bool
 
 	mu       sync.Mutex
 	issues   []*ghIssue
@@ -45,6 +47,8 @@ type fakeGithub struct {
 	writes   int
 	failNext bool
 	pulls    map[int]*ghPull
+	// typeReads and typeWrites count the reads and changes of an issue's type
+	typeReads, typeWrites int
 }
 
 type ghType struct {
@@ -366,6 +370,17 @@ func (c fakeClient) Query(_ context.Context, q interface{}, vars map[string]inte
 				IsEnabled bool   `graphql:"isEnabled"`
 			}{ID: "IT_" + t.name, Name: t.name, IsEnabled: t.enabled})
 		}
+	case *issueTypeOfQuery:
+		f.typeReads++
+		issue, err := f.find(vars["id"].(githubv4.ID))
+		if err != nil {
+			return err
+		}
+		if issue.issueType != "" {
+			q.Node.Issue.IssueType = &struct {
+				Name string `graphql:"name"`
+			}{Name: issue.issueType}
+		}
 	case *issueQuery:
 		since := vars["issueSince"].(githubv4.DateTime)
 		for _, issue := range f.issues {
@@ -467,6 +482,21 @@ func (c fakeClient) mutate(m interface{}, input githubv4.Input) error {
 		f.setLabels(c.login, issue, slices.DeleteFunc(slices.Clone(issue.labels), func(l string) bool {
 			return slices.ContainsFunc(in.LabelIDs, func(id githubv4.ID) bool { return f.labels[fmt.Sprint(id)] == l })
 		}))
+	case *updateIssueIssueTypeMutation:
+		in := input.(UpdateIssueIssueTypeInput)
+		f.typeWrites++
+		if f.refuseTypes {
+			return errors.New("FORBIDDEN: can't change the type of this issue")
+		}
+		issue, err := f.find(in.IssueID)
+		if err != nil {
+			return err
+		}
+		name := ""
+		if in.IssueTypeID != nil {
+			name = strings.TrimPrefix(fmt.Sprint(*in.IssueTypeID), "IT_")
+		}
+		f.setType(c.login, issue, name)
 	case *addAssigneesToAssignableMutation:
 		in := input.(githubv4.AddAssigneesToAssignableInput)
 		return f.assignees(c.login, in.AssignableID, in.AssigneeIDs, true, &m.AddAssignees.Assignable)

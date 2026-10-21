@@ -316,7 +316,16 @@ func (e *Engine) changeLabels(ctx context.Context, as Account, issue Ref, added,
 		if len(added) == 0 && len(removed) == 0 {
 			return nil
 		}
-		return e.remote.ChangeLabels(ctx, as, issue, added, removed)
+		err := e.remote.ChangeLabels(ctx, as, issue, added, removed)
+		if labels, ok := errors.AsType[RefusedLabels](err); ok {
+			// the others went through, like a kind its type refused: refused
+			// beside the assignees
+			for _, l := range labels {
+				refuse(l, "refused by the forge")
+			}
+			return nil
+		}
+		return err
 	}
 	assignees := func() error {
 		if len(toAssign) == 0 && len(toUnassign) == 0 {
