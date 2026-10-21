@@ -451,9 +451,12 @@ func TestGithubTypeChangedAfterEventlessType(t *testing.T) {
 	b, err := backend.Bugs().ResolveBugCreateMetadata("sync:"+g.Key()+":id", ref.ID)
 	require.NoError(t, err)
 	writes, ops := g.Writes(), len(b.Snapshot().Operations)
-	require.Zero(t, sync())
-	require.Equal(t, writes, g.Writes(), "nothing more sent")
-	require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+	for range 2 {
+		require.Zero(t, sync())
+		require.Equal(t, writes, g.Writes(), "nothing more sent")
+		require.Len(t, b.Snapshot().Operations, ops, "nothing more pulled")
+		require.Equal(t, []common.Label{"bug"}, b.Snapshot().Labels)
+	}
 
 	g.setType("alice", ref, "Feature")
 	require.Zero(t, sync())
