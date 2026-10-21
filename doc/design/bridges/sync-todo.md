@@ -163,8 +163,21 @@ scratch repository, GitHub and gitlab.epfl.ch `EPFL-ENAC/co2-calculator`.
       `user(login:)` finds no bot, so the adapter can't tell that the bot
       is assigned already. Needs `assignedActors` and a bot's id, which
       only a live GitHub with a bot assignee can check.
-- [ ] `kind:` ↔ GitHub issue types, `sprint:` ↔ Projects iteration (GitHub)
-      or milestones (GitLab): weigh each (sync-decisions.md, Assignees).
+- [x] Sprints as GitLab milestones (native-fields.md), live on
+      gitlab.epfl.ch 42400, 2026-10-21, milestones "native-fields live
+      Sprint 2/3":
+      - A bug's sprint set the milestone (#14, labels `[a]`), a swap moved
+        it, and a sprint without a milestone stayed a label beside it.
+      - An old-way sprint label (#15) moved with `bridge pull --no-resume`,
+        a dry run ("would send again … held by the forge the other way"),
+        then a sync. A milestone changed on GitLab came in as one replace.
+      - `sprints = off` dropped the sprint #15's milestone held (pulled
+        since). #14, not re-read, kept its sprint. A new bug's sprint went
+        as a label (#16). Back to native with a full pull, #16's label moved
+        to its milestone and #15's sprint came back.
+      - Every following sync and dry run was quiet.
+- [ ] Kinds as GitHub issue types, live: waits for an EPFL-ENAC scratch
+      repository (guilbep/git-board#29). Fakes only so far.
 - [x] GitLab native assignees, every forge's login translated per person
       (sync-decisions.md, Assignees). Live, 2026-10-21, one bug synced with
       `--issue` to guilbep/git-bug-sync-test #13 and gitlab.epfl.ch 42400
