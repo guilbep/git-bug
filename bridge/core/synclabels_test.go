@@ -207,3 +207,35 @@ func TestDryRunSkipsEchoes(t *testing.T) {
 	sync(t, repo, f)
 	require.Equal(t, writes, f.Writes(), "the sync sends nothing")
 }
+
+// A refusal of the whole label change holds while the forge holds assignees
+// the same way, and is tried again once it holds them the other way.
+func TestWholeLabelRefusalHoldsPerMode(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{RefuseLabelChanges: true}, bot)
+	_, b := pulled(t, f, repo)
+	_, _, err := b.ChangeLabels([]string{"a"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	pushAs := func(mode string) int {
+		e, err := core.NewEngine(context.Background(), repo, f, core.SyncOptions{
+			Foreign: true, DefaultLogin: "bot", LoginKey: "fake-login", Assignees: mode,
+		})
+		require.NoError(t, err)
+		var res []core.ExportResult
+		for r := range e.Push(context.Background()) {
+			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+			res = append(res, r)
+		}
+		return exportWarnings(res)
+	}
+
+	require.Equal(t, 1, pushAs(core.AssigneesNative))
+	writes := f.Writes()
+	require.Zero(t, pushAs(core.AssigneesNative))
+	require.Equal(t, writes, f.Writes(), "held")
+	require.Equal(t, 1, pushAs(core.AssigneesLabels), "tried again the other way")
+	writes = f.Writes()
+	require.Zero(t, pushAs(core.AssigneesLabels))
+	require.Equal(t, writes, f.Writes(), "held again")
+}

@@ -517,7 +517,8 @@ func (e *Engine) assignees() string {
 // again: a later change of the value will be tried.
 func (e *Engine) refused(b *cache.BugCache, opId entity.Id, err error, out chan<- ExportResult) error {
 	out <- NewExportWarning(err, b.Id())
-	_, err = b.SetMetadata(opId, map[string]string{e.key("refused"): "1"})
+	// how the forge held assignees then: for labels, a refusal holds only so
+	_, err = b.SetMetadata(opId, map[string]string{e.key("refused"): "1", e.key("refused-as"): e.assignees()})
 	return err
 }
 

@@ -58,6 +58,9 @@ type Quirks struct {
 	// RefuseLabels: ChangeLabels doesn't add these, and returns
 	// RefusedLabels (assignees GitHub can't assign).
 	RefuseLabels []string
+	// RefuseLabelChanges: ChangeLabels is refused for good (a token that
+	// can't see the issue).
+	RefuseLabelChanges bool
 	// OldLabels: the labels of this prefix that people add on the forge are
 	// held the old way, until ChangeLabels adds them (GitHub's assignee:*
 	// labels).
@@ -202,6 +205,9 @@ func (f *Fake) SetTitle(_ context.Context, as core.Account, issue core.Ref, titl
 func (f *Fake) ChangeLabels(_ context.Context, as core.Account, ref core.Ref, added, removed []string) error {
 	var refused core.RefusedLabels
 	err := f.write(func() error {
+		if f.quirks.RefuseLabelChanges {
+			return core.ErrRefused
+		}
 		issue, err := f.find(ref)
 		if err != nil {
 			return err
