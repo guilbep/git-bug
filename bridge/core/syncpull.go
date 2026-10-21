@@ -244,7 +244,8 @@ func (e *Engine) planPull(b *cache.BugCache, issue *Issue, out chan<- ImportResu
 		has := labelStrings(snap.Labels)
 		pending := false
 		for _, ev := range issue.Events {
-			if e.findOp(snap, ev.ID) == nil {
+			// an echo of a push is claimed, not pulled
+			if e.findOp(snap, ev.ID) == nil && e.echoOf(snap, &ev) == nil {
 				has = append(has, ev.Added...)
 				pending = pending || ev.Kind == EventLabels
 			}
@@ -534,10 +535,20 @@ const claimWindow = 5 * time.Minute
 // of a push not claimed yet. A label push may be claimed by several events,
 // as forges emit one per label.
 func (e *Engine) claim(b *cache.BugCache, ev *Event) (bool, error) {
-	if !e.isAccount(ev.Author) {
+	push := e.echoOf(b.Snapshot(), ev)
+	if push == nil {
 		return false, nil
 	}
-	snap := b.Snapshot()
+	_, err := b.SetMetadata(push.Target, map[string]string{e.key("also:") + ev.ID: push.Id().String()})
+	return true, err
+}
+
+// echoOf returns the push an event echoes, as claim recognizes it, nil for
+// none.
+func (e *Engine) echoOf(snap *bug.Snapshot, ev *Event) *dag.SetMetadataOperation[*bug.Snapshot] {
+	if !e.isAccount(ev.Author) {
+		return nil
+	}
 	pushedKey, alsoPrefix := e.key("pushed"), e.key("also:")
 
 	claimed := map[string]bool{}
@@ -567,10 +578,9 @@ func (e *Engine) claim(b *cache.BugCache, ev *Event) (bool, error) {
 		if !e.pushedAs(push.NewMetadata, ev) {
 			continue
 		}
-		_, err = b.SetMetadata(push.Target, map[string]string{alsoPrefix + ev.ID: push.Id().String()})
-		return true, err
+		return push
 	}
-	return false, nil
+	return nil
 }
 
 // pushedAs tells whether a push recorded with the given metadata would make

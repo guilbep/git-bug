@@ -184,3 +184,26 @@ func TestSyncRemovesRefusedOldWayLabel(t *testing.T) {
 	require.Empty(t, onlyBug(t, repo).Snapshot().Labels)
 	require.Empty(t, f.Issue(issue.Number).Labels)
 }
+
+// A dry run doesn't take the forge's echo of a push, not claimed yet, for a
+// change to pull: it names nothing to send again while a refusal holds, as
+// the sync then sends nothing.
+func TestDryRunSkipsEchoes(t *testing.T) {
+	repo := newRepo(t)
+	f := synctest.NewFake(key, "fake.test", synctest.Quirks{OldLabels: "assignee:", RefuseLabels: []string{"assignee:eve"}}, bot)
+	alice := f.UserAct("alice")
+	issue := alice.CreateIssue("title", "body")
+	alice.SetLabels(issue, []string{"assignee:eve"})
+	sync(t, repo, f)
+	b := onlyBug(t, repo)
+	_, _, err := b.ChangeLabels([]string{"a"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	push(t, repo, f, true)
+	require.Equal(t, []string{"a", "assignee:eve"}, f.Issue(issue.Number).Labels)
+
+	require.NotContains(t, planned(t, repo, f), "would send")
+	writes := f.Writes()
+	sync(t, repo, f)
+	require.Equal(t, writes, f.Writes(), "the sync sends nothing")
+}
