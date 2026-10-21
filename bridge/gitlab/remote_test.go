@@ -142,6 +142,17 @@ func newFakeGitlab(t *testing.T) *fakeGitlab {
 			labels := slices.Compact(slices.Sorted(slices.Values(append(add, issue.Labels...))))
 			f.setLabels(u, issue, slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(remove, l) }))
 		}
+		// null clears it; an unknown id is ignored
+		if v, ok := opt["milestone_id"]; ok {
+			id, _ := v.(float64)
+			i := slices.IndexFunc(f.milestones, func(m *gitlab.Milestone) bool { return float64(m.ID) == id })
+			switch {
+			case v == nil:
+				f.assignMilestone(u, issue, nil)
+			case i >= 0:
+				f.assignMilestone(u, issue, f.milestones[i])
+			}
+		}
 		reply(w, &issue.Issue)
 	})
 	mux.HandleFunc("GET /api/v4/projects/{pid}/issues/{iid}/notes", func(w http.ResponseWriter, r *http.Request) {
@@ -427,23 +438,9 @@ func (f *fakeGitlab) addMilestone(title string, group bool) *gitlab.Milestone {
 	return m
 }
 
-// setMilestone sets an issue's milestone by title, "" for none. A closed
-// milestone is silently ignored, a change leaves an add of the new one only.
+// setMilestone sets an issue's milestone by title, "" for none. A title
+// without an active milestone is ignored.
 func (f *fakeGitlab) setMilestone(u *gitlab.User, issue *fakeIssue, title string) {
-	event := func(action string, m *gitlab.Milestone) {
-		issue.milestoneEvents = append(issue.milestoneEvents, &gitlab.MilestoneEvent{
-			ID: f.nextID(), Action: action, CreatedAt: f.now(), Milestone: m,
-			User: &gitlab.BasicUser{ID: u.ID, Username: u.Username, Name: u.Name},
-		})
-		issue.UpdatedAt = f.now()
-	}
-	if title == "" {
-		if issue.Milestone != nil {
-			event("remove", issue.Milestone)
-			issue.Milestone = nil
-		}
-		return
-	}
 	var found *gitlab.Milestone
 	for _, m := range f.milestones {
 		// the project's first
@@ -451,11 +448,34 @@ func (f *fakeGitlab) setMilestone(u *gitlab.User, issue *fakeIssue, title string
 			found = m
 		}
 	}
-	if found == nil || found == issue.Milestone {
+	if title != "" && found == nil {
 		return
 	}
-	event("add", found)
-	issue.Milestone = found
+	f.assignMilestone(u, issue, found)
+}
+
+// assignMilestone sets an issue's milestone, nil for none. A closed
+// milestone is silently ignored, a change leaves an add of the new one only.
+func (f *fakeGitlab) assignMilestone(u *gitlab.User, issue *fakeIssue, m *gitlab.Milestone) {
+	event := func(action string, m *gitlab.Milestone) {
+		issue.milestoneEvents = append(issue.milestoneEvents, &gitlab.MilestoneEvent{
+			ID: f.nextID(), Action: action, CreatedAt: f.now(), Milestone: m,
+			User: &gitlab.BasicUser{ID: u.ID, Username: u.Username, Name: u.Name},
+		})
+		issue.UpdatedAt = f.now()
+	}
+	if m == nil {
+		if issue.Milestone != nil {
+			event("remove", issue.Milestone)
+			issue.Milestone = nil
+		}
+		return
+	}
+	if m.State != "active" || m == issue.Milestone {
+		return
+	}
+	event("add", m)
+	issue.Milestone = m
 }
 
 // deleteMilestone deletes a milestone with its events, and unsets it on the

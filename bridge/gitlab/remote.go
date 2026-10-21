@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +65,8 @@ type remote struct {
 	mu      sync.Mutex
 	// milestones are the active ones' ids, by sprint label
 	milestones map[string]int64
+	// milestonesRead tells readMilestones ran
+	milestonesRead bool
 }
 
 func newRemote(ctx context.Context, baseURL, projectID, defaultLogin string, tokens []*auth.Token) (*remote, error) {
@@ -357,7 +360,7 @@ func (r *remote) readMilestones(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.milestones = milestones
+	r.milestones, r.milestonesRead = milestones, true
 	return nil
 }
 
@@ -440,16 +443,69 @@ func (r *remote) SetTitle(ctx context.Context, as core.Account, issue core.Ref, 
 }
 
 // ChangeLabels adds and removes labels in one update; GitLab creates the
-// missing ones it adds.
+// missing ones it adds. A sprint with a milestone is set as the issue's
+// milestone in the same update: the issue has one, another sprint is a
+// label, and the milestone's label held the old way comes off. A removed
+// sprint clears its milestone even closed. GitLab silently ignores a
+// milestone it can't assign: that sprint is refused.
 func (r *remote) ChangeLabels(ctx context.Context, as core.Account, issue core.Ref, added, removed []string) error {
+	c, iid, err := r.writerOn(as, issue)
+	if err != nil {
+		return err
+	}
+	held := func(gi *gitlab.Issue) string {
+		if gi.Milestone == nil {
+			return ""
+		}
+		return sprintLabel(gi.Milestone.Title)
+	}
 	var opt gitlab.UpdateIssueOptions
+	current, next := "", ""
+	if r.sprints {
+		r.mu.Lock()
+		read := r.milestonesRead
+		r.mu.Unlock()
+		if !read {
+			if err := r.readMilestones(ctx); err != nil {
+				return err
+			}
+		}
+		hasMilestone := func(l string) bool { _, ok := r.milestoneID(l); return ok }
+		// ponytail: a closed milestone isn't known, so any removed sprint
+		// reads the issue, one request each such push
+		isSprint := func(l string) bool { return strings.HasPrefix(l, "sprint:") }
+		if slices.ContainsFunc(added, hasMilestone) || slices.ContainsFunc(removed, isSprint) {
+			gi, _, err := r.reader.Issues.GetIssue(r.projectID, iid, gitlab.WithContext(ctx))
+			if err != nil {
+				return r.confirm(ctx, mapErr(err), iid, 0)
+			}
+			current = held(gi)
+			next, added, removed = core.OneNative(current, added, removed, hasMilestone)
+		}
+	}
+	switch {
+	case next == current:
+	case next == "":
+		opt.ResetMilestoneID = true
+	default:
+		id, _ := r.milestoneID(next)
+		opt.MilestoneID = &id
+	}
 	if len(added) > 0 {
 		opt.AddLabels = (*gitlab.LabelOptions)(&added)
 	}
 	if len(removed) > 0 {
 		opt.RemoveLabels = (*gitlab.LabelOptions)(&removed)
 	}
-	return r.update(ctx, as, issue, &opt)
+	gi, _, err := c.Issues.UpdateIssue(r.projectID, iid, &opt, gitlab.WithContext(ctx))
+	if err := r.confirm(ctx, mapErr(err), iid, 0); err != nil {
+		return err
+	}
+	if next == current || held(gi) == next {
+		return nil
+	}
+	// a replace is a set and a clear: both sprints are refused
+	return core.RefusedLabels(slices.DeleteFunc([]string{next, current}, func(s string) bool { return s == "" }))
 }
 
 // Assign writes the issue's assignees whole, as GitLab's API takes them,

@@ -1,14 +1,22 @@
 package gitlab
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 
 	"github.com/git-bug/git-bug/bridge/core"
+	"github.com/git-bug/git-bug/bridge/core/auth"
+	"github.com/git-bug/git-bug/cache"
+	"github.com/git-bug/git-bug/entities/bug"
+	"github.com/git-bug/git-bug/entities/common"
+	"github.com/git-bug/git-bug/entity/dag"
+	"github.com/git-bug/git-bug/repository/repotest"
 )
 
 // setMilestone gives an issue a milestone on GitLab, "" for none, as login.
@@ -105,6 +113,12 @@ func TestGitlabSprintsOff(t *testing.T) {
 	require.Empty(t, g.Issue(ref.Number).Labels)
 	_, err := g.Fetch(t.Context(), ref)
 	require.NoError(t, err)
+
+	// a sprint is a label
+	require.NoError(t, g.ChangeLabels(t.Context(), g.accounts[0], ref, []string{"sprint:sprint-2"}, nil))
+	labels, milestone := g.held(ref)
+	require.Equal(t, []string{"sprint:sprint-2"}, labels)
+	require.Equal(t, "Sprint 2", milestone)
 	require.Zero(t, g.fake.milestoneRequests)
 }
 
@@ -181,4 +195,196 @@ func TestGitlabDeletedMilestone(t *testing.T) {
 	issue := g.Issue(ref.Number)
 	require.Empty(t, issue.Labels)
 	require.Empty(t, issue.Events)
+}
+
+func TestGitlabChangeLabelsSetsMilestone(t *testing.T) {
+	ctx := t.Context()
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	g.addMilestone("Sprint 3", false)
+	bot := g.accounts[0]
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-2", "a"}, nil))
+	labels, milestone := g.held(ref)
+	require.Equal(t, []string{"a"}, labels)
+	require.Equal(t, "Sprint 2", milestone)
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-3"}, []string{"sprint:sprint-2"}))
+	_, milestone = g.held(ref)
+	require.Equal(t, "Sprint 3", milestone)
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, ref, nil, []string{"sprint:sprint-3"}))
+	_, milestone = g.held(ref)
+	require.Empty(t, milestone)
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-9"}, nil))
+	labels, milestone = g.held(ref)
+	require.Equal(t, []string{"a", "sprint:sprint-9"}, labels, "no milestone: a label")
+	require.Empty(t, milestone)
+
+	require.NoError(t, g.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-2", "sprint:sprint-3"}, nil))
+	labels, milestone = g.held(ref)
+	require.Equal(t, []string{"a", "sprint:sprint-3", "sprint:sprint-9"}, labels, "one milestone: a second sprint is a label")
+	require.Equal(t, "Sprint 2", milestone)
+}
+
+// A removed sprint clears its milestone, even closed, so not known.
+func TestGitlabRemovedSprintClearsClosedMilestone(t *testing.T) {
+	ctx := t.Context()
+	g := newGitlabForge(t)
+	m := g.addMilestone("Sprint 2", false)
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	g.setMilestone("alice", ref, "Sprint 2")
+	g.fake.mu.Lock()
+	m.State = "closed"
+	g.fake.mu.Unlock()
+	require.NoError(t, g.readMilestones(ctx))
+	_, ok := g.milestoneID("sprint:sprint-2")
+	require.False(t, ok)
+
+	require.NoError(t, g.ChangeLabels(ctx, g.accounts[0], ref, nil, []string{"sprint:sprint-2"}))
+	_, milestone := g.held(ref)
+	require.Empty(t, milestone)
+}
+
+// GitLab silently ignores a milestone it can't assign, like one closed since
+// it was read: the sprint is refused, the other labels go through.
+func TestGitlabMilestoneWriteIgnored(t *testing.T) {
+	ctx := t.Context()
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	m := g.addMilestone("Sprint 3", false)
+	bot := g.accounts[0]
+	ref := g.UserAct("alice").CreateIssue("title", "body")
+	require.NoError(t, g.readMilestones(ctx))
+	g.fake.mu.Lock()
+	m.State = "closed"
+	g.fake.mu.Unlock()
+
+	err := g.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-3", "a"}, nil)
+	require.Equal(t, core.RefusedLabels{"sprint:sprint-3"}, err)
+	labels, milestone := g.held(ref)
+	require.Equal(t, []string{"a"}, labels)
+	require.Empty(t, milestone)
+
+	// a replace is a set and a clear: both are refused
+	g.setMilestone("alice", ref, "Sprint 2")
+	err = g.ChangeLabels(ctx, bot, ref, []string{"sprint:sprint-3", "b"}, []string{"sprint:sprint-2"})
+	require.Equal(t, core.RefusedLabels{"sprint:sprint-3", "sprint:sprint-2"}, err)
+	labels, milestone = g.held(ref)
+	require.Equal(t, []string{"a", "b"}, labels)
+	require.Equal(t, "Sprint 2", milestone)
+}
+
+// syncing returns a git-bug repository, and a sync of it with a GitLab that
+// returns its number of warnings.
+func syncing(t *testing.T) (*cache.RepoCache, func(g gitlabForge) int) {
+	backend, err := cache.NewRepoCacheNoEvents(repotest.NewGoGitRepo(t, false), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+	me, err := backend.Identities().New("Me", "me@example.com")
+	require.NoError(t, err)
+	require.NoError(t, backend.SetUserIdentity(me))
+	return backend, func(g gitlabForge) int {
+		e, err := core.NewEngine(context.Background(), backend, g, core.SyncOptions{
+			Foreign: true, DefaultLogin: "bot", LoginKey: metaKeyGitlabLogin,
+		})
+		require.NoError(t, err)
+		warnings := 0
+		for r := range e.Pull(context.Background(), time.Time{}) {
+			require.NotEqual(t, core.ImportEventError, r.Event, r.String())
+			if r.Event == core.ImportEventWarning {
+				warnings++
+			}
+		}
+		for r := range e.Push(context.Background()) {
+			require.NotEqual(t, core.ExportEventError, r.Event, r.String())
+			if r.Event == core.ExportEventWarning {
+				warnings++
+			}
+		}
+		return warnings
+	}
+}
+
+// changes counts a bug's operations but metadata, which claims of echoes are.
+func changes(b *cache.BugCache) (n int) {
+	for _, op := range b.Snapshot().Operations {
+		if _, ok := op.(*dag.SetMetadataOperation[*bug.Snapshot]); !ok {
+			n++
+		}
+	}
+	return n
+}
+
+// A sync sets git-bug's sprints as milestones, moves GitLab's sprint labels
+// to milestones, and then sends nothing more.
+func TestGitlabSprintsSync(t *testing.T) {
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	backend, sync := syncing(t)
+	b, _, err := backend.Bugs().New("local", "body")
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"sprint:sprint-2", "a"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Zero(t, sync(g))
+	ref := g.Issue("1").Ref
+	labels, milestone := g.held(ref)
+	require.Equal(t, []string{"a"}, labels)
+	require.Equal(t, "Sprint 2", milestone)
+	ops := changes(b)
+	require.Zero(t, sync(g))
+	require.Equal(t, ops, changes(b), "echoes claimed")
+	require.Equal(t, []common.Label{"a", "sprint:sprint-2"}, b.Snapshot().Labels)
+
+	alice := g.UserAct("alice")
+	old := alice.CreateIssue("old way", "body")
+	alice.SetLabels(old, []string{"sprint:sprint-2"})
+	require.Zero(t, sync(g))
+	labels, milestone = g.held(old)
+	require.Empty(t, labels)
+	require.Equal(t, "Sprint 2", milestone)
+	ob, err := backend.Bugs().ResolveBugCreateMetadata("sync:"+g.Key()+":id", old.ID)
+	require.NoError(t, err)
+	require.Equal(t, []common.Label{"sprint:sprint-2"}, ob.Snapshot().Labels)
+	// the move's label removal isn't claimed: the next pull takes it, and
+	// gives the sprint back from the milestone, once (convert doesn't net
+	// label and milestone events, as GitHub's relabel does)
+	writes := g.Writes()
+	require.Zero(t, sync(g))
+	require.Equal(t, writes, g.Writes(), "nothing more sent")
+	require.Equal(t, []common.Label{"sprint:sprint-2"}, ob.Snapshot().Labels)
+}
+
+// Ruled: after a native sync, a remote with sprints = off sees no milestone.
+// git-bug drops the sprint the milestone holds, and keeps one GitLab holds
+// as a label; GitLab keeps the milestone.
+func TestGitlabSprintsOffAfterNative(t *testing.T) {
+	g := newGitlabForge(t)
+	g.addMilestone("Sprint 2", false)
+	backend, sync := syncing(t)
+	b, _, err := backend.Bugs().New("local", "body")
+	require.NoError(t, err)
+	_, _, err = b.ChangeLabels([]string{"sprint:sprint-2", "sprint:sprint-9"}, nil)
+	require.NoError(t, err)
+	require.NoError(t, b.Commit())
+	require.Zero(t, sync(g))
+	ref := g.Issue("1").Ref
+	labels, milestone := g.held(ref)
+	require.Equal(t, []string{"sprint:sprint-9"}, labels)
+	require.Equal(t, "Sprint 2", milestone)
+
+	r, err := newRemote(t.Context(), g.fake.URL+"/", "1", "bot", []*auth.Token{auth.NewToken(target, "token-bot")})
+	require.NoError(t, err)
+	r.sprints = false
+	off := gitlabForge{remote: r, fake: g.fake}
+	require.Zero(t, sync(off))
+	require.Equal(t, []common.Label{"sprint:sprint-9"}, b.Snapshot().Labels)
+	_, milestone = off.held(ref)
+	require.Equal(t, "Sprint 2", milestone, "GitLab keeps the milestone")
+	writes := off.Writes()
+	require.Zero(t, sync(off))
+	require.Equal(t, writes, off.Writes(), "nothing more sent")
 }
