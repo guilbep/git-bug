@@ -49,17 +49,19 @@ those of forges that don't map assignees yet (Gitea).
 
 A git-bug kind is the issue's type on a GitHub organization that has an enabled
 type for it, and a label otherwise (user-owned repositories have no types). A
-type is the label kind:<slug of its name> unless the key kind-types maps it: a
-comma list of <label>=<Type>, the label as git-bug stores it, for example
-co2's flat kinds, or kind:feat=Feature with git-board's default config:
+type is the label kind:SLUG, SLUG being its name slugged, unless the key
+kind-types maps it: a comma list of LABEL=TYPE, the label as git-bug stores it.
+co2's labels are flat (bug, feat), git-board's default is kind:feat:
 
     git config git-bug.bridge.<name>.kind-types bug=Bug,feat=Feature
 
-A sprint:<slug> is the GitLab milestone, among the project's active ones,
-whose title has that slug, and a label otherwise: the fork never creates a
-milestone. GitHub's sprints are left alone: git-board syncs the Project's
-Sprint iteration. To hold kinds as labels, or to ignore milestones, for a
-project that uses them for releases:
+A sprint:SLUG is the GitLab milestone whose title has that slug, among the
+project's active milestones and its groups' (the project's wins on a tie), and
+a label otherwise: the fork never creates a milestone. GitHub's sprints are
+left alone: git-board syncs the Project's Sprint iteration. The key kinds is
+native (the default) or labels, which holds kinds as labels; the key sprints is
+native (the default) or off, which ignores milestones, for a project that uses
+them for releases:
 
     git config git-bug.bridge.<name>.kinds labels
     git config git-bug.bridge.<name>.sprints off
