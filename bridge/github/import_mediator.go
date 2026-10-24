@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/shurcooL/githubv4"
@@ -33,12 +34,20 @@ type importMediator struct {
 	// given date should be imported.
 	since time.Time
 
+	// issueFirst is how many issues a page asks for, lowered when GitHub
+	// finds a page too costly.
+	issueFirst int
+
+	// number, when set, is the one issue to read instead (Fetch).
+	number int
+
 	// importEvents holds events representing issues, comments, edits, ...
 	// In this channel issues are immediately followed by their issue edits and comments are
 	// immediately followed by their comment edits.
 	importEvents chan ImportEvent
 
-	// Sticky error
+	// Sticky error, read while the mediator runs
+	mu  sync.Mutex
 	err error
 }
 
@@ -48,12 +57,27 @@ func NewImportMediator(ctx context.Context, client *rateLimitHandlerClient, owne
 		owner:        owner,
 		project:      project,
 		since:        since,
+		issueFirst:   NumIssues,
 		importEvents: make(chan ImportEvent, ChanCapacity),
 		err:          nil,
 	}
 
 	go mm.start(ctx)
 
+	return &mm
+}
+
+// newIssueMediator reads one issue, by number, as NewImportMediator reads
+// every issue changed since a time.
+func newIssueMediator(ctx context.Context, client *rateLimitHandlerClient, owner, project string, number int) *importMediator {
+	mm := importMediator{
+		gh:           client,
+		owner:        owner,
+		project:      project,
+		number:       number,
+		importEvents: make(chan ImportEvent, ChanCapacity),
+	}
+	go mm.start(ctx)
 	return &mm
 }
 
@@ -72,7 +96,15 @@ func (mm *importMediator) NextImportEvent() ImportEvent {
 }
 
 func (mm *importMediator) Error() error {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
 	return mm.err
+}
+
+func (mm *importMediator) setErr(err error) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.err = err
 }
 
 func (mm *importMediator) User(ctx context.Context, loginName string) (*user, error) {
@@ -85,10 +117,17 @@ func (mm *importMediator) User(ctx context.Context, loginName string) (*user, er
 }
 
 func (mm *importMediator) fillImportEvents(ctx context.Context) {
+	if mm.number > 0 {
+		mm.fillOneIssue(ctx)
+		return
+	}
 	initialCursor := githubv4.String("")
 	issues, hasIssues := mm.queryIssue(ctx, initialCursor)
 	for hasIssues {
 		for _, node := range issues.Nodes {
+			if !mm.fillLabels(ctx, &node.issue) {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -105,6 +144,54 @@ func (mm *importMediator) fillImportEvents(ctx context.Context) {
 		}
 		issues, hasIssues = mm.queryIssue(ctx, issues.PageInfo.EndCursor)
 	}
+}
+
+// fillOneIssue reads issue number mm.number, its edits and its timeline;
+// nothing when the repository has no such issue.
+func (mm *importMediator) fillOneIssue(ctx context.Context) {
+	vars := varmap{
+		"owner":             githubv4.String(mm.owner),
+		"name":              githubv4.String(mm.project),
+		"issueNumber":       githubv4.Int(mm.number),
+		"issueEditLast":     githubv4.Int(NumIssueEdits),
+		"issueEditBefore":   (*githubv4.String)(nil),
+		"timelineFirst":     githubv4.Int(NumTimelineItems),
+		"timelineAfter":     (*githubv4.String)(nil),
+		"commentEditLast":   githubv4.Int(NumCommentEdits),
+		"commentEditBefore": (*githubv4.String)(nil),
+	}
+	query := oneIssueQuery{}
+	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
+		mm.setErr(err)
+		return
+	}
+	node := query.Repository.Issue
+	if node == nil || !mm.fillLabels(ctx, &node.issue) {
+		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case mm.importEvents <- IssueEvent{node.issue}:
+	}
+	mm.fillIssueEditEvents(ctx, node)
+	mm.fillTimelineEvents(ctx, node)
+}
+
+// fillLabels reads the labels of an issue past its first page. A failure is
+// the mediator's error: the issue isn't sent.
+func (mm *importMediator) fillLabels(ctx context.Context, i *issue) bool {
+	for page := i.Labels.PageInfo; page.HasNextPage; {
+		var q issueLabelsQuery
+		vars := varmap{"gqlNodeId": i.Id, "labelAfter": page.EndCursor}
+		if err := mm.gh.queryImport(ctx, &q, vars, mm.importEvents); err != nil {
+			mm.setErr(err)
+			return false
+		}
+		i.Labels.Nodes = append(i.Labels.Nodes, q.Node.Issue.Labels.Nodes...)
+		page = q.Node.Issue.Labels.PageInfo
+	}
+	return true
 }
 
 func (mm *importMediator) fillIssueEditEvents(ctx context.Context, issueNode *issueNode) {
@@ -141,7 +228,7 @@ func (mm *importMediator) queryIssueEdits(ctx context.Context, nid githubv4.ID, 
 	}
 	query := issueEditQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Node.Issue.UserContentEdits
@@ -185,7 +272,7 @@ func (mm *importMediator) queryTimeline(ctx context.Context, nid githubv4.ID, cu
 	}
 	query := timelineQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Node.Issue.TimelineItems
@@ -235,7 +322,7 @@ func (mm *importMediator) queryCommentEdits(ctx context.Context, nid githubv4.ID
 	}
 	query := commentEditQuery{}
 	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
+		mm.setErr(err)
 		return nil, false
 	}
 	connection := &query.Node.IssueComment.UserContentEdits
@@ -253,9 +340,19 @@ func (mm *importMediator) queryIssue(ctx context.Context, cursor githubv4.String
 		vars["issueAfter"] = cursor
 	}
 	query := issueQuery{}
-	if err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents); err != nil {
-		mm.err = err
-		return nil, false
+	for {
+		vars["issueFirst"] = githubv4.Int(mm.issueFirst)
+		err := mm.gh.queryImport(ctx, &query, vars, mm.importEvents)
+		if isResourceLimit(err) && mm.issueFirst > 1 {
+			// ponytail: halves for the rest of the import, never grows back
+			mm.issueFirst /= 2
+			continue
+		}
+		if err != nil {
+			mm.setErr(err)
+			return nil, false
+		}
+		break
 	}
 	connection := &query.Repository.Issues
 	if len(connection.Nodes) <= 0 {
