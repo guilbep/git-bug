@@ -7,7 +7,21 @@ Configure a new bridge
 Configure a new bridge by passing flags or/and using interactive terminal prompts.
 You can avoid all the terminal prompts by passing all the necessary flags to configure your bridge.
 
+A github.com or gitlab.com --url gives the target. Given a name and a target,
+and no --credential or --token, the bridge uses the stored credential of its
+target (see "git-bug bridge auth"), of its instance for Gitea, GitLab and Jira,
+if only one fits. When several fit, choose one with --credential.
+
+--sync makes the bridge take part in "git-bug bridge sync", which mirrors the
+issues of every such bridge to the others, both ways.
+
 Authentication tokens and required permissions by target:
+
+Gitea (and Forgejo):
+  Requires an access token created on the target instance
+  ($BASE_URL/user/settings/applications), with the read and write
+  permissions on issues and repositories, and read on users. Pushing
+  labels needs write access to the repository.
 
 GitHub:
   Requires a classic personal access token (https://github.com/settings/tokens;
@@ -47,13 +61,18 @@ git-bug bridge new [flags]
 ### Examples
 
 ```
-# Interactive example
-[1]: github
-[2]: gitlab
-[3]: jira
-[4]: launchpad-preview
+# Sync with GitHub and GitLab, with a token of each stored (see "git bug bridge sync")
+git bug bridge new --name gh --url https://github.com/example-owner/example-repo --sync
+git bug bridge new --name gl --target gitlab --url https://gitlab.example.com/example-org/example-repo --sync
 
-target: 1
+# Interactive example
+[1]: gitea
+[2]: github
+[3]: gitlab
+[4]: jira
+[5]: launchpad-preview
+
+target: 2
 name [default]: default
 
 Detected projects:
@@ -87,6 +106,13 @@ git bug bridge new \
     --project=example-repo \
     --token=$TOKEN
 
+# For Gitea or Forgejo
+git bug bridge new \
+    --name=default \
+    --target=gitea \
+    --url=https://gitea.example.com/example-owner/example-repo \
+    --token=$TOKEN
+
 # For GitLab
 git bug bridge new \
     --name=default \
@@ -114,16 +140,17 @@ git bug bridge new \
 
 ```
   -n, --name string         A distinctive name to identify the bridge
-  -t, --target string       The target of the bridge. Valid values are [github,gitlab,jira,launchpad-preview]
+  -t, --target string       The target of the bridge. Valid values are [gitea,github,gitlab,jira,launchpad-preview]
   -u, --url string          The URL of the remote repository
   -b, --base-url string     The base URL of your remote issue tracker
   -l, --login string        The login on your remote issue tracker
-  -c, --credential string   The identifier or prefix of an already known credential for your remote issue tracker (see "git-bug bridge auth")
+  -c, --credential string   The identifier or prefix of an already known credential for your remote issue tracker (see "git-bug bridge auth"). Defaults to the only one that fits
       --token string        A raw authentication token for the remote issue tracker
       --token-stdin         Will read the token from stdin and ignore --token
   -o, --owner string        The owner of the remote repository
   -p, --project string      The name of the remote repository
       --non-interactive     Do not ask for user input
+      --sync                Enable two-way sync with "git-bug bridge sync" (sets git-bug.bridge.<name>.sync)
   -h, --help                help for new
 ```
 
