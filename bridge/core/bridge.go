@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +28,41 @@ var ErrBridgeRunning = errors.New("a bridge is already running in this repositor
 
 const (
 	ConfigKeyTarget = "target"
+	// ConfigKeySync enables sync: mirroring everything, from any forge.
+	ConfigKeySync = "sync"
+	// ConfigKeyDefaultLogin is the login posting for people without a token.
+	ConfigKeyDefaultLogin = "default-login"
+	// ConfigKeyLoginPrefix, followed by an identity id, links that identity
+	// to the login it has on the forge: login-<identity> = <login>.
+	ConfigKeyLoginPrefix = "login-"
+	// ConfigKeyAssignees is how the forge holds git-bug's assignee:<login>
+	// labels: ModeNative (the default) or ModeLabels. Every clone must hold
+	// them the same way, or each sync undoes the others': WithAssignees
+	// gives it from a shared configuration.
+	ConfigKeyAssignees = "assignees"
+	// ConfigKeyKinds is how the forge holds kinds: ModeNative (the default,
+	// as issue types where the forge has them) or ModeLabels.
+	ConfigKeyKinds = "kinds"
+	// ConfigKeySprints is how the forge holds sprints: ModeNative (the
+	// default, as milestones where the forge has them) or ModeOff.
+	ConfigKeySprints = "sprints"
+	// ConfigKeyKindTypes maps kinds to the forge's types.
+	ConfigKeyKindTypes = "kind-types"
+	// ConfigKeyPublishPrivate lets a sync bridge to a public project run
+	// while another sync bridge isn't public, publishing what it holds.
+	ConfigKeyPublishPrivate = "publish-private"
+
+	// ModeNative holds it as the forge's own field.
+	ModeNative = "native"
+	// ModeLabels holds it as labels on the forge.
+	ModeLabels = "labels"
+	// ModeOff neither reads nor writes the forge's own field.
+	ModeOff = "off"
+
+	// AssigneesNative holds assignees as the forge's assignees.
+	AssigneesNative = ModeNative
+	// AssigneesLabels holds them as labels on the forge too.
+	AssigneesLabels = ModeLabels
 
 	MetaKeyOrigin = "origin"
 
@@ -34,6 +71,9 @@ const (
 	bridgeConfigSubsectionPrefix = "bridge."
 
 	configKeyLastImportTime = "lastImportTime"
+	// configKeyLastSyncTime is apart from the import time, as an older bridge
+	// may have imported only part of a project.
+	configKeyLastSyncTime = "lastSyncTime"
 
 	// bridgeLockFile is locked while a bridge imports or exports, so that only
 	// one runs at a time in a repository: concurrent runs would import or export
@@ -61,6 +101,14 @@ type Bridge struct {
 	conf           Configuration
 	initImportDone bool
 	initExportDone bool
+	// opts change the SyncOptions of its engines, see Use
+	opts []Option
+}
+
+// Use sets options of the sync engines the bridge creates from now on, for
+// its pulls and pushes, beyond what its configuration gives.
+func (b *Bridge) Use(opts ...Option) {
+	b.opts = append(b.opts, opts...)
 }
 
 // Register will register a new BridgeImpl
@@ -140,6 +188,9 @@ func LoadBridge(repo *cache.RepoCache, name string) (*Bridge, error) {
 	err = bridge.impl.ValidateConfig(conf)
 	if err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+	if !bridge.SupportsSync() && conf[ConfigKeySync] != "" {
+		return nil, fmt.Errorf("invalid configuration: the %s bridge doesn't support %s", target, ConfigKeySync)
 	}
 
 	// will avoid reloading configuration before an export or import call
@@ -340,11 +391,6 @@ func (b *Bridge) ImportAllSince(ctx context.Context, since time.Time) (<-chan Im
 	// 5 seconds before the actual start just to be sure.
 	importStartTime := time.Now().Add(-5 * time.Second)
 
-	importer := b.getImporter()
-	if importer == nil {
-		return nil, ErrImportNotSupported
-	}
-
 	unlock, err := lockBridges(b.repo)
 	if err != nil {
 		return nil, err
@@ -356,13 +402,7 @@ func (b *Bridge) ImportAllSince(ctx context.Context, since time.Time) (<-chan Im
 		return nil, err
 	}
 
-	err = b.ensureImportInit(ctx)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-
-	events, err := importer.ImportAll(ctx, b.repo, since)
+	events, err := b.importEvents(ctx, since)
 	if err != nil {
 		unlock()
 		return nil, err
@@ -390,35 +430,168 @@ func (b *Bridge) ImportAllSince(ctx context.Context, since time.Time) (<-chan Im
 		// store the last import time ONLY if no error happened and the import
 		// ran to completion (importers stop silently on cancellation)
 		if noError && ctx.Err() == nil {
-			err = b.repo.Config().Update(func(f *gitconfig.File) error {
-				return f.ReplaceAll(bridgeConfigKey(b.Name, configKeyLastImportTime), strconv.FormatInt(importStartTime.Unix(), 10))
-			})
+			_ = b.storeImportTime(importStartTime)
 		}
 	}()
 
 	return out, nil
 }
 
-func (b *Bridge) ImportAll(ctx context.Context) (<-chan ImportResult, error) {
-	// If possible, restart from the last import time
-	cfg, err := b.repo.Config().Read()
-	if err != nil {
+func (b *Bridge) importEvents(ctx context.Context, since time.Time) (<-chan ImportResult, error) {
+	if _, ported := b.impl.(RemoteBridge); ported {
+		e, err := b.newEngine(ctx, false)
+		if err != nil {
+			return nil, err
+		}
+		return e.Pull(ctx, since), nil
+	}
+
+	importer := b.getImporter()
+	if importer == nil {
+		return nil, ErrImportNotSupported
+	}
+	if err := b.ensureImportInit(ctx); err != nil {
 		return nil, err
 	}
-	lastImport, err := cfg.Int(bridgeConfigKey(b.Name, configKeyLastImportTime), 0)
-	if err == nil && lastImport != 0 {
-		return b.ImportAllSince(ctx, time.Unix(lastImport, 0))
-	}
-
-	return b.ImportAllSince(ctx, time.Time{})
+	return importer.ImportAll(ctx, b.repo, since)
 }
 
-func (b *Bridge) ExportAll(ctx context.Context, since time.Time) (<-chan ExportResult, error) {
+func (b *Bridge) exportEvents(ctx context.Context, since time.Time) (<-chan ExportResult, error) {
+	if _, ported := b.impl.(RemoteBridge); ported {
+		e, err := b.newEngine(ctx, false)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkPublish(ctx, b, map[string]Remote{b.Name: e.remote}); err != nil {
+			return nil, err
+		}
+		return e.Push(ctx), nil
+	}
+
 	exporter := b.getExporter()
 	if exporter == nil {
 		return nil, ErrExportNotSupported
 	}
+	if err := b.ensureExportInit(ctx); err != nil {
+		return nil, err
+	}
+	return exporter.ExportAll(ctx, b.repo, since)
+}
 
+// newEngine returns the sync engine of a bridge ported to it.
+func (b *Bridge) newEngine(ctx context.Context, dryRun bool) (*Engine, error) {
+	var err error
+	foreign := false
+	if v, ok := b.conf[ConfigKeySync]; ok {
+		if foreign, err = strconv.ParseBool(v); err != nil {
+			return nil, fmt.Errorf("%s: %w", ConfigKeySync, err)
+		}
+	}
+	links := map[string]string{}
+	for k, login := range b.conf {
+		prefix, ok := strings.CutPrefix(k, ConfigKeyLoginPrefix)
+		if !ok {
+			continue
+		}
+		login = strings.ToLower(login)
+		if other, ok := links[login]; ok {
+			return nil, fmt.Errorf("%s%s and %s%s: the login %s is linked to two identities", ConfigKeyLoginPrefix, other, ConfigKeyLoginPrefix, prefix, login)
+		}
+		links[login] = prefix
+	}
+	opts := SyncOptions{
+		Foreign:      foreign,
+		DryRun:       dryRun,
+		DefaultLogin: b.conf[ConfigKeyDefaultLogin],
+		LoginKey:     b.impl.LoginMetaKey(),
+		Links:        links,
+	}
+	for _, o := range b.opts {
+		o(&opts)
+	}
+
+	conf := maps.Clone(b.conf)
+	if conf == nil {
+		conf = map[string]string{}
+	}
+	for k, v := range opts.Config {
+		if v != "" {
+			conf[k] = v
+		}
+	}
+	for key, modes := range map[string][]string{
+		ConfigKeyAssignees: {ModeNative, ModeLabels},
+		ConfigKeyKinds:     {ModeNative, ModeLabels},
+		ConfigKeySprints:   {ModeNative, ModeOff},
+	} {
+		if v := conf[key]; v != "" && !slices.Contains(modes, v) {
+			return nil, fmt.Errorf("%s: %q is neither %s", key, v, strings.Join(modes, " nor "))
+		}
+	}
+	opts.Assignees, opts.Kinds, opts.Sprints = conf[ConfigKeyAssignees], conf[ConfigKeyKinds], conf[ConfigKeySprints]
+	remote, err := b.impl.(RemoteBridge).NewRemote(ctx, b.repo, conf)
+	if err != nil {
+		return nil, err
+	}
+	return NewEngine(ctx, b.repo, remote, opts)
+}
+
+// SupportsSync tells whether the bridge can take part in `bridge sync`.
+func (b *Bridge) SupportsSync() bool {
+	_, ported := b.impl.(RemoteBridge)
+	return ported
+}
+
+// HasInstances tells whether the target runs on several instances, given by
+// --base-url, whose credentials record their instance.
+func (b *Bridge) HasInstances() bool {
+	_, ok := b.impl.ValidParams()["BaseURL"]
+	return ok
+}
+
+// IsSync tells whether the bridge takes part in `bridge sync`.
+func (b *Bridge) IsSync() bool {
+	v, _ := strconv.ParseBool(b.conf[ConfigKeySync])
+	return v
+}
+
+func (b *Bridge) lastImportTime() time.Time {
+	return b.configTime(configKeyLastImportTime)
+}
+
+func (b *Bridge) configTime(key string) time.Time {
+	cfg, err := b.repo.Config().Read()
+	if err != nil {
+		return time.Time{}
+	}
+	lastImport, err := cfg.Int(bridgeConfigKey(b.Name, key), 0)
+	if err != nil || lastImport == 0 {
+		return time.Time{}
+	}
+	return time.Unix(lastImport, 0)
+}
+
+func (b *Bridge) storeImportTime(t time.Time) error {
+	return b.storeConfigTime(configKeyLastImportTime, t)
+}
+
+func (b *Bridge) storeConfigTime(key string, t time.Time) error {
+	return SetBridgeConfig(b.repo, b.Name, key, strconv.FormatInt(t.Unix(), 10))
+}
+
+// SetBridgeConfig sets a configuration key of a bridge.
+func SetBridgeConfig(repo repository.RepoConfig, bridge, key, value string) error {
+	return repo.Config().Update(func(f *gitconfig.File) error {
+		return f.ReplaceAll(bridgeConfigKey(bridge, key), value)
+	})
+}
+
+func (b *Bridge) ImportAll(ctx context.Context) (<-chan ImportResult, error) {
+	// If possible, restart from the last import time
+	return b.ImportAllSince(ctx, b.lastImportTime())
+}
+
+func (b *Bridge) ExportAll(ctx context.Context, since time.Time) (<-chan ExportResult, error) {
 	unlock, err := lockBridges(b.repo)
 	if err != nil {
 		return nil, err
@@ -430,13 +603,7 @@ func (b *Bridge) ExportAll(ctx context.Context, since time.Time) (<-chan ExportR
 		return nil, err
 	}
 
-	err = b.ensureExportInit(ctx)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-
-	events, err := exporter.ExportAll(ctx, b.repo, since)
+	events, err := b.exportEvents(ctx, since)
 	if err != nil {
 		unlock()
 		return nil, err

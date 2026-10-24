@@ -35,6 +35,12 @@ type BridgeImpl interface {
 	LoginMetaKey() string
 }
 
+// RemoteBridge is implemented by bridges ported to the sync engine: they
+// import and export through it, and can take part in `bridge sync`.
+type RemoteBridge interface {
+	NewRemote(ctx context.Context, repo *cache.RepoCache, conf Configuration) (Remote, error)
+}
+
 type Importer interface {
 	Init(ctx context.Context, repo *cache.RepoCache, conf Configuration) error
 	ImportAll(ctx context.Context, repo *cache.RepoCache, since time.Time) (<-chan ImportResult, error)
