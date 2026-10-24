@@ -16,8 +16,17 @@ type IssueResult struct {
 
 // Issues returns a channel with gitlab project issues, ascending order.
 // An error while listing is reported on the channel and ends the iteration.
+// Cancelling ctx ends it too, for a reader that stops early.
 func Issues(ctx context.Context, client *gitlab.Client, pid string, since time.Time) <-chan IssueResult {
 	out := make(chan IssueResult)
+	send := func(r IssueResult) bool {
+		select {
+		case out <- r:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 
 	go func() {
 		defer close(out)
@@ -31,12 +40,14 @@ func Issues(ctx context.Context, client *gitlab.Client, pid string, since time.T
 		for {
 			issues, resp, err := client.Issues.ListProjectIssues(pid, &opts, gitlab.WithContext(ctx))
 			if err != nil {
-				out <- IssueResult{Err: err}
+				send(IssueResult{Err: err})
 				return
 			}
 
 			for _, issue := range issues {
-				out <- IssueResult{Issue: issue}
+				if !send(IssueResult{Issue: issue}) {
+					return
+				}
 			}
 
 			if resp.CurrentPage >= resp.TotalPages {
@@ -106,6 +117,37 @@ func LabelEvents(ctx context.Context, client *gitlab.Client, issue *gitlab.Issue
 				le := LabelEvent{*e}
 				le.Label.Name = text.CleanupOneLine(le.Label.Name)
 				out <- le
+			}
+
+			if resp.CurrentPage >= resp.TotalPages {
+				break
+			}
+
+			opts.Page = resp.NextPage
+		}
+	}()
+
+	return out
+}
+
+// MilestoneEvents returns a channel with milestone events.
+func MilestoneEvents(ctx context.Context, client *gitlab.Client, issue *gitlab.Issue) <-chan Event {
+	out := make(chan Event)
+
+	go func() {
+		defer close(out)
+
+		opts := gitlab.ListMilestoneEventsOptions{}
+
+		for {
+			events, resp, err := client.ResourceMilestoneEvents.ListIssueMilestoneEvents(issue.ProjectID, issue.IID, &opts, gitlab.WithContext(ctx))
+			if err != nil {
+				out <- ErrorEvent{Err: err, Time: time.Now()}
+				return
+			}
+
+			for _, e := range events {
+				out <- MilestoneEvent{*e}
 			}
 
 			if resp.CurrentPage >= resp.TotalPages {

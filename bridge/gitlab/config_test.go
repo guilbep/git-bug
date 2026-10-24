@@ -6,6 +6,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestInstanceURL(t *testing.T) {
+	for projectURL, base := range map[string]string{
+		"https://gitlab.epfl.ch/EPFL-ENAC/wiki":    "https://gitlab.epfl.ch/",
+		"https://gitlab.com/group/sub/project.git": "https://gitlab.com/",
+		"git@gitlab.com:group/project.git":         "",
+		"":                                         "",
+	} {
+		assert.Equal(t, base, instanceURL(projectURL), projectURL)
+	}
+}
+
 func TestProjectPath(t *testing.T) {
 	type args struct {
 		url string
