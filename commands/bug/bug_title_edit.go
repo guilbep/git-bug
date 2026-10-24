@@ -38,7 +38,7 @@ func newBugTitleEditCommand(env *execenv.Env) *cobra.Command {
 }
 
 func runBugTitleEdit(env *execenv.Env, opts bugTitleEditOptions, args []string) error {
-	b, _, err := ResolveSelected(env.Backend, args)
+	b, _, err := ResolveSelected(env.Ctx, env.Backend, args)
 	if err != nil {
 		return err
 	}
@@ -64,10 +64,10 @@ func runBugTitleEdit(env *execenv.Env, opts bugTitleEditOptions, args []string) 
 		env.Err.Println("No change, aborting.")
 	}
 
-	_, err = b.SetTitle(text.CleanupOneLine(opts.title))
+	_, err = b.SetTitle(env.Ctx, text.CleanupOneLine(opts.title))
 	if err != nil {
 		return err
 	}
 
-	return b.Commit()
+	return b.Commit(env.Ctx)
 }

@@ -40,7 +40,13 @@ func NewHandler(mrc *cache.MultiRepoCache, errorOut io.Writer, devMode bool) htt
 		}
 	}
 	h.AddTransport(transport.Websocket{
+		// for the legacy graphql-ws protocol
 		KeepAlivePingInterval: 10 * time.Second,
+		// for graphql-transport-ws: the server pings and closes the connection
+		// when no pong comes within twice the interval, so that the subscriptions
+		// of clients gone without closing end, and proxies keep the connection
+		// open while idle (they commonly drop it after 60s of silence)
+		PingPongInterval: 50 * time.Second,
 		Implementation: transport.CoderWebsocketImplementation{
 			AcceptOptions: wsAcceptOptions,
 		},
@@ -60,6 +66,9 @@ func NewHandler(mrc *cache.MultiRepoCache, errorOut io.Writer, devMode bool) htt
 	if errorOut != nil {
 		h.Use(&Tracer{Out: errorOut})
 	}
+
+	// after the tracer, for it to see the commit errors
+	h.Use(resolvers.CommitMutations{})
 
 	return h
 }

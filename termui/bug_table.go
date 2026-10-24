@@ -239,7 +239,7 @@ func (bt *bugTable) disable(g *gocui.Gui) error {
 
 func (bt *bugTable) paginate(max int) error {
 	var err error
-	bt.allIds, err = bt.repo.Bugs().Query(bt.query)
+	bt.allIds, err = bt.repo.Bugs().Query(ui.ctx, bt.query)
 	if err != nil {
 		return err
 	}
@@ -452,7 +452,7 @@ func (bt *bugTable) openBug(g *gocui.Gui, v *gocui.View) error {
 		return nil
 	}
 	id := bt.excerpts[bt.selectCursor].Id()
-	b, err := bt.repo.Bugs().Resolve(id)
+	b, err := bt.repo.Bugs().Resolve(ui.ctx, id)
 	if err != nil {
 		return err
 	}
@@ -464,7 +464,7 @@ func (bt *bugTable) pull(g *gocui.Gui, v *gocui.View) error {
 	ui.msgPopup.Activate("Pull from remote "+defaultRemote, "...")
 
 	go func() {
-		stdout, err := bt.repo.Fetch(defaultRemote)
+		stdout, err := bt.repo.Fetch(ui.ctx, defaultRemote)
 
 		if err != nil {
 			g.Update(func(gui *gocui.Gui) error {
@@ -482,7 +482,7 @@ func (bt *bugTable) pull(g *gocui.Gui, v *gocui.View) error {
 		var buffer bytes.Buffer
 		beginLine := ""
 
-		for result := range bt.repo.MergeAll(defaultRemote) {
+		for result := range bt.repo.MergeAll(ui.ctx, defaultRemote) {
 			if result.Status == entity.MergeStatusNothing {
 				continue
 			}
@@ -529,7 +529,7 @@ func (bt *bugTable) push(g *gocui.Gui, v *gocui.View) error {
 
 	go func() {
 		// TODO: make the remote configurable
-		stdout, err := bt.repo.Push(defaultRemote)
+		stdout, err := bt.repo.Push(ui.ctx, defaultRemote)
 
 		if err != nil {
 			g.Update(func(gui *gocui.Gui) error {

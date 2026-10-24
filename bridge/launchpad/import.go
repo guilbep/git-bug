@@ -20,9 +20,9 @@ func (li *launchpadImporter) Init(_ context.Context, repo *cache.RepoCache, conf
 	return nil
 }
 
-func (li *launchpadImporter) ensurePerson(repo *cache.RepoCache, owner LPPerson) (*cache.IdentityCache, error) {
+func (li *launchpadImporter) ensurePerson(ctx context.Context, repo *cache.RepoCache, owner LPPerson) (*cache.IdentityCache, error) {
 	// Look first in the cache
-	i, err := repo.Identities().ResolveIdentityImmutableMetadata(metaKeyLaunchpadLogin, owner.Login)
+	i, err := repo.Identities().ResolveIdentityImmutableMetadata(ctx, metaKeyLaunchpadLogin, owner.Login)
 	if err == nil {
 		return i, nil
 	}
@@ -57,13 +57,14 @@ func (li *launchpadImporter) ImportAll(ctx context.Context, repo *cache.RepoCach
 	}
 
 	go func() {
+		defer close(out)
 		for _, lpBug := range lpBugs {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				lpBugID := fmt.Sprintf("%d", lpBug.ID)
-				b, err := repo.Bugs().ResolveMatcher(func(excerpt *cache.BugExcerpt) bool {
+				b, err := repo.Bugs().ResolveMatcher(ctx, func(excerpt *cache.BugExcerpt) bool {
 					return excerpt.CreateMetadata[core.MetaKeyOrigin] == target &&
 						excerpt.CreateMetadata[metaKeyLaunchpadID] == lpBugID
 				})
@@ -72,7 +73,7 @@ func (li *launchpadImporter) ImportAll(ctx context.Context, repo *cache.RepoCach
 					return
 				}
 
-				owner, err := li.ensurePerson(repo, lpBug.Owner)
+				owner, err := li.ensurePerson(ctx, repo, lpBug.Owner)
 				if err != nil {
 					out <- core.NewImportError(err, entity.Id(lpBugID))
 					return
@@ -122,7 +123,7 @@ func (li *launchpadImporter) ImportAll(ctx context.Context, repo *cache.RepoCach
 						continue
 					}
 
-					owner, err := li.ensurePerson(repo, lpMessage.Owner)
+					owner, err := li.ensurePerson(ctx, repo, lpMessage.Owner)
 					if err != nil {
 						out <- core.NewImportError(err, "")
 						return
@@ -148,7 +149,7 @@ func (li *launchpadImporter) ImportAll(ctx context.Context, repo *cache.RepoCach
 
 				if !b.NeedCommit() {
 					out <- core.NewImportNothing(b.Id(), "no imported operation")
-				} else if err := b.Commit(); err != nil {
+				} else if err := b.Commit(ctx); err != nil {
 					out <- core.NewImportError(err, "")
 					return
 				}

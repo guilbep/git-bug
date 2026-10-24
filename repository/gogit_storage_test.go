@@ -231,14 +231,14 @@ func TestGoGitStorage(t *testing.T) {
 		t.Run("objects readable", func(t *testing.T) {
 			repo, head := setup(t)
 
-			_, err := repo.FetchRefs("src", "bugs")
+			_, err := repo.FetchRefs(t.Context(), "src", "bugs")
 			require.NoError(t, err)
 
 			refs, err := repo.ListTrackingRefs("src", "bugs")
 			require.NoError(t, err)
 			require.Equal(t, map[string]Hash{"b1": head}, refs)
 
-			log, err := repo.CommitLog("refs/remotes/src/bugs/b1", "", 0, "", nil, nil)
+			log, err := repo.CommitLog(t.Context(), "refs/remotes/src/bugs/b1", "", 0, "", nil, nil)
 			require.NoError(t, err)
 			require.Len(t, log, 3)
 		})
@@ -262,7 +262,7 @@ func TestGoGitStorage(t *testing.T) {
 					}
 				}
 			})
-			_, err := repo.FetchRefs("src", "bugs")
+			_, err := repo.FetchRefs(t.Context(), "src", "bugs")
 			close(done)
 			wg.Wait()
 			require.NoError(t, err)
@@ -288,7 +288,7 @@ func TestGoGitStorage(t *testing.T) {
 		t.Run("CommitLog", func(t *testing.T) {
 			repo := setup(t)
 
-			log, err := repo.CommitLog("main", "", 0, "", nil, nil)
+			log, err := repo.CommitLog(t.Context(), "main", "", 0, "", nil, nil)
 			require.NoError(t, err)
 			require.Len(t, log, 3)
 		})
@@ -296,7 +296,7 @@ func TestGoGitStorage(t *testing.T) {
 		t.Run("LastCommitForEntries", func(t *testing.T) {
 			repo := setup(t)
 
-			last, err := repo.LastCommitForEntries("main", "a", []string{"x", "y", "z"})
+			last, err := repo.LastCommitForEntries(t.Context(), "main", "a", []string{"x", "y", "z"})
 			require.NoError(t, err)
 			require.Equal(t, "add x", last["x"].Message)
 			require.Equal(t, "add y", last["y"].Message)

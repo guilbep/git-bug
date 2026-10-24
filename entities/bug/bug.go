@@ -2,6 +2,7 @@
 package bug
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/git-bug/git-bug/entities/common"
@@ -58,23 +59,23 @@ func simpleResolvers(repo repository.Repo) entity.Resolvers {
 }
 
 // Read will read a bug from a repository
-func Read(repo repository.Repo, id entity.Id) (*Bug, error) {
-	return ReadWithResolver(repo, simpleResolvers(repo), id)
+func Read(ctx context.Context, repo repository.Repo, id entity.Id) (*Bug, error) {
+	return ReadWithResolver(ctx, repo, simpleResolvers(repo), id)
 }
 
 // ReadWithResolver will read a bug from its Id, with custom resolvers
-func ReadWithResolver(repo repository.Repo, resolvers entity.Resolvers, id entity.Id) (*Bug, error) {
-	return dag.Read(def, wrapper, repo, resolvers, id)
+func ReadWithResolver(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers, id entity.Id) (*Bug, error) {
+	return dag.Read(ctx, def, wrapper, repo, resolvers, id)
 }
 
 // ReadAll read and parse all local bugs
-func ReadAll(repo repository.Repo) <-chan entity.StreamedEntity[*Bug] {
-	return dag.ReadAll(def, wrapper, repo, simpleResolvers(repo))
+func ReadAll(ctx context.Context, repo repository.Repo) <-chan entity.StreamedEntity[*Bug] {
+	return dag.ReadAll(ctx, def, wrapper, repo, simpleResolvers(repo))
 }
 
 // ReadAllWithResolver read and parse all local bugs
-func ReadAllWithResolver(repo repository.Repo, resolvers entity.Resolvers) <-chan entity.StreamedEntity[*Bug] {
-	return dag.ReadAll(def, wrapper, repo, resolvers)
+func ReadAllWithResolver(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers) <-chan entity.StreamedEntity[*Bug] {
+	return dag.ReadAll(ctx, def, wrapper, repo, resolvers)
 }
 
 // ListLocalIds list all the available local bug ids
@@ -120,8 +121,18 @@ func (bug *Bug) Append(op Operation) {
 
 // CommitOperations writes the given operations, see dag.Entity.CommitOperations
 func (bug *Bug) CommitOperations(repo repository.Repo, ops []Operation) error {
+	// Sanity check: the Create op comes first, and only once. Operations committed
+	// here are built by code, not read from elsewhere: breaking that is a misuse.
+	creation := bug.Entity.LastCommit() == ""
 	converted := make([]dag.Operation, len(ops))
 	for i, op := range ops {
+		isCreate := op.Type() == CreateOp
+		if creation && i == 0 && !isCreate {
+			panic("the first operation of a new bug should be a Create op")
+		}
+		if isCreate && (!creation || i > 0) {
+			panic("only one Create op allowed in a bug")
+		}
 		converted[i] = op
 	}
 	return bug.Entity.CommitOperations(repo, converted)

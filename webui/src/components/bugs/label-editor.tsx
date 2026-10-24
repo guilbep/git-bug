@@ -12,7 +12,7 @@ import {
   FloatingFocusManager,
 } from "@floating-ui/react";
 import { Settings2 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { FragmentType } from "@/__generated__/fragment-masking";
 import { graphql } from "@/__generated__/gql";
@@ -20,6 +20,7 @@ import { BugDetailDocument } from "@/__generated__/graphql";
 import { LabelBadge, LABEL_FIELDS_FRAGMENT } from "@/components/shared/label-badge";
 import { SectionHeading } from "@/components/shared/section-heading";
 import * as Listbox from "@/components/ui/listbox";
+import { toastManager } from "@/components/ui/toast";
 import { useAuth } from "@/lib/auth";
 
 const BUG_CHANGE_LABELS_MUTATION = graphql(`
@@ -39,7 +40,7 @@ const BUG_CHANGE_LABELS_MUTATION = graphql(`
 interface LabelEditorProps {
   bugPrefix: string;
   currentLabels: Array<{ name: string } & FragmentType<typeof LABEL_FIELDS_FRAGMENT>>;
-  /** Current repo slug, passed as `ref` in refetch query variables. */
+  /** Current repo slug, passed as `repoRef` to the mutations. */
   repo?: string | null;
   /** Pre-fetched valid labels for the repository. */
   validLabels: Array<
@@ -50,29 +51,58 @@ interface LabelEditorProps {
 }
 
 // Gear-icon popover in the BugDetailPage sidebar for adding/removing labels.
-// Loads all valid labels from the repo and toggles them via bugChangeLabels.
-// Hidden in read-only mode.
+// Loads all valid labels from the repo; the labels toggled while it is open
+// are applied together by a single bugChangeLabels when it closes.  Hidden in
+// read-only mode.
 export function LabelEditor({ bugPrefix, currentLabels, repo, validLabels }: LabelEditorProps) {
   const { user } = useAuth();
-  const [changeLabels] = useMutation(BUG_CHANGE_LABELS_MUTATION, {
-    refetchQueries: [{ query: BugDetailDocument, variables: { ref: repo, prefix: bugPrefix } }],
+  const [changeLabels, { loading: saving }] = useMutation(BUG_CHANGE_LABELS_MUTATION, {
+    refetchQueries: [BugDetailDocument],
+    errorPolicy: "all",
   });
 
   const currentNames = new Set(currentLabels.map((l) => l.name));
 
-  async function toggleLabel(name: string) {
-    const isSet = currentNames.has(name);
-    await changeLabels({
-      variables: {
-        input: {
-          prefix: bugPrefix,
-          repoRef: repo,
-          added: isSet ? [] : [name],
-          Removed: isSet ? [name] : [],
-        },
-      },
+  // whether each label toggled is wanted, so that applying them leaves the
+  // labels others changed meanwhile as they are
+  const [toggled, setToggled] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const isSelected = (name: string) => toggled.get(name) ?? currentNames.has(name);
+
+  function toggleLabel(name: string) {
+    setToggled((prev) => new Map(prev).set(name, !(prev.get(name) ?? currentNames.has(name))));
+  }
+
+  function applyLabels() {
+    const wanted = [...toggled];
+    const added = wanted.filter(([name, on]) => on && !currentNames.has(name)).map(([n]) => n);
+    const removed = wanted.filter(([name, on]) => !on && currentNames.has(name)).map(([n]) => n);
+    // cleared now rather than on success, to keep the toggles made meanwhile
+    // out of this change
+    setToggled(new Map());
+    if (added.length === 0 && removed.length === 0) return;
+    void changeLabels({
+      variables: { input: { prefix: bugPrefix, repoRef: repo, added, Removed: removed } },
+    }).then((result) => {
+      if (!result.error) return;
+      // back for the next opening, unless toggled again meanwhile
+      setToggled((prev) => new Map([...wanted, ...prev]));
+      toastManager.add({ title: "Failed to save the labels", description: result.error.message });
     });
   }
+
+  // Leaving the bug with the picker open applies its choices, like closing it
+  // does.  Through a ref to the latest applyLabels: the one of the first render
+  // knows no choices.
+  const applyOnLeave = useRef(applyLabels);
+  useEffect(() => {
+    applyOnLeave.current = applyLabels;
+  });
+  useEffect(
+    () => () => {
+      applyOnLeave.current();
+    },
+    [],
+  );
 
   // floating-ui state
   const [open, setOpen] = useState(false);
@@ -81,7 +111,10 @@ export function LabelEditor({ bugPrefix, currentLabels, repo, validLabels }: Lab
 
   const { refs, floatingStyles, context } = useFloating({
     open,
-    onOpenChange: setOpen,
+    onOpenChange: (next) => {
+      setOpen(next);
+      if (!next) applyLabels();
+    },
     placement: "bottom-end",
     middleware: [offset(4), flip()],
   });
@@ -110,7 +143,9 @@ export function LabelEditor({ bugPrefix, currentLabels, repo, validLabels }: Lab
         {user && validLabels.length > 0 && (
           <button
             ref={refs.setReference}
-            className="text-muted-foreground hover:text-foreground"
+            // one change at a time, so that a failed one restores no stale choice
+            disabled={saving}
+            className="text-muted-foreground hover:text-foreground disabled:opacity-50"
             {...getReferenceProps()}
           >
             <Settings2 className="size-3.5" />
@@ -122,6 +157,7 @@ export function LabelEditor({ bugPrefix, currentLabels, repo, validLabels }: Lab
         <FloatingPortal>
           <FloatingFocusManager context={context} modal={false}>
             <Listbox.Content
+              // oxlint-disable-next-line react/refs -- floating-ui's ref setter, not a .current read
               ref={refs.setFloating}
               style={floatingStyles}
               className="w-56"
@@ -132,7 +168,7 @@ export function LabelEditor({ bugPrefix, currentLabels, repo, validLabels }: Lab
               </div>
               <Listbox.ScrollArea>
                 {validLabels.map((label, i) => {
-                  const active = currentNames.has(label.name);
+                  const active = isSelected(label.name);
                   return (
                     <Listbox.Item
                       key={label.name}
@@ -143,9 +179,7 @@ export function LabelEditor({ bugPrefix, currentLabels, repo, validLabels }: Lab
                       selected={active}
                       tabIndex={activeIndex === i ? 0 : -1}
                       {...getItemProps({
-                        onClick: () => {
-                          void toggleLabel(label.name);
-                        },
+                        onClick: () => toggleLabel(label.name),
                       })}
                     >
                       <span

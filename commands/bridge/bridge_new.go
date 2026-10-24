@@ -2,8 +2,12 @@ package bridgecmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -24,6 +28,7 @@ type bridgeNewOptions struct {
 	token          string
 	tokenStdin     bool
 	nonInteractive bool
+	sync           bool
 }
 
 func newBridgeNewCommand(env *execenv.Env) *cobra.Command {
@@ -35,7 +40,21 @@ func newBridgeNewCommand(env *execenv.Env) *cobra.Command {
 		Long: `Configure a new bridge by passing flags or/and using interactive terminal prompts.
 You can avoid all the terminal prompts by passing all the necessary flags to configure your bridge.
 
+A github.com or gitlab.com --url gives the target. Given a name and a target,
+and no --credential or --token, the bridge uses the stored credential of its
+target (see "git-bug bridge auth"), of its instance for Gitea, GitLab and Jira,
+if only one fits. When several fit, choose one with --credential.
+
+--sync makes the bridge take part in "git-bug bridge sync", which mirrors the
+issues of every such bridge to the others, both ways.
+
 Authentication tokens and required permissions by target:
+
+Gitea (and Forgejo):
+  Requires an access token created on the target instance
+  ($BASE_URL/user/settings/applications), with the read and write
+  permissions on issues and repositories, and read on users. Pushing
+  labels needs write access to the repository.
 
 GitHub:
   Requires a classic personal access token (https://github.com/settings/tokens;
@@ -67,13 +86,18 @@ Jira:
 Launchpad:
   No token required: the Launchpad bridge is read-only and currently uses
   the public Launchpad API without any authentication.`,
-		Example: `# Interactive example
-[1]: github
-[2]: gitlab
-[3]: jira
-[4]: launchpad-preview
+		Example: `# Sync with GitHub and GitLab, with a token of each stored (see "git bug bridge sync")
+git bug bridge new --name gh --url https://github.com/example-owner/example-repo --sync
+git bug bridge new --name gl --target gitlab --url https://gitlab.example.com/example-org/example-repo --sync
 
-target: 1
+# Interactive example
+[1]: gitea
+[2]: github
+[3]: gitlab
+[4]: jira
+[5]: launchpad-preview
+
+target: 2
 name [default]: default
 
 Detected projects:
@@ -105,6 +129,13 @@ git bug bridge new \
     --target=github \
     --owner=example-owner \
     --project=example-repo \
+    --token=$TOKEN
+
+# For Gitea or Forgejo
+git bug bridge new \
+    --name=default \
+    --target=gitea \
+    --url=https://gitea.example.com/example-owner/example-repo \
     --token=$TOKEN
 
 # For GitLab
@@ -144,12 +175,13 @@ git bug bridge new \
 	flags.StringVarP(&options.params.URL, "url", "u", "", "The URL of the remote repository")
 	flags.StringVarP(&options.params.BaseURL, "base-url", "b", "", "The base URL of your remote issue tracker")
 	flags.StringVarP(&options.params.Login, "login", "l", "", "The login on your remote issue tracker")
-	flags.StringVarP(&options.params.CredPrefix, "credential", "c", "", "The identifier or prefix of an already known credential for your remote issue tracker (see \"git-bug bridge auth\")")
+	flags.StringVarP(&options.params.CredPrefix, "credential", "c", "", "The identifier or prefix of an already known credential for your remote issue tracker (see \"git-bug bridge auth\"). Defaults to the only one that fits")
 	flags.StringVar(&options.token, "token", "", "A raw authentication token for the remote issue tracker")
 	flags.BoolVar(&options.tokenStdin, "token-stdin", false, "Will read the token from stdin and ignore --token")
 	flags.StringVarP(&options.params.Owner, "owner", "o", "", "The owner of the remote repository")
 	flags.StringVarP(&options.params.Project, "project", "p", "", "The name of the remote repository")
 	flags.BoolVar(&options.nonInteractive, "non-interactive", false, "Do not ask for user input")
+	flags.BoolVar(&options.sync, "sync", false, "Enable two-way sync with \"git-bug bridge sync\" (sets git-bug.bridge.<name>.sync)")
 
 	return cmd
 }
@@ -157,10 +189,16 @@ git bug bridge new \
 func runBridgeNew(env *execenv.Env, opts bridgeNewOptions) error {
 	var err error
 
+	if opts.target == "" {
+		opts.target = targetOf(opts.params.URL)
+	}
+
 	if (opts.tokenStdin || opts.token != "" || opts.params.CredPrefix != "") &&
 		(opts.name == "" || opts.target == "") {
 		return fmt.Errorf("you must provide a bridge name and target to configure a bridge with a credential")
 	}
+	// set up with flags, a bridge can use a stored credential
+	byFlags := opts.name != "" && opts.target != ""
 
 	// early fail
 	if opts.params.CredPrefix != "" {
@@ -199,14 +237,89 @@ func runBridgeNew(env *execenv.Env, opts bridgeNewOptions) error {
 	if err != nil {
 		return err
 	}
+	if opts.sync && !b.SupportsSync() {
+		return fmt.Errorf("the %s bridge doesn't support sync", opts.target)
+	}
 
-	err = b.Configure(opts.params, !opts.nonInteractive)
+	if byFlags && opts.params.CredPrefix == "" && opts.params.TokenRaw == "" {
+		opts.params.CredPrefix, err = pickCredential(env, opts.target, b.HasInstances(), opts.params, opts.nonInteractive)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = b.Configure(env.Ctx, opts.params, !opts.nonInteractive)
 	if err != nil {
 		return err
 	}
 
+	if opts.sync {
+		err = core.SetBridgeConfig(env.Backend, opts.name, core.ConfigKeySync, "true")
+		if err != nil {
+			return err
+		}
+	}
+
 	env.Out.Printf("Successfully configured bridge: %s\n", opts.name)
 	return nil
+}
+
+// targetOf returns the target of a repository URL on github.com or gitlab.com.
+func targetOf(repoURL string) string {
+	// the host of https://, ssh:// and git@host: URLs
+	m := regexp.MustCompile(`^(?:[a-z+]+://)?(?:[^@/]+@)?([^/:]+)`).FindStringSubmatch(repoURL)
+	if m == nil {
+		return ""
+	}
+	switch m[1] {
+	case "github.com":
+		return "github"
+	case "gitlab.com":
+		return "gitlab"
+	}
+	return ""
+}
+
+// pickCredential returns the id of the only stored credential of the target
+// that fits the bridge, if any: for a target with instances, a credential of
+// the instance given by --base-url, or else holding --url. When several fit,
+// the prompts choose, or --credential.
+func pickCredential(env *execenv.Env, target string, instances bool, params core.BridgeParams, nonInteractive bool) (string, error) {
+	creds, err := auth.List(env.Backend, auth.WithTarget(target))
+	if err != nil {
+		return "", err
+	}
+	if instances {
+		creds = slices.DeleteFunc(creds, func(c auth.Credential) bool {
+			base, ok := c.GetMetadata(auth.MetaKeyBaseURL)
+			base = strings.TrimSuffix(base, "/")
+			switch {
+			case !ok:
+				// the bridges of an instance only use its credentials
+				return true
+			case params.BaseURL != "":
+				return base != strings.TrimSuffix(params.BaseURL, "/")
+			default:
+				return !strings.HasPrefix(params.URL, base+"/")
+			}
+		})
+	}
+
+	switch {
+	case len(creds) == 1:
+		login, _ := creds[0].GetMetadata(auth.MetaKeyLogin)
+		env.Out.Printf("Using the stored credential %s (%s), see \"git-bug bridge auth\"\n", creds[0].ID().Human(), login)
+		return creds[0].ID().String(), nil
+	case len(creds) > 1 && nonInteractive:
+		sort.Sort(auth.ById(creds))
+		msg := fmt.Sprintf("%d stored %s credentials fit, choose one with --credential <id>:", len(creds), target)
+		for _, c := range creds {
+			login, _ := c.GetMetadata(auth.MetaKeyLogin)
+			msg += fmt.Sprintf("\n  %s %s", c.ID().Human(), login)
+		}
+		return "", errors.New(msg)
+	}
+	return "", nil
 }
 
 func promptTarget() (string, error) {

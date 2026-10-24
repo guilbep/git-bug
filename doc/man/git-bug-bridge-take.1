@@ -1,0 +1,41 @@
+.nh
+.TH "GIT-BUG" "1" "Apr 2019" "Generated from git-bug's source code" ""
+
+.SH NAME
+git-bug-bridge-take - Replace an issue's unsent changes with its version on a forge
+
+
+.SH SYNOPSIS
+\fBgit-bug bridge take BUG_ID BRIDGE [flags]\fP
+
+
+.SH DESCRIPTION
+Replace what git-bug hasn't sent to a bridge's forge yet, for one issue, with
+the forge's version: the title, description, comments' texts, status and
+labels the forge has now. What changed on both sides is the forge's too.
+
+.PP
+Nothing is written to the forge, and nothing is lost: git-bug keeps every
+version in the issue's history. Comments made in git-bug stay, and the next
+sync sends them. The issue's other forges get this version at the next
+sync.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for take
+
+
+.SH EXAMPLE
+.EX
+# an edit made in git-bug by mistake, not synced yet: take GitLab's back
+git bug bridge take 4f2a1c9 gl
+
+# after linking, keep the forge's version instead of git-bug's
+git bug bridge link 4f2a1c9 gl 12
+git bug bridge take 4f2a1c9 gl
+.EE
+
+
+.SH SEE ALSO
+\fBgit-bug-bridge(1)\fP

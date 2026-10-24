@@ -21,15 +21,15 @@ func newBugStatusOpenCommand(env *execenv.Env) *cobra.Command {
 }
 
 func runBugStatusOpen(env *execenv.Env, args []string) error {
-	b, _, err := ResolveSelected(env.Backend, args)
+	b, _, err := ResolveSelected(env.Ctx, env.Backend, args)
 	if err != nil {
 		return err
 	}
 
-	_, err = b.Open()
+	_, err = b.Open(env.Ctx)
 	if err != nil {
 		return err
 	}
 
-	return b.Commit()
+	return b.Commit(env.Ctx)
 }

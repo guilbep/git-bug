@@ -14,6 +14,12 @@ type userQuery struct {
 	User user `graphql:"user(login: $login)"`
 }
 
+type userIDQuery struct {
+	User struct {
+		ID githubv4.ID `graphql:"id"`
+	} `graphql:"user(login: $login)"`
+}
+
 type labelsQuery struct {
 	Repository struct {
 		Labels struct {
@@ -28,6 +34,20 @@ type labelsQuery struct {
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
+// issueTypesQuery reads the types of an organization's repository: null for a
+// user's.
+type issueTypesQuery struct {
+	Repository struct {
+		IssueTypes *struct {
+			Nodes []struct {
+				ID        string `graphql:"id"`
+				Name      string `graphql:"name"`
+				IsEnabled bool   `graphql:"isEnabled"`
+			}
+		} `graphql:"issueTypes(first: 25)"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
 type loginQuery struct {
 	Viewer struct {
 		Login string `graphql:"login"`
@@ -37,6 +57,12 @@ type loginQuery struct {
 type issueQuery struct {
 	Repository struct {
 		Issues issueConnection `graphql:"issues(first: $issueFirst, after: $issueAfter, orderBy: {field: CREATED_AT, direction: ASC}, filterBy: {since: $issueSince})"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
+type oneIssueQuery struct {
+	Repository struct {
+		Issue *issueNode `graphql:"issue(number: $issueNumber)"`
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
 
@@ -54,6 +80,15 @@ type timelineQuery struct {
 		Typename githubv4.String `graphql:"__typename"`
 		Issue    struct {
 			TimelineItems timelineItemsConnection `graphql:"timelineItems(first: $timelineFirst, after: $timelineAfter)"`
+		} `graphql:"... on Issue"`
+	} `graphql:"node(id: $gqlNodeId)"`
+}
+
+// issueLabelsQuery reads the labels of an issue past its first page.
+type issueLabelsQuery struct {
+	Node struct {
+		Issue struct {
+			Labels labelConnection `graphql:"labels(first: 100, after: $labelAfter)"`
 		} `graphql:"... on Issue"`
 	} `graphql:"node(id: $gqlNodeId)"`
 }
@@ -90,6 +125,18 @@ type issue struct {
 	Number githubv4.Int
 	Body   githubv4.String
 	Url    githubv4.URI
+	// IssueType is the type the issue holds now: null for none
+	IssueType *struct{ Name githubv4.String }
+	// State and Labels are what the issue holds now, which its timeline may
+	// not tell: GitHub closes some issues without a ClosedEvent (git-bug#609)
+	// and drops timeline items of issues read in pages (git-bug#1638)
+	State  githubv4.IssueState
+	Labels labelConnection `graphql:"labels(first: 100)"`
+}
+
+type labelConnection struct {
+	Nodes    []label
+	PageInfo pageInfo
 }
 
 type timelineItemsConnection struct {
@@ -127,6 +174,32 @@ type unlabeledEvent struct {
 	Label label
 }
 
+// assignedEvent is an AssignedEvent or an UnassignedEvent.
+type assignedEvent struct {
+	actorEvent
+	// a User, a Bot, a Mannequin or an Organization: all actors. Null for a
+	// deleted user.
+	Assignee struct {
+		Actor struct {
+			Login githubv4.String
+		} `graphql:"... on Actor"`
+	}
+}
+
+// issueTypeEvent is an IssueTypeAddedEvent, an IssueTypeChangedEvent (the new
+// type) or an IssueTypeRemovedEvent (the removed one). Null for a deleted type.
+type issueTypeEvent struct {
+	actorEvent
+	IssueType *struct{ Name githubv4.String }
+}
+
+// issueTypeChangedEvent is an IssueTypeChangedEvent, with the type it
+// replaced: only that event has one.
+type issueTypeChangedEvent struct {
+	issueTypeEvent
+	PrevIssueType *struct{ Name githubv4.String }
+}
+
 type renamedTitleEvent struct {
 	actorEvent
 	CurrentTitle  githubv4.String
@@ -142,6 +215,15 @@ type timelineItem struct {
 	// Label
 	LabeledEvent   labeledEvent   `graphql:"... on LabeledEvent"`
 	UnlabeledEvent unlabeledEvent `graphql:"... on UnlabeledEvent"`
+
+	// Assignees
+	AssignedEvent   assignedEvent `graphql:"... on AssignedEvent"`
+	UnassignedEvent assignedEvent `graphql:"... on UnassignedEvent"`
+
+	// Type
+	IssueTypeAddedEvent   issueTypeEvent        `graphql:"... on IssueTypeAddedEvent"`
+	IssueTypeChangedEvent issueTypeChangedEvent `graphql:"... on IssueTypeChangedEvent"`
+	IssueTypeRemovedEvent issueTypeEvent        `graphql:"... on IssueTypeRemovedEvent"`
 
 	// Status
 	ClosedEvent struct {

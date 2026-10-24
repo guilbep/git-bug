@@ -1,23 +1,18 @@
 package cache
 
 import (
-	"bytes"
-	"encoding/gob"
+	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"sync"
 	"time"
 
-	"github.com/go-git/go-billy/v5"
-
 	"github.com/git-bug/git-bug/entities/identity"
 	"github.com/git-bug/git-bug/entity"
 	"github.com/git-bug/git-bug/repository"
+	"resenje.org/singleflight"
 )
 
 type Excerpt interface {
@@ -33,20 +28,20 @@ type Shared interface {
 	LastCommit() repository.Hash
 }
 
-type getUserIdentityFunc func() (*IdentityCache, error)
+type getUserIdentityFunc func(ctx context.Context) (*IdentityCache, error)
 
 // Actions expose a number of action functions on Entities, to give upper layers (cache) a way to normalize interactions.
 // Note: ideally this wouldn't exist, the cache layer would assume that everything is an entity/dag, and directly use the
 // functions from this package, but right now identities are not using that framework.
 type Actions[SharedT Shared] struct {
 	// ReadWithResolver reads an entity from the repository
-	ReadWithResolver func(repo repository.Repo, resolvers entity.Resolvers, id entity.Id) (SharedT, error)
+	ReadWithResolver func(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers, id entity.Id) (SharedT, error)
 	// Refresh brings a loaded entity up to date with its reference, either in place
 	// or by returning a replacement, which the cache then holds instead
-	Refresh      func(repo repository.Repo, resolvers entity.Resolvers, shared SharedT) (SharedT, error)
+	Refresh      func(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers, shared SharedT) (SharedT, error)
 	Remove       func(repo repository.Repo, id entity.Id) error
 	RemoveAll    func(repo repository.Repo) error
-	MergeAll     func(repo repository.Repo, resolvers entity.Resolvers, remote string, mergeAuthor identity.Interface) <-chan entity.MergeResult
+	MergeAll     func(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers, remote string, mergeAuthor identity.Interface) <-chan entity.MergeResult
 	EnsureClocks func(repo repository.Repo) error
 }
 
@@ -58,6 +53,13 @@ var _ cacheMgmt = &SubCache[Shared, Excerpt, entity.Resolved]{}
 type SubCache[SharedT Shared, ExcerptT Excerpt, ViewT entity.Resolved] struct {
 	repo      repository.Repo
 	resolvers func() entity.Resolvers
+
+	// ctx is the lifetime of the SubCache, cancelled by Close. The work done
+	// for the SubCache itself rather than for a caller runs with it: Load, and
+	// every sync, including the one following a commit, as the derived state
+	// must follow the references whatever happens to the caller.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	getUserIdentity getUserIdentityFunc
 	makeView        func(shared SharedT, onCommit func() error) ViewT
@@ -82,26 +84,28 @@ type SubCache[SharedT Shared, ExcerptT Excerpt, ViewT entity.Resolved] struct {
 	// builtFrom holds, for each entity, the commit its excerpt was built from.
 	// Excerpts are only built from the committed state of an entity, never from
 	// pending changes, so they are up to date for exactly that commit. The index
-	// keeps its own record, see repository.Index.
+	// records the commits too, for every process: this is what this one has
+	// seen, and notified.
 	builtFrom map[entity.Id]repository.Hash
 	// cached holds the single loaded copy of each entity in use, with its
 	// committed state only, see Shared. Any of them can be evicted: a view keeps
 	// working with the copy it holds.
 	cached map[entity.Id]SharedT
 	lru    lruIdCache
+	// loading deduplicates the concurrent reads of an entity missing from
+	// cached, see Resolve.
+	loading singleflight.Group[entity.Id, SharedT]
 
 	muObservers sync.RWMutex
 	observers   map[Observer]string // observer --> repo name
 
 	// syncTrigger asks the worker for a sync of what is pending, see
 	// requestSync and startSyncWorker.
-	syncTrigger chan struct{}
-	// stopSyncWorker is closed by Close, to stop the worker.
-	stopSyncWorker chan struct{}
+	syncTrigger    chan struct{}
 	syncWorkerDone sync.WaitGroup
-	// muSyncWorker guards the state of the worker below. It is only held briefly.
-	muSyncWorker     sync.Mutex
-	syncWorkerClosed bool
+	// muSyncWorker guards the state of the worker below, and the cancellation
+	// of ctx, for the worker not to start once closed. It is only held briefly.
+	muSyncWorker sync.Mutex
 	// syncWorkerPendingAll and syncWorkerPendingIds are what the next sync of
 	// the worker covers: every entity, or those ids.
 	syncWorkerPendingAll bool
@@ -120,8 +124,11 @@ func NewSubCache[SharedT Shared, ExcerptT Excerpt, ViewT entity.Resolved](
 	actions Actions[SharedT],
 	typename, namespace string,
 	version uint, maxLoaded int) *SubCache[SharedT, ExcerptT, ViewT] {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &SubCache[SharedT, ExcerptT, ViewT]{
 		repo:            repo,
+		ctx:             ctx,
+		cancel:          cancel,
 		resolvers:       resolvers,
 		getUserIdentity: getUserIdentity,
 		makeView:        makeView,
@@ -136,7 +143,6 @@ func NewSubCache[SharedT Shared, ExcerptT Excerpt, ViewT entity.Resolved](
 		builtFrom:       make(map[entity.Id]repository.Hash),
 		cached:          make(map[entity.Id]SharedT),
 		syncTrigger:     make(chan struct{}, 1),
-		stopSyncWorker:  make(chan struct{}),
 		lru:             newLRUIdCache(),
 	}
 }
@@ -151,7 +157,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) EnsureClocks() error {
 	return sc.actions.EnsureClocks(sc.repo)
 }
 
-// Load reads the entity cache file, and brings the cache up to date with the
+// Load reads the excerpts of the index, and brings them up to date with the
 // repository. The caller must read all the returned events.
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) Load() <-chan BuildEvent {
 	out := make(chan BuildEvent)
@@ -159,11 +165,10 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) Load() <-chan BuildEvent {
 	go func() {
 		defer close(out)
 
-		// A missing, unreadable or outdated file is an empty store, brought up
-		// to date like any other.
-		_ = sc.read()
-
-		err := sc.syncAll(func(event BuildEvent) { out <- event })
+		err := sc.read(sc.ctx)
+		if err == nil {
+			err = sc.syncAll(func(event BuildEvent) { out <- event })
+		}
 		if err != nil {
 			out <- BuildEvent{Typename: sc.typename, Err: err}
 			return
@@ -174,119 +179,64 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) Load() <-chan BuildEvent {
 	return out
 }
 
-// read reads the entity cache file. The maps are left empty if it fails.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) read() error {
+// read fills the excerpts with those of the index, as left by the latest sync
+// of any process. Each excerpt comes with the commit it was built from, read
+// together: another process can replace a document with the one of an older
+// commit, and an excerpt recorded under a commit it wasn't built from would
+// never be brought up to date.
+// An excerpt that can't be decoded is left out, for the sync to build it again.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) read(ctx context.Context) error {
 	sc.muDerived.Lock()
 	defer sc.muDerived.Unlock()
+
+	index, err := sc.repo.GetIndex(sc.namespace, sc.version)
+	if err != nil {
+		return err
+	}
+	builtFrom, raws, err := index.Excerpts(ctx)
+	if err != nil {
+		return err
+	}
+
 	sc.muMaps.Lock()
 	defer sc.muMaps.Unlock()
-
-	sc.excerpts = make(map[entity.Id]ExcerptT)
-	sc.builtFrom = make(map[entity.Id]repository.Hash)
-
-	var f billy.File
-	err := retryOnWindows(func() (err error) {
-		f, err = sc.repo.LocalStorage().Open(filepath.Join("cache", sc.namespace))
-		return err
-	})
-	if err != nil {
-		return err
-	}
-
-	aux := struct {
-		Version   uint
-		Excerpts  map[entity.Id]ExcerptT
-		BuiltFrom map[entity.Id]repository.Hash
-	}{}
-
-	decoder := gob.NewDecoder(f)
-	err = decoder.Decode(&aux)
-	if err != nil {
-		_ = f.Close()
-		return err
-	}
-
-	err = f.Close()
-	if err != nil {
-		return err
-	}
-
-	if aux.Version != sc.version {
-		return fmt.Errorf("unknown %s cache format version %v", sc.namespace, aux.Version)
-	}
-
-	// the id is not serialized in the excerpt itself (non-exported field in go, long story ...),
-	// so we fix it here, which doubles as enforcing coherency.
-	for id, excerpt := range aux.Excerpts {
-		excerpt.setId(id)
-		sc.excerpts[id] = excerpt
-	}
-	// A commit without its excerpt would have sync see the excerpt as up to date,
-	// and never build it: it's dropped, which has sync build the excerpt.
-	for id, commit := range aux.BuiltFrom {
-		if _, ok := sc.excerpts[id]; ok {
-			sc.builtFrom[id] = commit
+	for key, raw := range raws {
+		id := entity.Id(key)
+		excerpt, ok := sc.decodeExcerpt(id, raw)
+		if !ok {
+			continue
 		}
+		sc.excerpts[id] = excerpt
+		sc.builtFrom[id] = builtFrom[key]
 	}
-
 	return nil
 }
 
-// Write will serialize on disk the entity cache file
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) write() error {
-	sc.muMaps.RLock()
-	defer sc.muMaps.RUnlock()
-
-	var data bytes.Buffer
-
-	aux := struct {
-		Version   uint
-		Excerpts  map[entity.Id]ExcerptT
-		BuiltFrom map[entity.Id]repository.Hash
-	}{
-		Version:   sc.version,
-		Excerpts:  sc.excerpts,
-		BuiltFrom: sc.builtFrom,
+// decodeExcerpt decodes the excerpt of an entity as the index stores it. It
+// returns false if it can't.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) decodeExcerpt(id entity.Id, raw []byte) (ExcerptT, bool) {
+	var excerpt ExcerptT
+	if json.Unmarshal(raw, &excerpt) != nil {
+		return excerpt, false
 	}
+	// the id is the key of the excerpt, not part of it
+	excerpt.setId(id)
+	return excerpt, true
+}
 
-	encoder := gob.NewEncoder(&data)
-
-	err := encoder.Encode(aux)
-	if err != nil {
-		return err
+// excerptFromIndex returns the excerpt of an entity as the index stores it, if
+// it was built from ref. It returns false if the document is gone, was replaced
+// by another process since it was listed, or can't be decoded.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) excerptFromIndex(ctx context.Context, index repository.Index, id entity.Id, ref repository.Hash) (*derived[ExcerptT], bool) {
+	commit, raw, err := index.Excerpt(ctx, id.String())
+	if err != nil || commit != ref {
+		return nil, false
 	}
-
-	// Written aside then renamed over the cache file, so that a concurrent reader
-	// sees either the previous version or this one, never a partial write.
-	storage := sc.repo.LocalStorage()
-
-	f, err := storage.TempFile("cache", sc.namespace+".tmp-")
-	if err != nil {
-		return err
+	excerpt, ok := sc.decodeExcerpt(id, raw)
+	if !ok {
+		return nil, false
 	}
-
-	_, err = f.Write(data.Bytes())
-	if err != nil {
-		_ = f.Close()
-		_ = storage.Remove(f.Name())
-		return err
-	}
-
-	err = f.Close()
-	if err != nil {
-		_ = storage.Remove(f.Name())
-		return err
-	}
-
-	err = retryOnWindows(func() error {
-		return storage.Rename(f.Name(), filepath.Join("cache", sc.namespace))
-	})
-	if err != nil {
-		_ = storage.Remove(f.Name())
-		return err
-	}
-
-	return nil
+	return &derived[ExcerptT]{commit: commit, excerpt: excerpt}, true
 }
 
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) SetCacheSize(size int) {
@@ -342,7 +292,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) AllIds() []entity.Id {
 // Resolve retrieve an entity matching the exact given id. Each call returns a new
 // view of the single loaded copy of the entity: what a caller stages on it is its
 // own until committed, while the committed state is shared.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) Resolve(id entity.Id) (ViewT, error) {
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) Resolve(ctx context.Context, id entity.Id) (ViewT, error) {
 	sc.muMaps.RLock()
 	shared, ok := sc.cached[id]
 	if ok {
@@ -353,42 +303,59 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) Resolve(id entity.Id) (ViewT, erro
 	}
 	sc.muMaps.RUnlock()
 
-	shared, err := sc.actions.ReadWithResolver(sc.repo, sc.resolvers(), id)
+	shared, _, err := sc.loading.Do(ctx, id, func(ctx context.Context) (SharedT, error) {
+		return sc.load(ctx, id)
+	})
 	if err != nil {
 		return *new(ViewT), err
+	}
+	return sc.newView(shared), nil
+}
+
+// load reads an entity from the repository and keeps it as its loaded copy,
+// unless there is one already.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) load(ctx context.Context, id entity.Id) (SharedT, error) {
+	shared, err := sc.actions.ReadWithResolver(ctx, sc.repo, sc.resolvers(), id)
+	if err != nil {
+		return *new(SharedT), err
 	}
 
 	sc.muMaps.Lock()
 	if existing, ok := sc.cached[id]; ok {
-		// loaded concurrently in the meantime, keep a single copy in memory
-		// and mark it as recently used
+		// loaded in the meantime, keep a single copy in memory and mark it as
+		// recently used
 		sc.lru.Get(id)
 		sc.muMaps.Unlock()
-		return sc.newView(existing), nil
+		return existing, nil
 	}
+	// This copy can already be stale: if the reference moves while it's read,
+	// a sync running meanwhile doesn't see it, as it's not loaded yet. The next
+	// sync of the entity brings it up to date (loadedBehind). Until then it's
+	// still safe to use: a view works on any copy, and its commits reach the
+	// repository all the same.
 	sc.cached[id] = shared
 	sc.lru.Add(id)
 	sc.muMaps.Unlock()
 
 	sc.evictIfNeeded()
 
-	return sc.newView(shared), nil
+	return shared, nil
 }
 
 // ResolvePrefix retrieve an entity matching an id prefix. It fails if multiple
 // entities match.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) ResolvePrefix(prefix string) (ViewT, error) {
-	return sc.ResolveMatcher(func(excerpt ExcerptT) bool {
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) ResolvePrefix(ctx context.Context, prefix string) (ViewT, error) {
+	return sc.ResolveMatcher(ctx, func(excerpt ExcerptT) bool {
 		return excerpt.Id().HasPrefix(prefix)
 	})
 }
 
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) ResolveMatcher(f func(ExcerptT) bool) (ViewT, error) {
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) ResolveMatcher(ctx context.Context, f func(ExcerptT) bool) (ViewT, error) {
 	id, err := sc.resolveMatcher(f)
 	if err != nil {
 		return *new(ViewT), err
 	}
-	return sc.Resolve(id)
+	return sc.Resolve(ctx, id)
 }
 
 // ResolveExcerpt retrieves an Excerpt matching the exact given id
@@ -445,47 +412,6 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) resolveMatcher(f func(ExcerptT) bo
 	return matching[0], nil
 }
 
-// add registers a freshly committed entity, and returns a view of it.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) add(shared SharedT) (ViewT, error) {
-	id := shared.Id()
-
-	// Under muDerived until the copy is registered, so that a concurrent
-	// removal comes either before, and the entity is not added, or after.
-	changes, err := func() (map[entity.Id]EntityEventType, error) {
-		sc.muDerived.Lock()
-		defer sc.muDerived.Unlock()
-
-		sc.muMaps.RLock()
-		_, has := sc.cached[id]
-		sc.muMaps.RUnlock()
-		if has {
-			return nil, fmt.Errorf("entity %s already exist in the cache", id)
-		}
-
-		changes, err := sc.syncIdsLocked([]entity.Id{id})
-		if err != nil {
-			return changes, err
-		}
-		if _, ok := sc.builtFrom[id]; !ok {
-			return changes, fmt.Errorf("%s %s got removed, or the cache closed", sc.typename, id)
-		}
-
-		sc.muMaps.Lock()
-		sc.cached[id] = shared
-		sc.lru.Add(id)
-		sc.muMaps.Unlock()
-		return changes, nil
-	}()
-	sc.notifyChanges(changes)
-	if err != nil {
-		return *new(ViewT), err
-	}
-
-	sc.evictIfNeeded()
-
-	return sc.newView(shared), nil
-}
-
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) Remove(prefix string) error {
 	id, err := sc.resolveMatcher(func(excerpt ExcerptT) bool {
 		return excerpt.Id().HasPrefix(prefix)
@@ -511,7 +437,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) RemoveAll() error {
 	return sc.syncAll(nil)
 }
 
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) MergeAll(remote string) <-chan entity.MergeResult {
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) MergeAll(ctx context.Context, remote string) <-chan entity.MergeResult {
 	out := make(chan entity.MergeResult)
 
 	// Intercept merge results to update the cache properly
@@ -519,7 +445,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) MergeAll(remote string) <-chan ent
 		defer close(out)
 
 		// the author is only needed for merge commits, so a user identity is optional
-		user, err := sc.getUserIdentity()
+		user, err := sc.getUserIdentity(ctx)
 		if err != nil && !errors.Is(err, identity.ErrNoIdentitySet) {
 			out <- entity.NewMergeError(err, "")
 			return
@@ -529,7 +455,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) MergeAll(remote string) <-chan ent
 			author = user
 		}
 
-		results := sc.actions.MergeAll(sc.repo, sc.resolvers(), remote, author)
+		results := sc.actions.MergeAll(ctx, sc.repo, sc.resolvers(), remote, author)
 		for result := range results {
 			out <- result
 		}
@@ -553,16 +479,52 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) GetNamespace() string {
 	return sc.namespace
 }
 
-// newView wraps the loaded copy of an entity for a caller, and has its commits
-// refresh the derived state.
+// newView wraps a copy of an entity for a caller, and has its commits go through
+// onCommit.
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) newView(shared SharedT) ViewT {
-	id := shared.Id()
-	return sc.makeView(shared, func() error { return sc.onCommit(id) })
+	return sc.makeView(shared, func() error { return sc.onCommit(shared) })
 }
 
-// onCommit refreshes the derived state after an entity has been committed.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) onCommit(id entity.Id) error {
-	return sc.sync(id)
+// onCommit refreshes the derived state after an entity has been committed from
+// the given copy. With no copy of it loaded, as for a new entity or an evicted
+// one, that copy becomes the loaded one if it holds what was synced.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) onCommit(shared SharedT) error {
+	// the id is only read now: the copy of a new entity has none before its
+	// first commit
+	id := shared.Id()
+
+	// Under muDerived until the copy is registered, so that a concurrent
+	// removal comes either before, and the copy is not loaded, or after.
+	changes, err := func() (map[entity.Id]EntityEventType, error) {
+		sc.muDerived.Lock()
+		defer sc.muDerived.Unlock()
+
+		changes, err := sc.syncIdsLocked(sc.ctx, []entity.Id{id})
+		if err != nil {
+			return changes, err
+		}
+		// The copy can be behind what was synced: another writer moved the
+		// reference since, or the view committed a copy of its own, as an
+		// identity view does. The next Resolve reads it again then.
+		if built, ok := sc.builtFrom[id]; !ok || shared.LastCommit() != built {
+			return changes, nil
+		}
+
+		sc.muMaps.Lock()
+		if _, has := sc.cached[id]; !has {
+			sc.cached[id] = shared
+			sc.lru.Add(id)
+		}
+		sc.muMaps.Unlock()
+		return changes, nil
+	}()
+	sc.notifyChanges(changes)
+	if err != nil {
+		return err
+	}
+
+	sc.evictIfNeeded()
+	return nil
 }
 
 // notifyObservers notifies all the observers when something happening for an entity
@@ -612,7 +574,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) sync(id entity.Id) error {
 // references, see syncIdsLocked, and notifies the observers.
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncIds(ids []entity.Id) error {
 	sc.muDerived.Lock()
-	changes, err := sc.syncIdsLocked(ids)
+	changes, err := sc.syncIdsLocked(sc.ctx, ids)
 	sc.muDerived.Unlock()
 	sc.notifyChanges(changes)
 	return err
@@ -623,7 +585,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncIds(ids []entity.Id) error {
 // receives the build events.
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAll(progress func(BuildEvent)) error {
 	sc.muDerived.Lock()
-	changes, err := sc.syncAllLocked(progress)
+	changes, err := sc.syncAllLocked(sc.ctx, progress)
 	sc.muDerived.Unlock()
 	sc.notifyChanges(changes)
 
@@ -635,16 +597,16 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAll(progress func(BuildEvent))
 // succession.
 //
 // TODO: shrink it, or drop it, once a sync that finds nothing to do is cheap.
-// With 10k bugs it takes ~110ms and allocates ~20MB, 93% of the CPU and 80% of
-// the allocations in ListRefs, which opens and reads every loose ref file; the
-// rest mostly decodes the index record. Levers, by expected gain:
+// With 10k bugs it takes ~60ms and allocates ~19MB: ~30ms in ListRefs, which
+// reads every loose ref file, on a worker per CPU, and ~25ms reading the
+// commit of every document of the index. Levers, by expected gain:
 //   - go-git keeping the refs it lists, and reading them again only when the
 //     stat of their directory or of packed-refs changed: no read at all when
 //     nothing changed;
-//   - packing the refs: listing 10k packed refs takes ~3ms instead of ~100ms,
+//   - packing the refs: listing 10k packed refs takes ~3ms instead of ~30ms,
 //     until new writes make them loose again;
-//   - keeping the decoded index record in memory rather than decoding it on
-//     each sync.
+//   - keeping the record of the index in memory rather than reading it on each
+//     sync.
 const syncInterval = time.Second
 
 // requestSync asks the worker for a sync of the given entities, or of every
@@ -691,7 +653,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) addPendingLocked(ids ...entity.Id)
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) startSyncWorker() {
 	sc.muSyncWorker.Lock()
 	defer sc.muSyncWorker.Unlock()
-	if sc.syncWorkerClosed {
+	if sc.ctx.Err() != nil {
 		return
 	}
 
@@ -704,7 +666,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) startSyncWorker() {
 
 		for {
 			select {
-			case <-sc.stopSyncWorker:
+			case <-sc.ctx.Done():
 				return
 			case <-postponed:
 			case <-sc.syncTrigger:
@@ -748,14 +710,11 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) startSyncWorker() {
 	})
 }
 
-// closeSyncWorker stops the worker, and waits for it to end. It won't start
-// again.
+// closeSyncWorker cancels ctx, which interrupts a sync in progress and stops the
+// worker, and waits for it to end. It won't start again.
 func (sc *SubCache[SharedT, ExcerptT, ViewT]) closeSyncWorker() {
 	sc.muSyncWorker.Lock()
-	if !sc.syncWorkerClosed {
-		sc.syncWorkerClosed = true
-		close(sc.stopSyncWorker)
-	}
+	sc.cancel()
 	sc.muSyncWorker.Unlock()
 	sc.syncWorkerDone.Wait()
 }
@@ -784,25 +743,19 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) closeSyncWorker() {
 const syncBatchSize = 75
 
 // syncIdsLocked brings the derived state of the given entities up to date with
-// their references, see syncEntitiesLocked. An unreadable index record can't be
-// repaired entry by entry: it has every entity synced instead, see
-// syncAllLocked.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncIdsLocked(ids []entity.Id) (map[entity.Id]EntityEventType, error) {
+// their references, see syncEntitiesLocked.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncIdsLocked(ctx context.Context, ids []entity.Id) (map[entity.Id]EntityEventType, error) {
 	// nil maps mark the SubCache as closed
 	if sc.excerpts == nil {
 		return nil, nil
 	}
 
-	index, err := sc.repo.GetIndex(sc.namespace)
+	index, err := sc.repo.GetIndex(sc.namespace, sc.version)
 	if err != nil {
 		return nil, err
 	}
-	indexBuiltFrom, err := index.BuiltFrom()
-	if err != nil {
-		return sc.syncAllLocked(nil)
-	}
-
 	refs := make(map[string]repository.Hash, len(ids))
+	indexBuiltFrom := make(map[string]repository.Hash, len(ids))
 	candidates := make(map[entity.Id]struct{}, len(ids))
 	for _, id := range ids {
 		ref, err := sc.repo.ResolveRef(sc.namespace, id.String())
@@ -812,40 +765,40 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncIdsLocked(ids []entity.Id) (ma
 		case !errors.Is(err, repository.ErrNotFound):
 			return nil, err
 		}
+		commit, err := index.BuiltFrom(ctx, id.String())
+		switch {
+		case err == nil:
+			indexBuiltFrom[id.String()] = commit
+		case !errors.Is(err, repository.ErrNotFound):
+			return nil, err
+		}
 		candidates[id] = struct{}{}
 	}
 
-	return sc.syncEntitiesLocked(index, candidates, refs, indexBuiltFrom, nil)
+	return sc.syncEntitiesLocked(ctx, index, candidates, refs, indexBuiltFrom, nil)
 }
 
 // syncAllLocked brings the derived state of every entity up to date with the
 // references, see syncEntitiesLocked: those with a reference, with derived state
-// in either store, or with a loaded copy. An unreadable index record is cleared,
-// and the index rebuilt.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAllLocked(progress func(BuildEvent)) (map[entity.Id]EntityEventType, error) {
+// in memory or in the index, or with a loaded copy.
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAllLocked(ctx context.Context, progress func(BuildEvent)) (map[entity.Id]EntityEventType, error) {
 	// nil maps mark the SubCache as closed
 	if sc.excerpts == nil {
 		return nil, nil
 	}
 
-	index, err := sc.repo.GetIndex(sc.namespace)
+	index, err := sc.repo.GetIndex(sc.namespace, sc.version)
 	if err != nil {
 		return nil, err
 	}
-	indexBuiltFrom, recordErr := index.BuiltFrom()
+	indexBuiltFrom, err := index.AllBuiltFrom(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	refs, err := sc.repo.ListRefs(sc.namespace)
 	if err != nil {
 		return nil, err
-	}
-	// cleared once the refs are known, so that failing to list them leaves the
-	// index as it is
-	if recordErr != nil {
-		err = index.Clear()
-		if err != nil {
-			return nil, err
-		}
-		indexBuiltFrom = nil
 	}
 
 	candidates := make(map[entity.Id]struct{}, len(refs))
@@ -867,7 +820,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAllLocked(progress func(BuildE
 	}
 	sc.muMaps.RUnlock()
 
-	return sc.syncEntitiesLocked(index, candidates, refs, indexBuiltFrom, progress)
+	return sc.syncEntitiesLocked(ctx, index, candidates, refs, indexBuiltFrom, progress)
 }
 
 // syncEntitiesLocked brings the derived state of the candidates up to date with
@@ -876,9 +829,10 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAllLocked(progress func(BuildE
 // latter given in indexBuiltFrom. An entity that is behind in either store, or
 // whose loaded copy is behind its reference, is brought to its reference once,
 // see bringToRef, then applied to each store that is behind, or removed from
-// them if its reference is gone, along with its loaded copy. Nothing is read if
-// everything is up to date. Changes are applied in batches, and the excerpt
-// file is written once, if the excerpts changed.
+// them if its reference is gone, along with its loaded copy. An entity only
+// behind in memory, the index being up to date from another process or an
+// earlier sync, has its excerpt read from the index instead. Nothing is read if
+// everything is up to date. Changes are applied in batches.
 //
 // Entities are brought up to date under muDerived, which every change to the
 // derived state holds, so that each sync applies a state at least as recent as
@@ -888,18 +842,22 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncAllLocked(progress func(BuildE
 // It returns the changes of excerpts that were applied, even on error, for the
 // caller to notify once muDerived is released. progress, if not nil, receives
 // the build events.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repository.Index, candidates map[entity.Id]struct{}, refs map[string]repository.Hash, indexBuiltFrom map[string]repository.Hash, progress func(BuildEvent)) (map[entity.Id]EntityEventType, error) {
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(ctx context.Context, index repository.Index, candidates map[entity.Id]struct{}, refs map[string]repository.Hash, indexBuiltFrom map[string]repository.Hash, progress func(BuildEvent)) (map[entity.Id]EntityEventType, error) {
 	if progress == nil {
 		progress = func(BuildEvent) {}
 	}
 
 	var behind []entity.Id
+	// the entities only behind in memory
+	inIndex := make(map[entity.Id]bool)
 	sc.muMaps.RLock()
 	for id := range candidates {
 		ref := refs[id.String()]
 		loaded, isLoaded := sc.cached[id]
-		if sc.builtFrom[id] != ref || indexBuiltFrom[id.String()] != ref || (isLoaded && loaded.LastCommit() != ref) {
+		loadedBehind := isLoaded && loaded.LastCommit() != ref
+		if sc.builtFrom[id] != ref || indexBuiltFrom[id.String()] != ref || loadedBehind {
 			behind = append(behind, id)
+			inIndex[id] = ref != "" && indexBuiltFrom[id.String()] == ref && !loadedBehind
 		}
 	}
 	sc.muMaps.RUnlock()
@@ -925,7 +883,7 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repositor
 	// the excerpts of a batch are published once the batch is in the index
 	endBatch := func() error {
 		if batchIndexed > 0 {
-			err := batch.Apply()
+			err := batch.Apply(ctx)
 			if err != nil {
 				return err
 			}
@@ -959,14 +917,16 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repositor
 		return nil
 	}
 
-	for i, id := range behind {
-		shared, err := sc.bringToRef(id, refs[id.String()])
+	// fromEntity builds the derived state of an entity from the entity itself,
+	// see bringToRef, adding it to the current batch
+	fromEntity := func(id entity.Id, ref repository.Hash) error {
+		shared, err := sc.bringToRef(ctx, id, ref)
 		if entity.IsErrNotFound(err) {
 			// not found can also come from a missing dependency, such as the
 			// author identity: only a missing reference is a removal
 			_, refErr := sc.repo.ResolveRef(sc.namespace, id.String())
 			if !errors.Is(refErr, repository.ErrNotFound) {
-				return changes, err
+				return err
 			}
 		}
 		switch {
@@ -977,13 +937,17 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repositor
 			}
 			pending[id] = nil
 		case err != nil:
-			return changes, err
+			return err
 		default:
 			d := sc.buildDerived(shared)
 			if indexBuiltFrom[id.String()] != d.commit {
-				err = batch.Set(id.String(), d.indexData, d.commit)
+				excerpt, err := json.Marshal(d.excerpt)
 				if err != nil {
-					return changes, err
+					return err
+				}
+				err = batch.Set(id.String(), d.commit, excerpt, d.indexData)
+				if err != nil {
+					return err
 				}
 				batchIndexed++
 			}
@@ -991,10 +955,29 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repositor
 				pending[id] = &d
 			}
 		}
+		return nil
+	}
+
+	for i, id := range behind {
+		ref := refs[id.String()]
+		var d *derived[ExcerptT]
+		fromIndex := false
+		if inIndex[id] {
+			d, fromIndex = sc.excerptFromIndex(ctx, index, id, ref)
+			if !fromIndex {
+				// gone, replaced or unreadable since: built from the entity instead
+				delete(indexBuiltFrom, id.String())
+			}
+		}
+		if fromIndex {
+			pending[id] = d
+		} else if err := fromEntity(id, ref); err != nil {
+			return changes, err
+		}
 
 		batchSize++
 		if batchSize >= syncBatchSize {
-			err = endBatch()
+			err := endBatch()
 			if err != nil {
 				return changes, err
 			}
@@ -1015,13 +998,6 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repositor
 		}
 	}
 
-	if len(changes) > 0 {
-		err := sc.write()
-		if err != nil {
-			return changes, err
-		}
-	}
-
 	progress(BuildEvent{Typename: sc.typename, Event: BuildEventFinished})
 
 	return changes, nil
@@ -1031,19 +1007,19 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) syncEntitiesLocked(index repositor
 // be built: the loaded copy, brought up to date if it's behind, see
 // Actions.Refresh, or a read from git otherwise, which is not kept in memory. A
 // refresh that returns a replacement has it loaded instead of the previous copy.
-func (sc *SubCache[SharedT, ExcerptT, ViewT]) bringToRef(id entity.Id, ref repository.Hash) (SharedT, error) {
+func (sc *SubCache[SharedT, ExcerptT, ViewT]) bringToRef(ctx context.Context, id entity.Id, ref repository.Hash) (SharedT, error) {
 	sc.muMaps.RLock()
 	loaded, isLoaded := sc.cached[id]
 	sc.muMaps.RUnlock()
 
 	if !isLoaded {
-		return sc.actions.ReadWithResolver(sc.repo, sc.resolvers(), id)
+		return sc.actions.ReadWithResolver(ctx, sc.repo, sc.resolvers(), id)
 	}
 	if loaded.LastCommit() == ref {
 		return loaded, nil
 	}
 
-	refreshed, err := sc.actions.Refresh(sc.repo, sc.resolvers(), loaded)
+	refreshed, err := sc.actions.Refresh(ctx, sc.repo, sc.resolvers(), loaded)
 	if err != nil {
 		return refreshed, err
 	}
@@ -1071,17 +1047,5 @@ func (sc *SubCache[SharedT, ExcerptT, ViewT]) evictIfNeeded() {
 		}
 		sc.lru.Remove(id)
 		delete(sc.cached, id)
-	}
-}
-
-// On Windows, a file can't be replaced while open, nor opened while being
-// replaced. Both are short-lived, so retry for a bit.
-func retryOnWindows(fn func() error) error {
-	for i := 0; ; i++ {
-		err := fn()
-		if err == nil || runtime.GOOS != "windows" || os.IsNotExist(err) || i == 100 {
-			return err
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }

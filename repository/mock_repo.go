@@ -2,12 +2,11 @@ package repository
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"errors"
 	"fmt"
 	"io"
-	"maps"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +34,7 @@ func NewMockRepo() *mockRepo {
 			RepoConfig:  NewRepoConfig(newMockConfig()),
 			RepoKeyring: NewMockRepoKeyring(),
 			RepoStorage: NewRepoStorage(billyLocalStorage{Filesystem: memfs.New()}),
-			RepoIndex:   newMockRepoIndex(),
+			RepoIndex:   NewSqliteIndex(":memory:"),
 			RepoData:    data,
 			RepoBrowse:  data,
 			RepoClock:   NewMockRepoClock(),
@@ -64,125 +63,6 @@ func newMockConfig() Config {
 
 func NewMockRepoKeyring() RepoKeyring {
 	return NewRepoKeyring(keyring.NewArrayKeyring(nil))
-}
-
-var _ RepoIndex = &mockRepoIndex{}
-
-type mockRepoIndex struct {
-	indexesMutex sync.Mutex
-	indexes      map[string]Index
-}
-
-func newMockRepoIndex() *mockRepoIndex {
-	return &mockRepoIndex{
-		indexes: make(map[string]Index),
-	}
-}
-
-func (m *mockRepoIndex) GetIndex(name string) (Index, error) {
-	m.indexesMutex.Lock()
-	defer m.indexesMutex.Unlock()
-
-	if index, ok := m.indexes[name]; ok {
-		return index, nil
-	}
-
-	index := newIndex()
-	m.indexes[name] = index
-	return index, nil
-}
-func (m *mockRepoIndex) Close() error {
-	return nil
-}
-
-var _ Index = &mockIndex{}
-
-type mockIndex struct {
-	mu        sync.RWMutex
-	docs      map[string][]string
-	builtFrom map[string]Hash
-}
-
-func newIndex() *mockIndex {
-	return &mockIndex{
-		docs:      make(map[string][]string),
-		builtFrom: make(map[string]Hash),
-	}
-}
-
-func (m *mockIndex) NewBatch() IndexBatch {
-	return &mockIndexBatch{index: m}
-}
-
-func (m *mockIndex) BuiltFrom() (map[string]Hash, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return maps.Clone(m.builtFrom), nil
-}
-
-func (m *mockIndex) Search(terms []string) (ids []string, err error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-loop:
-	for id, texts := range m.docs {
-		for _, text := range texts {
-			for _, s := range strings.Fields(text) {
-				for _, term := range terms {
-					if s == term {
-						ids = append(ids, id)
-						continue loop
-					}
-				}
-			}
-		}
-	}
-	return ids, nil
-}
-
-func (m *mockIndex) Clear() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	clear(m.docs)
-	clear(m.builtFrom)
-	return nil
-}
-
-func (m *mockIndex) Close() error {
-	return nil
-}
-
-type mockIndexBatch struct {
-	index *mockIndex
-	// the changes in order, applied together
-	changes []func()
-}
-
-func (mb *mockIndexBatch) Set(id string, texts []string, commit Hash) error {
-	if !commit.IsValid() {
-		return fmt.Errorf("invalid commit %q for document %s", commit, id)
-	}
-	texts = slices.Clone(texts)
-	mb.changes = append(mb.changes, func() {
-		mb.index.docs[id] = texts
-		mb.index.builtFrom[id] = commit
-	})
-	return nil
-}
-
-func (mb *mockIndexBatch) Remove(id string) {
-	mb.changes = append(mb.changes, func() {
-		delete(mb.index.docs, id)
-		delete(mb.index.builtFrom, id)
-	})
-}
-
-func (mb *mockIndexBatch) Apply() error {
-	mb.index.mu.Lock()
-	defer mb.index.mu.Unlock()
-	for _, change := range mb.changes {
-		change()
-	}
-	return nil
 }
 
 var _ RepoData = &mockRepoDataBrowse{}
@@ -216,14 +96,6 @@ func newMockRepoDataBrowse() *mockRepoDataBrowse {
 		commits: make(map[Hash]commit),
 		refs:    make(map[string]Hash),
 	}
-}
-
-func (r *mockRepoDataBrowse) FetchRefs(remote string, namespaces ...string) (string, error) {
-	panic("implement me")
-}
-
-func (r *mockRepoDataBrowse) PushRefs(remote string, namespaces ...string) (string, error) {
-	panic("implement me")
 }
 
 func (r *mockRepoDataBrowse) StoreData(data []byte) (Hash, error) {
@@ -417,8 +289,8 @@ func (r *mockRepoDataBrowse) lookupRef(name string) (Hash, error) {
 	return h, nil
 }
 
-func (r *mockRepoDataBrowse) ListCommits(commit Hash) ([]Hash, error) {
-	return nonNativeListCommits(r, commit)
+func (r *mockRepoDataBrowse) ListCommits(ctx context.Context, commit Hash) ([]Hash, error) {
+	return nonNativeListCommits(ctx, r, commit)
 }
 
 // resolveRev resolves a rev matching the RepoBrowse contract:
@@ -551,12 +423,15 @@ func mockCommitMeta(hash Hash, c commit) CommitMeta {
 	}
 }
 
-func (r *mockRepoDataBrowse) Branches() ([]BranchInfo, error) {
+func (r *mockRepoDataBrowse) Branches(ctx context.Context) ([]BranchInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	var branches []BranchInfo
 	for ref, hash := range r.refs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		name, ok := strings.CutPrefix(ref, "refs/heads/")
 		if !ok {
 			continue
@@ -569,12 +444,15 @@ func (r *mockRepoDataBrowse) Branches() ([]BranchInfo, error) {
 	return branches, nil
 }
 
-func (r *mockRepoDataBrowse) Tags() ([]TagInfo, error) {
+func (r *mockRepoDataBrowse) Tags(ctx context.Context) ([]TagInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	var tags []TagInfo
 	for ref, hash := range r.refs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		name, ok := strings.CutPrefix(ref, "refs/tags/")
 		if !ok {
 			continue
@@ -584,7 +462,7 @@ func (r *mockRepoDataBrowse) Tags() ([]TagInfo, error) {
 	return tags, nil
 }
 
-func (r *mockRepoDataBrowse) TreeAtPath(rev, path string) ([]TreeEntry, error) {
+func (r *mockRepoDataBrowse) TreeAtPath(ctx context.Context, rev, path string) ([]TreeEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -599,7 +477,7 @@ func (r *mockRepoDataBrowse) TreeAtPath(rev, path string) ([]TreeEntry, error) {
 	return r.treeEntriesAt(c.treeHash, path)
 }
 
-func (r *mockRepoDataBrowse) BlobAtPath(rev, path string) (io.ReadCloser, int64, Hash, error) {
+func (r *mockRepoDataBrowse) BlobAtPath(ctx context.Context, rev, path string) (io.ReadCloser, int64, Hash, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -622,7 +500,7 @@ func (r *mockRepoDataBrowse) BlobAtPath(rev, path string) (io.ReadCloser, int64,
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), blobHash, nil
 }
 
-func (r *mockRepoDataBrowse) CommitLog(rev, path string, limit int, after Hash, since, until *time.Time) ([]CommitMeta, error) {
+func (r *mockRepoDataBrowse) CommitLog(ctx context.Context, rev, path string, limit int, after Hash, since, until *time.Time) ([]CommitMeta, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -636,6 +514,9 @@ func (r *mockRepoDataBrowse) CommitLog(rev, path string, limit int, after Hash, 
 	current := startHash
 	seen := make(map[Hash]bool)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seen[current] {
 			break
 		}
@@ -703,7 +584,7 @@ func (r *mockRepoDataBrowse) CommitLog(rev, path string, limit int, after Hash, 
 	return result, nil
 }
 
-func (r *mockRepoDataBrowse) LastCommitForEntries(rev, path string, names []string) (map[string]CommitMeta, error) {
+func (r *mockRepoDataBrowse) LastCommitForEntries(ctx context.Context, rev, path string, names []string) (map[string]CommitMeta, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -720,6 +601,9 @@ func (r *mockRepoDataBrowse) LastCommitForEntries(rev, path string, names []stri
 	current := startHash
 	seen := make(map[Hash]bool)
 	for len(remaining) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if seen[current] {
 			break
 		}
@@ -771,7 +655,11 @@ func (r *mockRepoDataBrowse) LastCommitForEntries(rev, path string, names []stri
 	return result, nil
 }
 
-func (r *mockRepoDataBrowse) CommitDetail(hash Hash) (CommitDetail, error) {
+func (r *mockRepoDataBrowse) CommitDetail(ctx context.Context, hash Hash) (CommitDetail, error) {
+	if err := ctx.Err(); err != nil {
+		return CommitDetail{}, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -791,7 +679,11 @@ func (r *mockRepoDataBrowse) CommitDetail(hash Hash) (CommitDetail, error) {
 	}, nil
 }
 
-func (r *mockRepoDataBrowse) CommitFileDiff(hash Hash, filePath string) (FileDiff, error) {
+func (r *mockRepoDataBrowse) CommitFileDiff(ctx context.Context, hash Hash, filePath string) (FileDiff, error) {
+	if err := ctx.Err(); err != nil {
+		return FileDiff{}, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -834,7 +726,7 @@ func (r *mockRepoDataBrowse) CommitFileDiff(hash Hash, filePath string) (FileDif
 	return fd, nil
 }
 
-func (r *mockRepoDataBrowse) Head() (RefMeta, error) {
+func (r *mockRepoDataBrowse) Head(ctx context.Context) (RefMeta, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

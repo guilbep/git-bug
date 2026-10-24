@@ -21,7 +21,7 @@ type BridgeImpl interface {
 
 	// Configure handle the user interaction and return a key/value configuration
 	// for future use.
-	Configure(repo *cache.RepoCache, params BridgeParams, interactive bool) (Configuration, error)
+	Configure(ctx context.Context, repo *cache.RepoCache, params BridgeParams, interactive bool) (Configuration, error)
 
 	// The set of the BridgeParams fields supported
 	ValidParams() map[string]interface{}
@@ -33,6 +33,12 @@ type BridgeImpl interface {
 	// on the user identity. The corresponding value is used to match identities and
 	// credentials.
 	LoginMetaKey() string
+}
+
+// RemoteBridge is implemented by bridges ported to the sync engine: they
+// import and export through it, and can take part in `bridge sync`.
+type RemoteBridge interface {
+	NewRemote(ctx context.Context, repo *cache.RepoCache, conf Configuration) (Remote, error)
 }
 
 type Importer interface {

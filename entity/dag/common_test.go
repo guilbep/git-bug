@@ -1,6 +1,7 @@
 package dag
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -60,7 +61,7 @@ func (op *op2) Id() entity.Id {
 
 func (op *op2) Validate() error { return nil }
 
-func unmarshaler(raw json.RawMessage, resolvers entity.Resolvers) (Operation, error) {
+func unmarshaler(_ context.Context, raw json.RawMessage, resolvers entity.Resolvers) (Operation, error) {
 	var t struct {
 		OperationType OperationType `json:"type"`
 	}
@@ -129,9 +130,9 @@ func makeTestContextRemote(t *testing.T) (repository.Repo, repository.Repo, repo
 	id1, id2, resolver, def := makeTestContextInternal(repoA)
 
 	// distribute the identities
-	_, err := identity.Push(repoA, "remote")
+	_, err := identity.Push(t.Context(), repoA, "remote")
 	require.NoError(t, err)
-	err = identity.Pull(repoB, "remote")
+	err = identity.Pull(t.Context(), repoB, "remote")
 	require.NoError(t, err)
 
 	return repoA, repoB, remote, id1, id2, resolver, def

@@ -100,7 +100,7 @@ func (je *jiraExporter) cacheAllClient(ctx context.Context, repo *cache.RepoCach
 			continue
 		}
 
-		user, err := repo.Identities().ResolveIdentityImmutableMetadata(metaKeyJiraLogin, login)
+		user, err := repo.Identities().ResolveIdentityImmutableMetadata(ctx, metaKeyJiraLogin, login)
 		if entity.IsErrNotFound(err) {
 			continue
 		}
@@ -147,7 +147,7 @@ func (je *jiraExporter) ExportAll(ctx context.Context, repo *cache.RepoCache, si
 		allBugsIds := repo.Bugs().AllIds()
 
 		for _, id := range allBugsIds {
-			b, err := repo.Bugs().Resolve(id)
+			b, err := repo.Bugs().Resolve(ctx, id)
 			if err != nil {
 				out <- core.NewExportError(fmt.Errorf("can't load bug: %w", err), id)
 				return
@@ -191,6 +191,10 @@ func (je *jiraExporter) exportBug(ctx context.Context, b *cache.BugCache, out ch
 	snapshot := b.Snapshot()
 
 	var bugJiraID string
+
+	// Once a change is made on Jira, saving its ID locally must not be
+	// interrupted, or the next export would make the same change again.
+	saveCtx := context.WithoutCancel(ctx)
 
 	// Special case:
 	// if a user try to export a bug that is not already exported to jira (or
@@ -272,7 +276,7 @@ func (je *jiraExporter) exportBug(ctx context.Context, b *cache.BugCache, out ch
 		out <- core.NewExportBug(b.Id())
 		// mark bug creation operation as exported
 		err = markOperationAsExported(
-			b, createOp.Id(), id, je.project.Key, time.Time{})
+			saveCtx, b, createOp.Id(), id, je.project.Key, time.Time{})
 		if err != nil {
 			err := fmt.Errorf("marking operation as exported: %w", err)
 			out <- core.NewExportError(err, b.Id())
@@ -280,7 +284,7 @@ func (je *jiraExporter) exportBug(ctx context.Context, b *cache.BugCache, out ch
 		}
 
 		// commit operation to avoid creating multiple issues with multiple pushes
-		err = b.CommitAsNeeded()
+		err = b.CommitAsNeeded(saveCtx)
 		if err != nil {
 			err := fmt.Errorf("bug commit: %w", err)
 			out <- core.NewExportError(err, b.Id())
@@ -416,7 +420,7 @@ func (je *jiraExporter) exportBug(ctx context.Context, b *cache.BugCache, out ch
 
 		// mark operation as exported
 		err = markOperationAsExported(
-			b, op.Id(), id, je.project.Key, exportTime)
+			saveCtx, b, op.Id(), id, je.project.Key, exportTime)
 		if err != nil {
 			err := fmt.Errorf("marking operation as exported: %w", err)
 			out <- core.NewExportError(err, b.Id())
@@ -425,7 +429,7 @@ func (je *jiraExporter) exportBug(ctx context.Context, b *cache.BugCache, out ch
 
 		// commit at each operation export to avoid exporting same events multiple
 		// times
-		err = b.CommitAsNeeded()
+		err = b.CommitAsNeeded(saveCtx)
 		if err != nil {
 			err := fmt.Errorf("bug commit: %w", err)
 			out <- core.NewExportError(err, b.Id())
@@ -436,7 +440,7 @@ func (je *jiraExporter) exportBug(ctx context.Context, b *cache.BugCache, out ch
 	return nil
 }
 
-func markOperationAsExported(b *cache.BugCache, target entity.Id, jiraID, jiraProject string, exportTime time.Time) error {
+func markOperationAsExported(ctx context.Context, b *cache.BugCache, target entity.Id, jiraID, jiraProject string, exportTime time.Time) error {
 	newMetadata := map[string]string{
 		metaKeyJiraId:      jiraID,
 		metaKeyJiraProject: jiraProject,
@@ -445,7 +449,7 @@ func markOperationAsExported(b *cache.BugCache, target entity.Id, jiraID, jiraPr
 		newMetadata[metaKeyJiraExportTime] = exportTime.Format(http.TimeFormat)
 	}
 
-	_, err := b.SetMetadata(target, newMetadata)
+	_, err := b.SetMetadata(ctx, target, newMetadata)
 	return err
 }
 

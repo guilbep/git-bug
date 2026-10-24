@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -14,7 +15,6 @@ import (
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 
 	"github.com/git-bug/git-bug/entity"
-	"github.com/git-bug/git-bug/entity/dag"
 	"github.com/git-bug/git-bug/repository/repotest"
 
 	"github.com/stretchr/testify/require"
@@ -29,126 +29,135 @@ const (
 )
 
 type testCase struct {
-	name     string
-	bug      *cache.BugCache
-	numOp    int // number of original operations
-	numOpExp int // number of operations after export
-	numOpImp int // number of operations after import
+	name string
+	bug  *cache.BugCache
 }
 
 func testCases(t *testing.T, repo *cache.RepoCache) []*testCase {
 	// simple bug
-	simpleBug, _, err := repo.Bugs().New("simple bug", "new bug")
+	simpleBug, _, err := repo.Bugs().New(t.Context(), "simple bug", "new bug")
 	require.NoError(t, err)
+	require.NoError(t, simpleBug.Commit(t.Context()))
 
 	// bug with comments
-	bugWithComments, _, err := repo.Bugs().New("bug with comments", "new bug")
+	bugWithComments, _, err := repo.Bugs().New(t.Context(), "bug with comments", "new bug")
 	require.NoError(t, err)
+	require.NoError(t, bugWithComments.Commit(t.Context()))
 
-	_, _, err = bugWithComments.AddComment("new comment")
+	_, _, err = bugWithComments.AddComment(t.Context(), "new comment")
 	require.NoError(t, err)
-	require.NoError(t, bugWithComments.Commit())
+	require.NoError(t, bugWithComments.Commit(t.Context()))
 
 	// bug with label changes
-	bugLabelChange, _, err := repo.Bugs().New("bug label change", "new bug")
+	bugLabelChange, _, err := repo.Bugs().New(t.Context(), "bug label change", "new bug")
+	require.NoError(t, err)
+	require.NoError(t, bugLabelChange.Commit(t.Context()))
+
+	_, _, err = bugLabelChange.ChangeLabels(t.Context(), []string{"bug"}, nil)
 	require.NoError(t, err)
 
-	_, _, err = bugLabelChange.ChangeLabels([]string{"bug"}, nil)
+	_, _, err = bugLabelChange.ChangeLabels(t.Context(), []string{"core"}, nil)
 	require.NoError(t, err)
 
-	_, _, err = bugLabelChange.ChangeLabels([]string{"core"}, nil)
+	_, _, err = bugLabelChange.ChangeLabels(t.Context(), nil, []string{"bug"})
 	require.NoError(t, err)
-
-	_, _, err = bugLabelChange.ChangeLabels(nil, []string{"bug"})
-	require.NoError(t, err)
-	require.NoError(t, bugLabelChange.Commit())
+	require.NoError(t, bugLabelChange.Commit(t.Context()))
 
 	// bug with comments editions
-	bugWithCommentEditions, createOp, err := repo.Bugs().New("bug with comments editions", "new bug")
+	bugWithCommentEditions, createOp, err := repo.Bugs().New(t.Context(), "bug with comments editions", "new bug")
 	require.NoError(t, err)
+	require.NoError(t, bugWithCommentEditions.Commit(t.Context()))
 
 	_, err = bugWithCommentEditions.EditComment(
-		entity.CombineIds(bugWithCommentEditions.Id(), createOp.Id()), "first comment edited")
+		t.Context(), entity.CombineIds(bugWithCommentEditions.Id(), createOp.Id()), "first comment edited")
 	require.NoError(t, err)
 
-	commentId, _, err := bugWithCommentEditions.AddComment("first comment")
+	commentId, _, err := bugWithCommentEditions.AddComment(t.Context(), "first comment")
 	require.NoError(t, err)
 
-	_, err = bugWithCommentEditions.EditComment(commentId, "first comment edited")
+	_, err = bugWithCommentEditions.EditComment(t.Context(), commentId, "first comment edited")
 	require.NoError(t, err)
-	require.NoError(t, bugWithCommentEditions.Commit())
+	require.NoError(t, bugWithCommentEditions.Commit(t.Context()))
 
 	// bug status changed
-	bugStatusChanged, _, err := repo.Bugs().New("bug status changed", "new bug")
+	bugStatusChanged, _, err := repo.Bugs().New(t.Context(), "bug status changed", "new bug")
+	require.NoError(t, err)
+	require.NoError(t, bugStatusChanged.Commit(t.Context()))
+
+	_, err = bugStatusChanged.Close(t.Context())
 	require.NoError(t, err)
 
-	_, err = bugStatusChanged.Close()
+	_, err = bugStatusChanged.Open(t.Context())
 	require.NoError(t, err)
-
-	_, err = bugStatusChanged.Open()
-	require.NoError(t, err)
-	require.NoError(t, bugStatusChanged.Commit())
+	require.NoError(t, bugStatusChanged.Commit(t.Context()))
 
 	// bug title changed
-	bugTitleEdited, _, err := repo.Bugs().New("bug title edited", "new bug")
+	bugTitleEdited, _, err := repo.Bugs().New(t.Context(), "bug title edited", "new bug")
 	require.NoError(t, err)
+	require.NoError(t, bugTitleEdited.Commit(t.Context()))
 
-	_, err = bugTitleEdited.SetTitle("bug title edited again")
+	_, err = bugTitleEdited.SetTitle(t.Context(), "bug title edited again")
 	require.NoError(t, err)
-	require.NoError(t, bugTitleEdited.Commit())
+	require.NoError(t, bugTitleEdited.Commit(t.Context()))
 
 	return []*testCase{
 		{
-			name:     "simple bug",
-			bug:      simpleBug,
-			numOp:    1,
-			numOpExp: 2,
-			numOpImp: 1,
+			name: "simple bug",
+			bug:  simpleBug,
 		},
 		{
-			name:     "bug with comments",
-			bug:      bugWithComments,
-			numOp:    2,
-			numOpExp: 4,
-			numOpImp: 2,
+			name: "bug with comments",
+			bug:  bugWithComments,
 		},
 		{
-			name:     "bug label change",
-			bug:      bugLabelChange,
-			numOp:    4,
-			numOpExp: 8,
-			numOpImp: 4,
+			name: "bug label change",
+			bug:  bugLabelChange,
 		},
 		{
-			name:     "bug with comment editions",
-			bug:      bugWithCommentEditions,
-			numOp:    4,
-			numOpExp: 8,
-			numOpImp: 2,
+			name: "bug with comment editions",
+			bug:  bugWithCommentEditions,
 		},
 		{
-			name:     "bug changed status",
-			bug:      bugStatusChanged,
-			numOp:    3,
-			numOpExp: 6,
-			numOpImp: 3,
+			name: "bug changed status",
+			bug:  bugStatusChanged,
 		},
 		{
-			name:     "bug title edited",
-			bug:      bugTitleEdited,
-			numOp:    2,
-			numOpExp: 4,
-			numOpImp: 2,
+			name: "bug title edited",
+			bug:  bugTitleEdited,
 		},
 	}
 }
 
+// syncEngine returns the sync engine of a GitLab project, acting with token.
+func syncEngine(t *testing.T, ctx context.Context, backend *cache.RepoCache, baseURL string, projectID int64, login string, token *auth.Token, foreign bool) *core.Engine {
+	r, err := newRemote(ctx, baseURL, strconv.FormatInt(projectID, 10), login, []*auth.Token{token})
+	require.NoError(t, err)
+	e, err := core.NewEngine(ctx, backend, r, core.SyncOptions{
+		Foreign:      foreign,
+		DefaultLogin: login,
+		LoginKey:     metaKeyGitlabLogin,
+	})
+	require.NoError(t, err)
+	return e
+}
+
+// testBaseURL is the GitLab instance of the end-to-end tests, gitlab.com
+// unless GITLAB_BASE_URL says otherwise.
+func testBaseURL() string {
+	if u := os.Getenv("GITLAB_BASE_URL"); u != "" {
+		return u
+	}
+	return defaultBaseURL
+}
+
 func TestGitlabPushPull(t *testing.T) {
+	ctx := t.Context()
 	// token must have 'repo' and 'delete_repo' scopes
 	envToken := os.Getenv("GITLAB_API_TOKEN")
 	if envToken == "" {
 		t.Skip("Env var GITLAB_API_TOKEN missing")
 	}
+	baseURL := testBaseURL()
 
 	// create repo backend
 	repo := repotest.NewGoGitRepo(t, false)
@@ -157,21 +166,18 @@ func TestGitlabPushPull(t *testing.T) {
 	require.NoError(t, err)
 	defer backend.Close()
 
+	token := auth.NewToken(target, envToken)
+	login, err := getLoginFromToken(ctx, baseURL, token)
+	require.NoError(t, err)
+
 	// set author identity
-	login := "test-identity"
 	author, err := backend.Identities().New("test identity", "test@test.org")
 	require.NoError(t, err)
 	author.SetMetadata(metaKeyGitlabLogin, login)
 	err = author.Commit()
 	require.NoError(t, err)
 
-	err = backend.SetUserIdentity(author)
-	require.NoError(t, err)
-
-	token := auth.NewToken(target, envToken)
-	token.SetMetadata(auth.MetaKeyLogin, login)
-	token.SetMetadata(auth.MetaKeyBaseURL, defaultBaseURL)
-	err = auth.Store(repo, token)
+	err = backend.SetUserIdentity(t.Context(), author)
 	require.NoError(t, err)
 
 	tests := testCases(t, backend)
@@ -185,7 +191,7 @@ func TestGitlabPushPull(t *testing.T) {
 	projectName := generateRepoName()
 
 	// create target Gitlab repository
-	projectID, err := createRepository(ctx, projectName, token)
+	projectID, err := createRepository(ctx, baseURL, projectName, token)
 	require.NoError(t, err)
 
 	fmt.Printf("created project: %s (%d)\n", projectName, projectID)
@@ -195,32 +201,19 @@ func TestGitlabPushPull(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 		defer cancel()
-		if err := deleteRepository(ctx, projectID, token); err != nil {
+		if err := deleteRepository(ctx, baseURL, projectID, token); err != nil {
 			t.Error(err)
 			return
 		}
 		fmt.Printf("deleted repository: %s (%d)\n", projectName, projectID)
 	})
 
-	// initialize exporter
-	exporter := &gitlabExporter{}
-	err = exporter.Init(ctx, backend, core.Configuration{
-		confKeyProjectID:     strconv.FormatInt(projectID, 10),
-		confKeyGitlabBaseUrl: defaultBaseURL,
-		confKeyDefaultLogin:  login,
-	})
-	require.NoError(t, err)
-
 	start := time.Now()
 
-	// export all bugs
-	exportEvents, err := exporter.ExportAll(ctx, backend, time.Time{})
-	require.NoError(t, err)
-
-	for result := range exportEvents {
-		require.NoError(t, result.Err)
+	// export all bugs, as `bridge push` does
+	for result := range syncEngine(t, ctx, backend, baseURL, projectID, login, token, false).Push(ctx) {
+		require.NotEqual(t, core.ExportEventError, result.Event, result.String())
 	}
-	require.NoError(t, err)
 
 	fmt.Printf("repository exported in %f seconds\n", time.Since(start).Seconds())
 
@@ -230,60 +223,45 @@ func TestGitlabPushPull(t *testing.T) {
 	backendTwo, err := cache.NewRepoCacheNoEvents(repoTwo, nil)
 	require.NoError(t, err)
 	defer backendTwo.Close()
-
-	importer := &gitlabImporter{}
-	err = importer.Init(ctx, backend, core.Configuration{
-		confKeyProjectID:     strconv.FormatInt(projectID, 10),
-		confKeyGitlabBaseUrl: defaultBaseURL,
-		confKeyDefaultLogin:  login,
-	})
+	two, err := backendTwo.Identities().New("other identity", "other@test.org")
 	require.NoError(t, err)
+	require.NoError(t, backendTwo.SetUserIdentity(ctx, two))
 
 	// import all exported bugs to the second backend
-	importEvents, err := importer.ImportAll(ctx, backendTwo, time.Time{})
-	require.NoError(t, err)
-
-	for result := range importEvents {
-		require.NoError(t, result.Err)
+	for result := range syncEngine(t, ctx, backendTwo, baseURL, projectID, login, token, false).Pull(ctx, time.Time{}) {
+		require.NotEqual(t, core.ImportEventError, result.Event, result.String())
 	}
 
 	require.Len(t, backendTwo.Bugs().AllIds(), len(tests))
 
+	key := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://"), "/") +
+		"/" + strconv.FormatInt(projectID, 10)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// for each operation a SetMetadataOperation will be added
-			// so number of operations should double
-			require.Len(t, tt.bug.Snapshot().Operations, tt.numOpExp)
-
-			// verify operation have correct metadata
-			for _, op := range tt.bug.Snapshot().Operations {
-				// Check if the originals operations (*not* SetMetadata) are tagged properly
-				if _, ok := op.(dag.OperationDoesntChangeSnapshot); !ok {
-					_, haveIDMetadata := op.GetMetadata(metaKeyGitlabId)
-					require.True(t, haveIDMetadata)
-
-					_, haveURLMetada := op.GetMetadata(metaKeyGitlabUrl)
-					require.True(t, haveURLMetada)
-				}
-			}
+			snap := tt.bug.Snapshot()
 
 			// get bug gitlab ID
-			bugGitlabID, ok := tt.bug.Snapshot().GetCreateMetadata(metaKeyGitlabId)
+			bugGitlabID, ok := snap.GetCreateMetadata("sync:" + key + ":id")
 			require.True(t, ok)
 
 			// retrieve bug from backendTwo
-			importedBug, err := backendTwo.Bugs().ResolveBugCreateMetadata(metaKeyGitlabId, bugGitlabID)
+			importedBug, err := backendTwo.Bugs().ResolveBugCreateMetadata(t.Context(), "sync:"+key+":id", bugGitlabID)
 			require.NoError(t, err)
+			imported := importedBug.Snapshot()
 
-			// verify bug have same number of original operations
-			require.Len(t, importedBug.Snapshot().Operations, tt.numOpImp)
+			// the same issue, from GitLab's point of view
+			require.Equal(t, snap.Title, imported.Title)
+			require.Equal(t, snap.Status, imported.Status)
+			require.ElementsMatch(t, snap.Labels, imported.Labels)
+			require.Len(t, imported.Comments, len(snap.Comments))
+			for i := range snap.Comments {
+				require.Equal(t, snap.Comments[i].Message, imported.Comments[i].Message)
+			}
 
 			// verify bugs are tagged with origin=gitlab
-			issueOrigin, ok := importedBug.Snapshot().GetCreateMetadata(core.MetaKeyOrigin)
+			issueOrigin, ok := imported.GetCreateMetadata(core.MetaKeyOrigin)
 			require.True(t, ok)
 			require.Equal(t, issueOrigin, target)
-
-			// TODO: maybe more tests to ensure bug final state
 		})
 	}
 }
@@ -298,8 +276,8 @@ func generateRepoName() string {
 }
 
 // create repository need a token with scope 'repo'
-func createRepository(ctx context.Context, name string, token *auth.Token) (int64, error) {
-	client, err := buildClient(defaultBaseURL, token)
+func createRepository(ctx context.Context, baseURL, name string, token *auth.Token) (int64, error) {
+	client, err := buildClient(baseURL, token)
 	if err != nil {
 		return 0, err
 	}
@@ -320,8 +298,8 @@ func createRepository(ctx context.Context, name string, token *auth.Token) (int6
 }
 
 // delete repository need a token with scope 'delete_repo'
-func deleteRepository(ctx context.Context, project int64, token *auth.Token) error {
-	client, err := buildClient(defaultBaseURL, token)
+func deleteRepository(ctx context.Context, baseURL string, project int64, token *auth.Token) error {
+	client, err := buildClient(baseURL, token)
 	if err != nil {
 		return err
 	}

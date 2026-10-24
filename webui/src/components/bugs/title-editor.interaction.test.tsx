@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { Suspense } from "react";
 import { describe, it, expect, vi } from "vitest";
 
-import { BugSetTitleDocument, BugDetailDocument } from "@/__generated__/graphql";
+import { BugSetTitleDocument } from "@/__generated__/graphql";
 import { useAuth } from "@/lib/auth";
 
 import { TitleEditor } from "./title-editor";
@@ -19,12 +19,6 @@ vi.mock("@/lib/auth", () => ({
     user: { id: "user-1", humanId: "u1", displayName: "Test User", avatarUrl: null },
   })),
 }));
-
-const REFETCH_MOCK = {
-  request: { query: BugDetailDocument, variables: vi.fn().mockReturnValue(true) },
-  result: { data: { repository: null } },
-  maxUsageCount: 10,
-};
 
 function renderEditor(props: { title?: string; repo?: string | null } = {}) {
   const { title = "Original title", repo = "myrepo" } = props;
@@ -93,7 +87,7 @@ describe("TitleEditor — mutation variables", () => {
     };
 
     render(
-      <MockedProvider mocks={[mock, REFETCH_MOCK]} showWarnings={false}>
+      <MockedProvider mocks={[mock]} showWarnings={false}>
         <Suspense>
           <TitleEditor bugPrefix={PREFIX} title="Old title" humanId="h1" repo={REPO} />
         </Suspense>
@@ -119,7 +113,7 @@ describe("TitleEditor — mutation variables", () => {
     };
 
     render(
-      <MockedProvider mocks={[mock, REFETCH_MOCK]} showWarnings={false}>
+      <MockedProvider mocks={[mock]} showWarnings={false}>
         <Suspense>
           <TitleEditor bugPrefix={PREFIX} title="Old title" humanId="h1" repo={REPO} />
         </Suspense>
@@ -145,7 +139,7 @@ describe("TitleEditor — mutation variables", () => {
     };
 
     render(
-      <MockedProvider mocks={[mock, REFETCH_MOCK]} showWarnings={false}>
+      <MockedProvider mocks={[mock]} showWarnings={false}>
         <Suspense>
           <TitleEditor bugPrefix={PREFIX} title="Old" humanId="h1" repo={null} />
         </Suspense>
@@ -185,5 +179,32 @@ describe("TitleEditor — mutation variables", () => {
     // Give Apollo a tick to fire the mutation if it were going to
     await new Promise((r) => setTimeout(r, 50));
     expect(matchVars).not.toHaveBeenCalled();
+  });
+});
+
+describe("TitleEditor — failures", () => {
+  it("stays in edit mode with the title and shows the error when saving fails", async () => {
+    const mock = {
+      request: { query: BugSetTitleDocument, variables: () => true },
+      error: new Error("network down"),
+    };
+    render(
+      <MockedProvider mocks={[mock]} showWarnings={false}>
+        <Suspense>
+          <TitleEditor bugPrefix="bug1" title="Old title" humanId="h1" repo="myrepo" />
+        </Suspense>
+      </MockedProvider>,
+    );
+
+    fireEvent.click(screen.getByTitle("Edit title"));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "New title" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Failed to save the title: network down")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue("New title");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByTitle("Edit title"));
+    expect(screen.queryByText(/Failed to save the title/)).toBeNull();
   });
 });

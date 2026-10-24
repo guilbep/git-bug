@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
@@ -43,15 +44,15 @@ func NewRepoCacheBug(repo repository.Repo,
 	}
 
 	actions := Actions[*sharedBug]{
-		ReadWithResolver: func(repo repository.Repo, resolvers entity.Resolvers, id entity.Id) (*sharedBug, error) {
-			b, err := bug.ReadWithResolver(repo, resolvers, id)
+		ReadWithResolver: func(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers, id entity.Id) (*sharedBug, error) {
+			b, err := bug.ReadWithResolver(ctx, repo, resolvers, id)
 			if err != nil {
 				return nil, err
 			}
 			return newSharedBug(b), nil
 		},
-		Refresh: func(repo repository.Repo, resolvers entity.Resolvers, shared *sharedBug) (*sharedBug, error) {
-			return shared, shared.Repair(repo, resolvers)
+		Refresh: func(ctx context.Context, repo repository.Repo, resolvers entity.Resolvers, shared *sharedBug) (*sharedBug, error) {
+			return shared, shared.Repair(ctx, repo, resolvers)
 		},
 		Remove:       bug.Remove,
 		RemoveAll:    bug.RemoveAll,
@@ -72,8 +73,8 @@ func NewRepoCacheBug(repo repository.Repo,
 // ResolveBugCreateMetadata retrieve a bug that has the exact given metadata on
 // its Create operation, that is, the first operation. It fails if multiple bugs
 // match.
-func (c *RepoCacheBug) ResolveBugCreateMetadata(key string, value string) (*BugCache, error) {
-	return c.ResolveMatcher(func(excerpt *BugExcerpt) bool {
+func (c *RepoCacheBug) ResolveBugCreateMetadata(ctx context.Context, key string, value string) (*BugCache, error) {
+	return c.ResolveMatcher(ctx, func(excerpt *BugExcerpt) bool {
 		return excerpt.CreateMetadata[key] == value
 	})
 }
@@ -81,7 +82,7 @@ func (c *RepoCacheBug) ResolveBugCreateMetadata(key string, value string) (*BugC
 // ResolveComment search for a Bug/Comment combination matching the merged
 // bug/comment Id prefix. Returns the Bug containing the Comment and the Comment's
 // Id.
-func (c *RepoCacheBug) ResolveComment(prefix string) (*BugCache, entity.CombinedId, error) {
+func (c *RepoCacheBug) ResolveComment(ctx context.Context, prefix string) (*BugCache, entity.CombinedId, error) {
 	bugPrefix, _ := entity.SeparateIds(prefix)
 	bugCandidate := make([]entity.Id, 0, 5)
 
@@ -102,7 +103,7 @@ func (c *RepoCacheBug) ResolveComment(prefix string) (*BugCache, entity.Combined
 	// searching every bug candidate allow for some collision with the bug prefix only,
 	// before being refined with the full comment prefix
 	for _, bugId := range bugCandidate {
-		b, err := c.Resolve(bugId)
+		b, err := c.Resolve(ctx, bugId)
 		if err != nil {
 			return nil, entity.UnsetCombinedId, err
 		}
@@ -126,7 +127,7 @@ func (c *RepoCacheBug) ResolveComment(prefix string) (*BugCache, entity.Combined
 }
 
 // Query return the id of all Bug matching the given Query
-func (c *RepoCacheBug) Query(q *query.Query) ([]entity.Id, error) {
+func (c *RepoCacheBug) Query(ctx context.Context, q *query.Query) ([]entity.Id, error) {
 	c.muMaps.RLock()
 	defer c.muMaps.RUnlock()
 
@@ -142,12 +143,12 @@ func (c *RepoCacheBug) Query(q *query.Query) ([]entity.Id, error) {
 	if q.Search != nil {
 		foundBySearch = map[entity.Id]*BugExcerpt{}
 
-		index, err := c.repo.GetIndex("bugs")
+		index, err := c.repo.GetIndex(c.namespace, c.version)
 		if err != nil {
 			return nil, err
 		}
 
-		res, err := index.Search(q.Search)
+		res, err := index.Search(ctx, q.Search)
 		if err != nil {
 			return nil, err
 		}
@@ -164,7 +165,7 @@ func (c *RepoCacheBug) Query(q *query.Query) ([]entity.Id, error) {
 	}
 
 	for _, excerpt := range foundBySearch {
-		if matcher.Match(excerpt, c.resolvers()) {
+		if matcher.Match(ctx, excerpt, c.resolvers()) {
 			filtered = append(filtered, excerpt)
 		}
 	}
@@ -236,15 +237,17 @@ func (c *RepoCacheBug) ValidLabels() []common.Label {
 }
 
 // New create a new bug
-// The new bug is written in the repository (commit)
-func (c *RepoCacheBug) New(title string, message string) (*BugCache, *bug.CreateOperation, error) {
-	return c.NewWithFiles(title, message, nil)
+// The creation is staged, like any operation: Commit writes the new bug in the
+// repository.
+func (c *RepoCacheBug) New(ctx context.Context, title string, message string) (*BugCache, *bug.CreateOperation, error) {
+	return c.NewWithFiles(ctx, title, message, nil)
 }
 
 // NewWithFiles create a new bug with attached files for the message
-// The new bug is written in the repository (commit)
-func (c *RepoCacheBug) NewWithFiles(title string, message string, files []repository.Hash) (*BugCache, *bug.CreateOperation, error) {
-	author, err := c.getUserIdentity()
+// The creation is staged, like any operation: Commit writes the new bug in the
+// repository.
+func (c *RepoCacheBug) NewWithFiles(ctx context.Context, title string, message string, files []repository.Hash) (*BugCache, *bug.CreateOperation, error) {
+	author, err := c.getUserIdentity(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -254,22 +257,18 @@ func (c *RepoCacheBug) NewWithFiles(title string, message string, files []reposi
 
 // NewRaw create a new bug with attached files for the message, as
 // well as metadata for the Create operation.
-// The new bug is written in the repository (commit)
+// The creation is staged, like any operation: Commit writes the new bug in the
+// repository. Until then, the bug is only known to the returned view.
 func (c *RepoCacheBug) NewRaw(author identity.Interface, unixTime int64, title string, message string, files []repository.Hash, metadata map[string]string) (*BugCache, *bug.CreateOperation, error) {
-	b, op, err := bug.Create(author, unixTime, title, message, files, metadata)
-	if err != nil {
+	op := bug.NewCreateOp(author, unixTime, title, message, files)
+	for key, val := range metadata {
+		op.SetMetadata(key, val)
+	}
+	if err := op.Validate(); err != nil {
 		return nil, nil, err
 	}
 
-	err = b.Commit(c.repo)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cached, err := c.add(newSharedBug(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
+	cached := c.newView(newSharedBug(bug.NewBug()))
+	cached.Append(op)
 	return cached, op, nil
 }

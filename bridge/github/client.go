@@ -87,13 +87,17 @@ func (c *rateLimitHandlerClient) queryPrintMsgs(ctx context.Context, query inter
 	return c.callAPIAndRetry(ctx, queryFun, callback)
 }
 
+// retryDelay is how long to wait before retrying after a first failure,
+// then twice and three times that.
+var retryDelay = 8 * time.Second
+
 // callAPIAndRetry calls the Github GraphQL API (indirectly through callAPIDealWithLimit) and in
 // case of error it repeats the request to the Github API. The parameter `apiCall` is intended to be
 // a closure containing a query or a mutation to the Github GraphQL API.
 func (c *rateLimitHandlerClient) callAPIAndRetry(ctx context.Context, apiCall func(context.Context) error, rateLimitEvent func(msg string)) error {
 	var err error
-	if err = c.callAPIDealWithLimit(ctx, apiCall, rateLimitEvent); err == nil {
-		return nil
+	if err = c.callAPIDealWithLimit(ctx, apiCall, rateLimitEvent); err == nil || isResourceLimit(err) {
+		return err
 	}
 	// failure; the reason may be temporary network problems or internal errors
 	// on the github servers. Internal errors on the github servers are quite common.
@@ -101,7 +105,7 @@ func (c *rateLimitHandlerClient) callAPIAndRetry(ctx context.Context, apiCall fu
 	retries := 3
 	for i := 0; i < retries; i++ {
 		// wait a few seconds before retry
-		sleepTime := time.Duration(8*(i+1)) * time.Second
+		sleepTime := time.Duration(i+1) * retryDelay
 		timer := time.NewTimer(sleepTime)
 		select {
 		case <-ctx.Done():
@@ -175,6 +179,12 @@ func (c *rateLimitHandlerClient) callAPIDealWithLimit(ctx context.Context, apiCa
 	} else {
 		return err
 	}
+}
+
+// isResourceLimit tells a query GitHub found too costly to compute, which
+// fails the same way when retried as it is.
+func isResourceLimit(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Resource limits for this query exceeded")
 }
 
 func stop(t *time.Timer) {

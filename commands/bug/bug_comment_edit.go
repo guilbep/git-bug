@@ -42,7 +42,7 @@ func newBugCommentEditCommand(env *execenv.Env) *cobra.Command {
 }
 
 func runBugCommentEdit(env *execenv.Env, opts bugCommentEditOptions, args []string) error {
-	b, commentId, err := env.Backend.Bugs().ResolveComment(args[0])
+	b, commentId, err := env.Backend.Bugs().ResolveComment(env.Ctx, args[0])
 	if err != nil {
 		return err
 	}
@@ -73,10 +73,10 @@ func runBugCommentEdit(env *execenv.Env, opts bugCommentEditOptions, args []stri
 		}
 	}
 
-	_, err = b.EditComment(commentId, opts.message)
+	_, err = b.EditComment(env.Ctx, commentId, opts.message)
 	if err != nil {
 		return err
 	}
 
-	return b.Commit()
+	return b.Commit(env.Ctx)
 }

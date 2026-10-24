@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -54,8 +55,23 @@ type CachedEntityBase[SnapT cloneable[SnapT], OpT dag.OperationWithApply[SnapT]]
 	base repository.Hash
 }
 
+// Id returns the id of the entity, the one of its first operation, which for a
+// new entity is still staged.
 func (e *CachedEntityBase[SnapT, OpT]) Id() entity.Id {
-	return e.shared.Id()
+	if id := e.shared.Id(); id != entity.UnsetId {
+		return id
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// a commit may have landed meanwhile: under the lock, the first operation
+	// is either still staged or committed
+	if id := e.shared.Id(); id != entity.UnsetId {
+		return id
+	}
+	if len(e.staged) == 0 {
+		return entity.UnsetId
+	}
+	return e.staged[0].Id()
 }
 
 // Snapshot returns the state of the entity, staged operations included, see Compile.
@@ -132,18 +148,18 @@ func (e *CachedEntityBase[SnapT, OpT]) ResolveOperationWithMetadata(key string, 
 // the operations written again on top of what moved it: operations commute, so a
 // write that raced with another writer only has to be redone, never reconciled.
 // On failure, the operations stay staged and Commit can be called again.
-func (e *CachedEntityBase[SnapT, OpT]) Commit() error {
-	return e.commit(true)
+func (e *CachedEntityBase[SnapT, OpT]) Commit(ctx context.Context) error {
+	return e.commit(ctx, true)
 }
 
 // CommitAsNeeded execute a Commit only if necessary. This function is useful to
 // avoid getting an error if the view has nothing staged.
-func (e *CachedEntityBase[SnapT, OpT]) CommitAsNeeded() error {
-	return e.commit(false)
+func (e *CachedEntityBase[SnapT, OpT]) CommitAsNeeded(ctx context.Context) error {
+	return e.commit(ctx, false)
 }
 
 // commit is Commit, with nothing staged being an error only if required.
-func (e *CachedEntityBase[SnapT, OpT]) commit(required bool) error {
+func (e *CachedEntityBase[SnapT, OpT]) commit(ctx context.Context, required bool) error {
 	e.mu.Lock()
 	if len(e.staged) == 0 {
 		e.mu.Unlock()
@@ -152,7 +168,7 @@ func (e *CachedEntityBase[SnapT, OpT]) commit(required bool) error {
 		}
 		return nil
 	}
-	err := e.commitLocked()
+	err := e.commitLocked(ctx)
 	e.mu.Unlock()
 	if err != nil {
 		return err
@@ -160,7 +176,7 @@ func (e *CachedEntityBase[SnapT, OpT]) commit(required bool) error {
 	return e.onCommit()
 }
 
-func (e *CachedEntityBase[SnapT, OpT]) commitLocked() error {
+func (e *CachedEntityBase[SnapT, OpT]) commitLocked(ctx context.Context) error {
 	for attempt := 0; ; attempt++ {
 		err := e.shared.CommitOperations(e.repo, e.staged)
 		if err == nil {
@@ -170,7 +186,7 @@ func (e *CachedEntityBase[SnapT, OpT]) commitLocked() error {
 		if !errors.Is(err, repository.ErrRefChanged) || attempt == maxCommitRetries {
 			return err
 		}
-		err = e.shared.Repair(e.repo, e.resolvers())
+		err = e.shared.Repair(ctx, e.repo, e.resolvers())
 		if err != nil {
 			return err
 		}

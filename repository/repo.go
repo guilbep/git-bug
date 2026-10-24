@@ -2,6 +2,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"io"
 	"time"
@@ -31,6 +32,7 @@ type Repo interface {
 	RepoStorage
 	RepoIndex
 	RepoData
+	RepoRemote
 	RepoBrowse
 	RepoClock
 
@@ -80,47 +82,64 @@ type RepoStorage interface {
 	LocalStorage() LocalStorage
 }
 
-// RepoIndex gives access to full-text search indexes
+// RepoIndex gives access to the indexes of the entities, one per namespace.
+// They can be shared by several processes.
 type RepoIndex interface {
-	GetIndex(name string) (Index, error)
+	// GetIndex returns the index of a namespace, whose documents have the format
+	// of the given version. Each version of a namespace has its own documents,
+	// for processes of different versions to never read those of each other.
+	GetIndex(namespace string, version uint) (Index, error)
 
-	// Close closes every index opened by GetIndex.
+	// Close releases the indexes opened by GetIndex.
 	Close() error
 }
 
-// Index is a full-text search index. Each document records the commit it was
-// built from, so that the index can tell what it is up to date with.
+// Index stores the excerpts of entities, and searches their texts. Each
+// document records the commit it was built from, so that the index can tell
+// what it is up to date with.
 type Index interface {
 	// NewBatch starts a batch of changes, applied as a whole by its Apply.
 	NewBatch() IndexBatch
 
-	// BuiltFrom returns, for each document, the commit it was built from.
-	BuiltFrom() (map[string]Hash, error)
+	// AllBuiltFrom returns, for each document, the commit it was built from.
+	AllBuiltFrom(ctx context.Context) (map[string]Hash, error)
 
-	// Search returns the list of IDs matching the given terms.
-	Search(terms []string) (ids []string, err error)
+	// BuiltFrom returns the commit a document was built from, or ErrNotFound.
+	BuiltFrom(ctx context.Context, id string) (Hash, error)
 
-	// Clear empty the index.
-	Clear() error
+	// Excerpt returns the excerpt of a document, see IndexBatch.Set, and the
+	// commit it was built from, or ErrNotFound.
+	Excerpt(ctx context.Context, id string) (Hash, []byte, error)
 
-	// Close closes the index and make sure everything is safely written. After this call
-	// the index can't be used anymore.
-	Close() error
+	// Excerpts returns the excerpt of every document, and the commit each was
+	// built from.
+	Excerpts(ctx context.Context) (map[string]Hash, map[string][]byte, error)
+
+	// Search returns the ids of the documents having any of the phrases in one
+	// of their texts. A phrase is a sequence of words, matched in that order
+	// regardless of case and inflection: "crash on login" matches "Crashes on
+	// login". A single word is a phrase of one word.
+	Search(ctx context.Context, phrases []string) ([]string, error)
 }
 
 // IndexBatch is a set of changes to an Index. Nothing is visible until Apply,
-// which applies every change, documents and the commits they were built from,
-// or none of them.
+// which applies every change or none of them.
 type IndexBatch interface {
-	// Set indexes the document of an ID, built from the given commit, replacing
-	// any previous version.
-	Set(id string, texts []string, commit Hash) error
+	// Set stores the document of an entity, built from the given commit,
+	// replacing any previous version:
+	//   - excerpt is the excerpt of the entity, a JSON object, returned by
+	//     Index.Excerpt with the same content, not necessarily the same bytes.
+	//     Anything else fails Apply;
+	//   - texts are what the document is found by in Search, such as a title
+	//     and comments. They are searched separately: a phrase never spans two
+	//     of them.
+	Set(id string, commit Hash, excerpt []byte, texts []string) error
 
 	// Remove deletes the document of an ID, if any.
 	Remove(id string)
 
 	// Apply applies the batch. A batch can't be used anymore afterward.
-	Apply() error
+	Apply(ctx context.Context) error
 }
 
 type Commit struct {
@@ -131,17 +150,21 @@ type Commit struct {
 	Signature  io.Reader // if signed, reader for the (non-armored) signature
 }
 
-// RepoData give access to the git data storage
-type RepoData interface {
+// RepoRemote gives access to the network operations on a git remote, the
+// only ones of a repository. They stop when ctx is done.
+type RepoRemote interface {
 	// FetchRefs retrieves the refs of the given namespaces (and the data they
 	// point to) from a remote, and stores them as that remote's tracking refs.
 	// Local refs are left untouched.
-	FetchRefs(remote string, namespaces ...string) (string, error)
+	FetchRefs(ctx context.Context, remote string, namespaces ...string) (string, error)
 
 	// PushRefs sends the local refs of the given namespaces (and the data they
 	// point to) to a remote, and updates that remote's tracking refs to match.
-	PushRefs(remote string, namespaces ...string) (string, error)
+	PushRefs(ctx context.Context, remote string, namespaces ...string) (string, error)
+}
 
+// RepoData give access to the git data storage
+type RepoData interface {
 	// StoreData will store arbitrary data and return the corresponding hash
 	StoreData(data []byte) (Hash, error)
 
@@ -203,7 +226,7 @@ type RepoData interface {
 
 	// ListCommits returns the hashes of commit and all its ancestors, in
 	// chronological order.
-	ListCommits(commit Hash) ([]Hash, error)
+	ListCommits(ctx context.Context, commit Hash) ([]Hash, error)
 }
 
 // RepoClock give access to Lamport clocks
@@ -237,49 +260,49 @@ type RepoBrowse interface {
 	// Branches returns all local branches (refs/heads/*).
 	// All other ref namespaces — including git-bug's internal refs
 	// (refs/bugs/, refs/identities/, …) — are excluded.
-	Branches() ([]BranchInfo, error)
+	Branches(ctx context.Context) ([]BranchInfo, error)
 
 	// Tags returns all tags (refs/tags/*).
 	// All other ref namespaces are excluded.
-	Tags() ([]TagInfo, error)
+	Tags(ctx context.Context) ([]TagInfo, error)
 
 	// TreeAtPath returns the entries of the directory at path under rev.
 	// An empty path returns the root tree.
 	// Returns ErrNotFound if rev or path does not exist, or if path
 	// resolves to a blob rather than a tree.
 	// Symlinks appear as entries with ObjectType Symlink; they are not followed.
-	TreeAtPath(rev, path string) ([]TreeEntry, error)
+	TreeAtPath(ctx context.Context, rev, path string) ([]TreeEntry, error)
 
 	// BlobAtPath returns the raw content, byte size, and git object hash of
 	// the file at path under rev. Returns ErrNotFound if rev or path does
 	// not exist, or if path resolves to a tree. Symlinks are not followed.
 	// The caller must close the reader.
-	BlobAtPath(rev, path string) (io.ReadCloser, int64, Hash, error)
+	BlobAtPath(ctx context.Context, rev, path string) (io.ReadCloser, int64, Hash, error)
 
 	// CommitLog returns at most limit commits reachable from rev, filtered
 	// to those touching path (empty = unrestricted). after is an exclusive
 	// cursor; pass Hash("") for no cursor. since and until bound the author
 	// date (inclusive); pass nil for no bound. Merge commits appear once,
 	// compared against the first parent only.
-	CommitLog(rev, path string, limit int, after Hash, since, until *time.Time) ([]CommitMeta, error)
+	CommitLog(ctx context.Context, rev, path string, limit int, after Hash, since, until *time.Time) ([]CommitMeta, error)
 
 	// LastCommitForEntries returns the most recent commit that touched each
 	// name in the directory at path under rev. Entries not resolved within
 	// the implementation's depth limit are silently absent from the result.
-	LastCommitForEntries(rev, path string, names []string) (map[string]CommitMeta, error)
+	LastCommitForEntries(ctx context.Context, rev, path string, names []string) (map[string]CommitMeta, error)
 
 	// CommitDetail returns the full metadata and changed-file list for a
 	// single commit identified by its hash. Diffs against the first parent
 	// only; the initial commit is diffed against the empty tree.
-	CommitDetail(hash Hash) (CommitDetail, error)
+	CommitDetail(ctx context.Context, hash Hash) (CommitDetail, error)
 
 	// CommitFileDiff returns the unified diff for a single file in a commit
 	// identified by its hash. Diffs against the first parent only; the
 	// initial commit is diffed against the empty tree.
-	CommitFileDiff(hash Hash, filePath string) (FileDiff, error)
+	CommitFileDiff(ctx context.Context, hash Hash, filePath string) (FileDiff, error)
 
 	// Head returns the commit that HEAD currently points to.
 	// Returns ErrNotFound if HEAD cannot be resolved to a commit, including
 	// for an empty (unborn) repository.
-	Head() (RefMeta, error)
+	Head(ctx context.Context) (RefMeta, error)
 }

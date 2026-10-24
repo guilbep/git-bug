@@ -49,6 +49,7 @@ every layer.
 | `git-bug.remote`           | local, then global |
 | `git-bug.webui.open`       | local, then global |
 | `git-bug.changes.notifier` | local, then global |
+| `git-bug.git-transport`    | local, then global |
 | `git-bug.identity`         | local only         |
 | `git-bug.bridge.*`         | local only         |
 
@@ -90,6 +91,28 @@ once a minute, so a wrong choice only delays the update, it never leaves
 anything stale. Other commands don't need any of this: they check the
 repository when they start.
 
+### Talking to remotes<a name="talking-to-remotes"></a>
+
+[`git bug pull`][doc/cli/pull] and [`git bug push`][doc/cli/push], and the
+termui's pull and push, talk to the remote in one of two ways, chosen by
+`git-bug.git-transport`:
+
+| Value    | Behavior                                                                                                                                                                                                         |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `go-git` | The default: through the [go-git][go-git] library, inside `git-bug`. It works for most setups, but doesn't implement the whole of git's configuration, see the note [below](#git-options-read-by-git-bug).        |
+| `git`    | By running the `git` binary found on your `PATH`, with your git and SSH configuration. `git-bug` fails to start if there is none.                                                                                  |
+
+With `git`, neither git nor SSH ever asks you anything: a password, a key's
+passphrase, or whether to trust a host SSH doesn't know yet fails the pull or
+push instead, as with `go-git`. Credentials must come from an SSH agent, a key
+without a passphrase, or a credential helper. If you set your own SSH command
+(`core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH`), it is used as is. Only a
+remote configured with `git remote add` can be used, never a URL.
+
+> [!WARNING]
+> If you set your own SSH command, make sure it doesn't prompt or otherwise
+> interact with the terminal.
+
 ## Identity<a name="identity"></a>
 
 | Key                | Type      | Description                                        |
@@ -117,10 +140,64 @@ Every bridge has:
 
 | Key                                    | Type      | Description                                                            |
 |----------------------------------------|-----------|------------------------------------------------------------------------|
-| `git-bug.bridge.<name>.target`         | string    | The bridge implementation: `github`, `gitlab`, `jira` or `launchpad`.  |
+| `git-bug.bridge.<name>.target`         | string    | The bridge: `gitea`, `github`, `gitlab`, `jira` or `launchpad`.        |
 | `git-bug.bridge.<name>.lastImportTime` | timestamp | Bookkeeping for incremental imports. Written by `git bug bridge pull`. |
+| `git-bug.bridge.<name>.lastSyncTime`   | timestamp | Bookkeeping for incremental syncs. Written by `git bug bridge sync`.   |
+| `git-bug.bridge.<name>.sync`           | bool      | Set by `bridge new --sync` or by hand, for Gitea, GitHub and GitLab. See [Syncing](#syncing). |
+| `git-bug.bridge.<name>.login-<id>`     | string    | Set by hand: the login of identity `<id>` on the forge. See [Syncing](#syncing). |
+
+### Syncing<a name="syncing"></a>
+
+By default, pushing to a forge skips issues imported from another one, and
+anything written by someone without a token there. With `sync`, a bridge
+mirrors everything, both ways, whichever forge it comes from:
+
+```bash
+git config git-bug.bridge.<name>.sync true   # or bridge new --sync
+git bug bridge sync --dry-run
+git bug bridge sync
+```
+
+`git bug bridge sync` pulls every bridge with `sync` enabled, then pushes to
+each of them. What was written by someone without a token on a forge is
+posted there with the bridge's `default-login` token (preferably a bot
+account), under a header naming its author, with a link to where it was
+written. Mentions in text from another forge are defused, and issue
+references translated. Run it from one place only, such as a CI job:
+`git bug pull && git bug bridge sync && git bug push`. Everyone running
+bridges on a synced repository needs a version with `bridge sync`: older ones
+don't recognize what it records, and import synced issues again.
+
+Nothing private is published: confidential GitLab issues aren't synced, and a
+bridge to a public project refuses to sync while another `sync` bridge isn't
+public, unless it has `publish-private` set to `true`.
+
+Each forge account is a git-bug identity, so the same person on two forges is
+two identities, except token owners, whose identity `bridge new` and
+`bridge auth add-token` tag with their logins. To make someone one identity,
+link their login on each bridge to it:
+
+```bash
+git config git-bug.bridge.github.login-22ea975 alice
+git config git-bug.bridge.gitlab.login-22ea975 alice-epfl
+```
+
+What they write on either forge is then authored by that identity, and posted
+as them wherever they have a token, so check the logins. What was pulled
+before the link keeps its author, and `git config --unset` removes a link.
 
 The remaining keys depend on the target.
+
+#### Gitea<a name="gitea"></a>
+
+For Gitea and Forgejo.
+
+| Key             | Description                                                 |
+| --------------- | ----------------------------------------------------------- |
+| `base-url`      | The instance URL.                                           |
+| `owner`         | The user or organisation owning the repository.             |
+| `project`       | The repository name.                                        |
+| `default-login` | The Gitea login used when no credential matches explicitly. |
 
 #### GitHub<a name="github"></a>
 
@@ -132,11 +209,11 @@ The remaining keys depend on the target.
 
 #### GitLab<a name="gitlab"></a>
 
-| Key             | Description                                                                 |
-| --------------- | --------------------------------------------------------------------------- |
-| `project-id`    | The numeric GitLab project id.                                              |
-| `base-url`      | The GitLab instance URL, for self-hosted instances.                         |
-| `default-login` | The GitLab login used when no credential matches explicitly.                |
+| Key             | Description                                                  |
+| --------------- | ------------------------------------------------------------ |
+| `project-id`    | The numeric GitLab project id.                               |
+| `base-url`      | The GitLab instance URL, for self-hosted instances.          |
+| `default-login` | The GitLab login used when no credential matches explicitly. |
 
 #### Jira<a name="jira"></a>
 
@@ -180,14 +257,14 @@ then `VISUAL`, then `EDITOR`, then the first of `editor`, `nano`, `vim`, `vi`
 and `emacs` found on your `PATH`, and finally `ed`.
 
 > [!NOTE]
-> `git-bug` talks to remotes through the [go-git][go-git] library rather than by
-> running the `git` binary, and go-git does not implement the whole of git's
-> configuration. In particular, parts of your SSH setup (`~/.ssh/config`
-> options such as `Port`, some `known_hosts` formats), http credential helpers,
-> and `remote.<name>.pushurl` may not be honoured by `git bug pull` and
-> `git bug push`. Because `git-bug` stores its data as ordinary git objects, you
-> can always move them with plain `git` as a workaround -- see
-> [discussion #1332][discuss/1332].
+> By default, `git-bug` talks to remotes through the [go-git][go-git] library
+> rather than by running the `git` binary. go-git does not implement the whole
+> of git's configuration: in particular, parts of your SSH setup
+> (`~/.ssh/config` options such as `Port`, some `known_hosts` formats), http
+> credential helpers, and `remote.<name>.pushurl` may not be honoured by
+> `git bug pull` and `git bug push`. Setting `git-bug.git-transport` to `git`
+> runs the `git` binary instead, see
+> [Talking to remotes](#talking-to-remotes).
 
 ## Related reading<a name="related-reading"></a>
 
@@ -196,7 +273,6 @@ and `emacs` found on your `PATH`, and finally `ed`.
 - [Understanding the workflow models][docs/usage/workflows]
 - :house: [Documentation home][docs/home]
 
-[discuss/1332]: https://github.com/git-bug/git-bug/discussions/1332
 [doc/cli/bridge]: ../md/git-bug_bridge_new.md
 [doc/cli/bridge-auth]: ../md/git-bug_bridge_auth.md
 [doc/cli/pull]: ../md/git-bug_pull.md

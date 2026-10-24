@@ -43,7 +43,7 @@ func newBugCommentNewCommand(env *execenv.Env) *cobra.Command {
 }
 
 func runBugCommentNew(env *execenv.Env, opts bugCommentNewOptions, args []string) error {
-	b, _, err := ResolveSelected(env.Backend, args)
+	b, _, err := ResolveSelected(env.Ctx, env.Backend, args)
 	if err != nil {
 		return err
 	}
@@ -70,10 +70,10 @@ func runBugCommentNew(env *execenv.Env, opts bugCommentNewOptions, args []string
 		}
 	}
 
-	_, _, err = b.AddComment(text.Cleanup(opts.message))
+	_, _, err = b.AddComment(env.Ctx, text.Cleanup(opts.message))
 	if err != nil {
 		return err
 	}
 
-	return b.Commit()
+	return b.Commit(env.Ctx)
 }

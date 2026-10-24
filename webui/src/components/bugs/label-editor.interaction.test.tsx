@@ -2,11 +2,12 @@ import type { MockedResponse } from "@apollo/client/testing";
 import { MockedProvider } from "@apollo/client/testing/react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { Suspense } from "react";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
 
 import type { FragmentType } from "@/__generated__/fragment-masking";
-import { BugChangeLabelsDocument, BugDetailDocument } from "@/__generated__/graphql";
+import { BugChangeLabelsDocument } from "@/__generated__/graphql";
 import type { LABEL_FIELDS_FRAGMENT } from "@/components/shared/label-badge";
+import { toastManager } from "@/components/ui/toast";
 import { useAuth } from "@/lib/auth";
 
 import { LabelEditor } from "./label-editor";
@@ -22,12 +23,6 @@ vi.mock("@/lib/auth", () => ({
     user: { id: "user-1", humanId: "u1", displayName: "Test User", avatarUrl: null },
   })),
 }));
-
-const REFETCH_MOCK = {
-  request: { query: BugDetailDocument, variables: vi.fn().mockReturnValue(true) },
-  result: { data: { repository: null } },
-  maxUsageCount: 10,
-};
 
 // useFragment is a passthrough so plain objects work as fragment types.
 type LabelData = { name: string; color: { R: number; G: number; B: number } } & FragmentType<
@@ -109,20 +104,29 @@ describe("LabelEditor — popover", () => {
   });
 });
 
-describe("LabelEditor — mutation variables", () => {
+describe("LabelEditor — applying labels", () => {
   const PREFIX = "bug1";
   const REPO = "myrepo";
 
-  it("adds a label — passes prefix, repoRef, added, and empty Removed", async () => {
+  function mockChangeLabels() {
     const matchVars = vi.fn().mockReturnValue(true);
     const mock = {
       request: { query: BugChangeLabelsDocument, variables: matchVars },
       result: { data: { bugChangeLabels: { bug: { id: "1", labels: [] } } } },
     };
+    return { matchVars, mock };
+  }
 
-    renderEditor({ currentLabels: [], mocks: [mock, REFETCH_MOCK] });
+  const toggle = (name: string) => fireEvent.click(screen.getByRole("option", { name }));
+  const closePopover = () => fireEvent.keyDown(document.body, { key: "Escape" });
+
+  it("adds a label on close — passes prefix, repoRef, added, and empty Removed", async () => {
+    const { matchVars, mock } = mockChangeLabels();
+    renderEditor({ currentLabels: [], mocks: [mock] });
     openPopover();
-    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    toggle("bug");
+    expect(matchVars).not.toHaveBeenCalled();
+    closePopover();
 
     await waitFor(() => expect(matchVars).toHaveBeenCalled());
     expect(matchVars).toHaveBeenCalledWith({
@@ -130,16 +134,12 @@ describe("LabelEditor — mutation variables", () => {
     });
   });
 
-  it("removes a label — passes prefix, repoRef, empty added, and Removed", async () => {
-    const matchVars = vi.fn().mockReturnValue(true);
-    const mock = {
-      request: { query: BugChangeLabelsDocument, variables: matchVars },
-      result: { data: { bugChangeLabels: { bug: { id: "1", labels: [] } } } },
-    };
-
-    renderEditor({ currentLabels: [LABEL_BUG], mocks: [mock, REFETCH_MOCK] });
+  it("removes a label on close — passes prefix, repoRef, empty added, and Removed", async () => {
+    const { matchVars, mock } = mockChangeLabels();
+    renderEditor({ currentLabels: [LABEL_BUG], mocks: [mock] });
     openPopover();
-    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    toggle("bug");
+    closePopover();
 
     await waitFor(() => expect(matchVars).toHaveBeenCalled());
     expect(matchVars).toHaveBeenCalledWith({
@@ -147,20 +147,134 @@ describe("LabelEditor — mutation variables", () => {
     });
   });
 
-  it("works with null repoRef (default repo)", async () => {
-    const matchVars = vi.fn().mockReturnValue(true);
-    const mock = {
-      request: { query: BugChangeLabelsDocument, variables: matchVars },
-      result: { data: { bugChangeLabels: { bug: { id: "1", labels: [] } } } },
-    };
-
-    renderEditor({ currentLabels: [], repo: null, mocks: [mock, REFETCH_MOCK] });
+  it("applies all the toggled labels in a single mutation", async () => {
+    const { matchVars, mock } = mockChangeLabels();
+    renderEditor({ currentLabels: [LABEL_BUG], mocks: [mock] });
     openPopover();
-    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    toggle("bug");
+    toggle("urgent");
+    closePopover();
+
+    await waitFor(() => expect(matchVars).toHaveBeenCalled());
+    expect(matchVars).toHaveBeenCalledTimes(1);
+    expect(matchVars).toHaveBeenCalledWith({
+      input: { prefix: PREFIX, repoRef: REPO, added: ["urgent"], Removed: ["bug"] },
+    });
+  });
+
+  it("applies nothing when a label is toggled back", async () => {
+    const { matchVars, mock } = mockChangeLabels();
+    renderEditor({ currentLabels: [], mocks: [mock] });
+    openPopover();
+    toggle("bug");
+    toggle("bug");
+    closePopover();
+
+    await waitFor(() => expect(screen.queryByText("Apply labels")).toBeNull());
+    expect(matchVars).not.toHaveBeenCalled();
+  });
+
+  it("applies the labels when clicking outside", async () => {
+    const { matchVars, mock } = mockChangeLabels();
+    renderEditor({ currentLabels: [], mocks: [mock] });
+    openPopover();
+    toggle("bug");
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(document.body);
+
+    await waitFor(() => expect(matchVars).toHaveBeenCalled());
+  });
+
+  it("shows the toggled labels as selected before applying them", () => {
+    renderEditor({ currentLabels: [] });
+    openPopover();
+    toggle("bug");
+    expect(screen.getByRole("option", { name: "bug" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("works with null repoRef (default repo)", async () => {
+    const { matchVars, mock } = mockChangeLabels();
+    renderEditor({ currentLabels: [], repo: null, mocks: [mock] });
+    openPopover();
+    toggle("bug");
+    closePopover();
 
     await waitFor(() => expect(matchVars).toHaveBeenCalled());
     expect(matchVars).toHaveBeenCalledWith({
       input: { prefix: "bug1", repoRef: null, added: ["bug"], Removed: [] },
     });
+  });
+});
+
+describe("LabelEditor — failed save", () => {
+  it("restores the choices and reports the error", async () => {
+    const addToast = vi.spyOn(toastManager, "add");
+    onTestFinished(() => addToast.mockRestore());
+    const mock = {
+      request: { query: BugChangeLabelsDocument, variables: () => true },
+      error: new Error("network down"),
+    };
+    renderEditor({ currentLabels: [], mocks: [mock] });
+    openPopover();
+    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(addToast).toHaveBeenCalledWith({
+        title: "Failed to save the labels",
+        description: "network down",
+      }),
+    );
+    openPopover();
+    expect(screen.getByRole("option", { name: "bug" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("can't be reopened while saving", async () => {
+    const mock = {
+      request: { query: BugChangeLabelsDocument, variables: () => true },
+      result: { data: { bugChangeLabels: { bug: { id: "1", labels: [] } } } },
+      delay: 50,
+    };
+    renderEditor({ currentLabels: [], mocks: [mock] });
+    openPopover();
+    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeEnabled());
+  });
+});
+
+describe("LabelEditor — leaving with the picker open", () => {
+  it("applies the choices, like closing the picker", async () => {
+    const matchVars = vi.fn().mockReturnValue(true);
+    const mock = {
+      request: { query: BugChangeLabelsDocument, variables: matchVars },
+      result: { data: { bugChangeLabels: { bug: { id: "1", labels: [] } } } },
+    };
+    const { unmount } = renderEditor({ currentLabels: [], mocks: [mock] });
+    openPopover();
+    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    expect(matchVars).not.toHaveBeenCalled();
+    unmount();
+
+    await waitFor(() =>
+      expect(matchVars).toHaveBeenCalledWith({
+        input: { prefix: "bug1", repoRef: "myrepo", added: ["bug"], Removed: [] },
+      }),
+    );
+  });
+
+  it("applies nothing when nothing was toggled", () => {
+    const matchVars = vi.fn().mockReturnValue(true);
+    const mock = {
+      request: { query: BugChangeLabelsDocument, variables: matchVars },
+      result: { data: { bugChangeLabels: { bug: { id: "1", labels: [] } } } },
+    };
+    const { unmount } = renderEditor({ currentLabels: [], mocks: [mock] });
+    openPopover();
+    unmount();
+
+    expect(matchVars).not.toHaveBeenCalled();
   });
 });

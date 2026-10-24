@@ -21,7 +21,7 @@ func TestSelect(t *testing.T) {
 	const namespace = "foos"
 
 	resolve := func(args []string) (*cache.BugCache, []string, error) {
-		return Resolve[*cache.BugCache](backend, typename, namespace, backend.Bugs(), args)
+		return Resolve[*cache.BugCache](t.Context(), backend, typename, namespace, backend.Bugs(), args)
 	}
 
 	_, _, err = resolve([]string{})
@@ -40,15 +40,18 @@ func TestSelect(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		_, _, err := backend.Bugs().NewRaw(rene, time.Now().Unix(), "title", "message", nil, nil)
+		created, _, err := backend.Bugs().NewRaw(rene, time.Now().Unix(), "title", "message", nil, nil)
 		require.NoError(t, err)
+		require.NoError(t, created.Commit(t.Context()))
 	}
 
 	// and two more for testing
 	b1, _, err := backend.Bugs().NewRaw(rene, time.Now().Unix(), "title", "message", nil, nil)
 	require.NoError(t, err)
+	require.NoError(t, b1.Commit(t.Context()))
 	b2, _, err := backend.Bugs().NewRaw(rene, time.Now().Unix(), "title", "message", nil, nil)
 	require.NoError(t, err)
+	require.NoError(t, b2.Commit(t.Context()))
 
 	err = Select(backend, namespace, b1.Id())
 	require.NoError(t, err)

@@ -2,10 +2,12 @@ package repository
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,7 +21,7 @@ import (
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	lru "github.com/hashicorp/golang-lru/v2"
-	"golang.org/x/sync/singleflight"
+	"resenje.org/singleflight"
 )
 
 // lastCommitDepthLimit is the maximum number of commits walked by
@@ -34,6 +36,7 @@ const lastCommitDepthLimit = 1000
 const lastCommitCacheSize = 256
 
 var _ RepoData = &GoGitRepo{}
+var _ RepoRemote = &GoGitRepo{}
 var _ RepoBrowse = &GoGitRepo{}
 
 // GoGitRepo is the git data of a Repo, in a git directory on disk, with go-git.
@@ -54,7 +57,7 @@ type GoGitRepo struct {
 	lastCommitCache *lru.Cache[string, map[string]CommitMeta]
 	// lastCommitSF deduplicates concurrent walks for the same cache key so
 	// that a cold cache under parallel requests triggers only one history walk.
-	lastCommitSF singleflight.Group
+	lastCommitSF singleflight.Group[string, map[string]CommitMeta]
 }
 
 // OpenGoGitRepo opens the repository of the git directory gitDir, see
@@ -115,7 +118,7 @@ func newGoGitRepo(gitDir string) (*GoGitRepo, error) {
 // point to) from a remote, and stores them as that remote's tracking refs.
 // Local refs are left untouched.
 // The equivalent git refspec for namespace="foo" is "refs/foo/*:refs/remotes/<remote>/foo/*"
-func (repo *GoGitRepo) FetchRefs(remote string, namespaces ...string) (string, error) {
+func (repo *GoGitRepo) FetchRefs(ctx context.Context, remote string, namespaces ...string) (string, error) {
 	refSpecs := make([]config.RefSpec, len(namespaces))
 
 	for i, namespace := range namespaces {
@@ -129,7 +132,7 @@ func (repo *GoGitRepo) FetchRefs(remote string, namespaces ...string) (string, e
 		return "", err
 	}
 
-	err = repo.r.Fetch(&gogit.FetchOptions{
+	err = repo.r.FetchContext(ctx, &gogit.FetchOptions{
 		RemoteName: remote,
 		RemoteURL:  remoteUrl,
 		RefSpecs:   refSpecs,
@@ -139,7 +142,8 @@ func (repo *GoGitRepo) FetchRefs(remote string, namespaces ...string) (string, e
 		return "already up-to-date", nil
 	}
 	if err != nil {
-		return "", err
+		// might be one of go-git's shortcomings
+		return "", fmt.Errorf("%w\nif git itself can reach this remote, setting %s=git uses it instead of go-git", err, gitTransportConfigKey)
 	}
 
 	return buf.String(), nil
@@ -187,7 +191,7 @@ func (repo *GoGitRepo) resolveRemote(remote string, fetch bool) (string, error) 
 // PushRefs sends the local refs of the given namespaces (and the data they
 // point to) to a remote, and updates that remote's tracking refs to match.
 // The equivalent git refspec for namespace="foo" is "refs/foo/*:refs/foo/*"
-func (repo *GoGitRepo) PushRefs(remote string, namespaces ...string) (string, error) {
+func (repo *GoGitRepo) PushRefs(ctx context.Context, remote string, namespaces ...string) (string, error) {
 	remo, err := repo.r.Remote(remote)
 	if err != nil {
 		return "", err
@@ -219,25 +223,71 @@ func (repo *GoGitRepo) PushRefs(remote string, namespaces ...string) (string, er
 
 	buf := bytes.NewBuffer(nil)
 
-	remoteUrl, err := repo.resolveRemote(remote, false)
+	urls, err := repo.pushURLs(remote)
 	if err != nil {
 		return "", err
 	}
 
-	err = remo.Push(&gogit.PushOptions{
-		RemoteName: remote,
-		RemoteURL:  remoteUrl,
-		RefSpecs:   refSpecs,
-		Progress:   buf,
-	})
-	if err == gogit.NoErrAlreadyUpToDate {
-		return "already up-to-date", nil
+	upToDate := 0
+	for _, u := range urls {
+		err = remo.PushContext(ctx, &gogit.PushOptions{
+			RemoteName: remote,
+			RemoteURL:  u,
+			RefSpecs:   refSpecs,
+			Progress:   buf,
+		})
+		if err == gogit.NoErrAlreadyUpToDate {
+			upToDate++
+			continue
+		}
+		if err != nil {
+			// might be one of go-git's shortcomings
+			return "", fmt.Errorf("%s: %w\nif git itself can reach this remote, setting %s=git uses it instead of go-git", u, err, gitTransportConfigKey)
+		}
 	}
-	if err != nil {
-		return "", err
+	if upToDate == len(urls) {
+		return "already up-to-date", nil
 	}
 
 	return buf.String(), nil
+}
+
+// pushURLs returns where a push to remote goes, as git's does: every
+// pushurl of the remote, else every url, with url.<base>.insteadOf applied.
+// A remote mirroring to two forges gets both.
+func (repo *GoGitRepo) pushURLs(remote string) ([]string, error) {
+	local, err := repo.r.Config()
+	if err != nil {
+		return nil, err
+	}
+	options := local.Raw.Section("remote").Subsection(remote).Options
+	urls := options.GetAll("pushurl")
+	if len(urls) == 0 {
+		urls = options.GetAll("url")
+	}
+	if len(urls) == 0 {
+		// not a remote of the repository's own config
+		u, err := repo.resolveRemote(remote, false)
+		return []string{u}, err
+	}
+
+	cfg, err := repo.r.ConfigScoped(config.SystemScope)
+	if err != nil {
+		return nil, fmt.Errorf("unable to load system-scoped git config: %v", err)
+	}
+	var res []string
+	for _, u := range urls {
+		for _, rewrite := range cfg.URLs {
+			if strings.HasPrefix(u, rewrite.InsteadOf) {
+				u = rewrite.ApplyInsteadOf(u)
+				break
+			}
+		}
+		if !slices.Contains(res, u) {
+			res = append(res, u)
+		}
+	}
+	return res, nil
 }
 
 // StoreData will store arbitrary data and return the corresponding hash
@@ -478,8 +528,8 @@ func (repo *GoGitRepo) lookupRef(name string) (Hash, error) {
 
 // ListCommits returns the hashes of commit and all its ancestors, in
 // chronological order.
-func (repo *GoGitRepo) ListCommits(commit Hash) ([]Hash, error) {
-	return nonNativeListCommits(repo, commit)
+func (repo *GoGitRepo) ListCommits(ctx context.Context, commit Hash) ([]Hash, error) {
+	return nonNativeListCommits(ctx, repo, commit)
 }
 
 func (repo *GoGitRepo) ReadCommit(hash Hash) (Commit, error) {
@@ -593,7 +643,7 @@ func (repo *GoGitRepo) resolveRev(rev string) (plumbing.Hash, error) {
 }
 
 // Branches returns all local branches (refs/heads/*).
-func (repo *GoGitRepo) Branches() ([]BranchInfo, error) {
+func (repo *GoGitRepo) Branches(ctx context.Context) ([]BranchInfo, error) {
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
 
@@ -604,6 +654,9 @@ func (repo *GoGitRepo) Branches() ([]BranchInfo, error) {
 
 	var branches []BranchInfo
 	err = refs.ForEach(func(r *plumbing.Reference) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !r.Name().IsBranch() {
 			return nil
 		}
@@ -624,7 +677,7 @@ func (repo *GoGitRepo) Branches() ([]BranchInfo, error) {
 
 // Tags returns all tags. For annotated tags the hash is dereferenced to the
 // target commit; for lightweight tags it is the commit hash directly.
-func (repo *GoGitRepo) Tags() ([]TagInfo, error) {
+func (repo *GoGitRepo) Tags(ctx context.Context) ([]TagInfo, error) {
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
 
@@ -635,6 +688,9 @@ func (repo *GoGitRepo) Tags() ([]TagInfo, error) {
 
 	var tags []TagInfo
 	err = refs.ForEach(func(r *plumbing.Reference) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !r.Name().IsTag() {
 			return nil
 		}
@@ -660,11 +716,15 @@ func (repo *GoGitRepo) Tags() ([]TagInfo, error) {
 }
 
 // TreeAtPath returns the entries of the directory at path under rev.
-func (repo *GoGitRepo) TreeAtPath(rev, path string) ([]TreeEntry, error) {
+func (repo *GoGitRepo) TreeAtPath(ctx context.Context, rev, path string) ([]TreeEntry, error) {
 	path = strings.Trim(path, "/")
 
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	startHash, err := repo.resolveRev(rev)
 	if err != nil {
@@ -723,7 +783,7 @@ func objectTypeFromFileMode(m filemode.FileMode) ObjectType {
 // back as an FSObject whose Reader() opens its own independent file handle and
 // Scanner and then reads via ReadAt — no shared state is touched after this
 // function returns. Callers must Close the reader.
-func (repo *GoGitRepo) BlobAtPath(rev, path string) (io.ReadCloser, int64, Hash, error) {
+func (repo *GoGitRepo) BlobAtPath(ctx context.Context, rev, path string) (io.ReadCloser, int64, Hash, error) {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		return nil, 0, "", ErrNotFound
@@ -731,6 +791,10 @@ func (repo *GoGitRepo) BlobAtPath(rev, path string) (io.ReadCloser, int64, Hash,
 
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, "", err
+	}
 
 	startHash, err := repo.resolveRev(rev)
 	if err != nil {
@@ -759,7 +823,7 @@ func (repo *GoGitRepo) BlobAtPath(rev, path string) (io.ReadCloser, int64, Hash,
 // CommitLog returns at most limit commits reachable from rev, optionally
 // filtered to those that touched path, starting after the given cursor hash,
 // and bounded by the since/until author-date range.
-func (repo *GoGitRepo) CommitLog(rev, path string, limit int, after Hash, since, until *time.Time) ([]CommitMeta, error) {
+func (repo *GoGitRepo) CommitLog(ctx context.Context, rev, path string, limit int, after Hash, since, until *time.Time) ([]CommitMeta, error) {
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
 
@@ -790,6 +854,9 @@ func (repo *GoGitRepo) CommitLog(rev, path string, limit int, after Hash, since,
 	var result []CommitMeta
 	skipping := after != ""
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		c, err := iter.Next()
 		if err == io.EOF {
 			break
@@ -848,7 +915,7 @@ func treeEntriesAtPath(c *object.Commit, dirPath string) (plumbing.Hash, map[str
 // content-addressed, two revs that resolve to the same directory tree share one
 // cache entry, and the cache never needs invalidation: a changed directory
 // produces a new tree hash, which becomes a new key.
-func (repo *GoGitRepo) LastCommitForEntries(rev, path string, names []string) (map[string]CommitMeta, error) {
+func (repo *GoGitRepo) LastCommitForEntries(ctx context.Context, rev, path string, names []string) (map[string]CommitMeta, error) {
 	// Normalize path up front so the cache key is canonical.
 	path = strings.Trim(path, "/")
 
@@ -878,154 +945,156 @@ func (repo *GoGitRepo) LastCommitForEntries(rev, path string, names []string) (m
 	// locations don't collide.
 	cacheKey := treeHash.String() + "\x00" + path
 
-	// Cache hit: filter the stored result down to the requested names.
-	if cached, ok := repo.lastCommitCache.Get(cacheKey); ok {
-		result := make(map[string]CommitMeta, len(names))
-		for _, n := range names {
-			if m, found := cached[n]; found {
-				result[n] = m
-			}
-		}
-		return result, nil
-	}
-
-	// Cache miss: use singleflight so that concurrent calls for the same
-	// directory share one history walk instead of each doing their own.
-	val, err, _ := repo.lastCommitSF.Do(cacheKey, func() (any, error) {
-		// Re-check inside Do: another goroutine may have populated the cache
-		// between our initial Get and acquiring the singleflight key.
+	// Concurrent calls for the same directory share one history walk.
+	all, _, err := repo.lastCommitSF.Do(ctx, cacheKey, func(ctx context.Context) (map[string]CommitMeta, error) {
 		if cached, ok := repo.lastCommitCache.Get(cacheKey); ok {
 			return cached, nil
 		}
-
-		remaining := make(map[string]bool, len(startEntries))
-		for name := range startEntries {
-			remaining[name] = true
-		}
-		result := make(map[string]CommitMeta, len(remaining))
-
-		repo.rMutex.Lock()
-
-		iter, err := repo.r.Log(&gogit.LogOptions{
-			From:  startHash,
-			Order: gogit.LogOrderCommitterTime,
-		})
+		// The cached map holds every entry of the directory, not just the
+		// requested names, for any later call on it to be served from the
+		// cache. Callers only ever get a filtered copy of it.
+		walked, err := repo.walkLastCommits(ctx, startHash, startEntries, path)
 		if err != nil {
-			repo.rMutex.Unlock()
 			return nil, err
 		}
-
-		// Seed the parent-reuse cache with the entries we already fetched above
-		// so the first iteration's current-tree read is skipped for free.
-		// In a linear history this halves tree reads for every subsequent step:
-		// the parent fetched at depth D is the current commit at depth D+1.
-		cachedParentHash := startHash
-		cachedParentEntries := startEntries
-
-		for depth := 0; len(remaining) > 0 && depth < lastCommitDepthLimit; depth++ {
-			c, err := iter.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				iter.Close()
-				repo.rMutex.Unlock()
-				return nil, err
-			}
-
-			var currentEntries map[string]plumbing.Hash
-			if c.Hash == cachedParentHash && cachedParentEntries != nil {
-				currentEntries = cachedParentEntries
-			} else {
-				_, currentEntries, err = treeEntriesAtPath(c, path)
-				if err != nil {
-					// path may not exist in this commit; treat as empty
-					currentEntries = map[string]plumbing.Hash{}
-				}
-			}
-
-			var parentEntries map[string]plumbing.Hash
-			cachedParentHash = plumbing.ZeroHash
-			cachedParentEntries = nil
-			if len(c.ParentHashes) > 0 {
-				if parent, err := c.Parents().Next(); err == nil {
-					_, parentEntries, _ = treeEntriesAtPath(parent, path)
-					cachedParentHash = c.ParentHashes[0]
-					cachedParentEntries = parentEntries
-				}
-			}
-
-			meta := commitToMeta(c)
-			for name := range remaining {
-				curHash, inCurrent := currentEntries[name]
-				parentHash, inParent := parentEntries[name]
-				if inCurrent != inParent || (inCurrent && curHash != parentHash) {
-					result[name] = meta
-					delete(remaining, name)
-				}
-			}
-		}
-
-		iter.Close()
-		repo.rMutex.Unlock()
-
-		// Store a defensive copy so that callers cannot mutate cached entries.
-		// The cached map contains all directory entries, not just the requested
-		// names, so future calls for the same directory are fully served from
-		// cache regardless of which names they request.
-		cached := make(map[string]CommitMeta, len(result))
-		for k, v := range result {
-			cached[k] = v
-		}
-		repo.lastCommitCache.Add(cacheKey, cached)
-		return cached, nil
+		repo.lastCommitCache.Add(cacheKey, walked)
+		return walked, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Return only the entries that were requested.
-	full := val.(map[string]CommitMeta)
-	filtered := make(map[string]CommitMeta, len(names))
+	result := make(map[string]CommitMeta, len(names))
 	for _, n := range names {
-		if m, ok := full[n]; ok {
-			filtered[n] = m
+		if m, ok := all[n]; ok {
+			result[n] = m
 		}
 	}
-	return filtered, nil
+	return result, nil
 }
 
-// CommitDetail returns the full commit metadata and list of changed files.
-func (repo *GoGitRepo) CommitDetail(hash Hash) (CommitDetail, error) {
+// walkLastCommits walks the history from start, for at most
+// lastCommitDepthLimit commits, and returns the most recent commit that changed
+// each of the entries of the directory at path, which are startEntries at start.
+func (repo *GoGitRepo) walkLastCommits(ctx context.Context, start plumbing.Hash, startEntries map[string]plumbing.Hash, path string) (map[string]CommitMeta, error) {
+	remaining := make(map[string]bool, len(startEntries))
+	for name := range startEntries {
+		remaining[name] = true
+	}
+	result := make(map[string]CommitMeta, len(remaining))
+
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
 
+	iter, err := repo.r.Log(&gogit.LogOptions{
+		From:  start,
+		Order: gogit.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	// Seed the parent-reuse cache with the entries already known at start, so
+	// the first iteration's current-tree read is skipped for free.
+	// In a linear history this halves tree reads for every subsequent step:
+	// the parent fetched at depth D is the current commit at depth D+1.
+	cachedParentHash := start
+	cachedParentEntries := startEntries
+
+	for depth := 0; len(remaining) > 0 && depth < lastCommitDepthLimit; depth++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		c, err := iter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		var currentEntries map[string]plumbing.Hash
+		if c.Hash == cachedParentHash && cachedParentEntries != nil {
+			currentEntries = cachedParentEntries
+		} else {
+			_, currentEntries, err = treeEntriesAtPath(c, path)
+			if err != nil {
+				// path may not exist in this commit; treat as empty
+				currentEntries = map[string]plumbing.Hash{}
+			}
+		}
+
+		var parentEntries map[string]plumbing.Hash
+		cachedParentHash = plumbing.ZeroHash
+		cachedParentEntries = nil
+		if len(c.ParentHashes) > 0 {
+			if parent, err := c.Parents().Next(); err == nil {
+				_, parentEntries, _ = treeEntriesAtPath(parent, path)
+				cachedParentHash = c.ParentHashes[0]
+				cachedParentEntries = parentEntries
+			}
+		}
+
+		meta := commitToMeta(c)
+		for name := range remaining {
+			curHash, inCurrent := currentEntries[name]
+			parentHash, inParent := parentEntries[name]
+			if inCurrent != inParent || (inCurrent && curHash != parentHash) {
+				result[name] = meta
+				delete(remaining, name)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// firstParentChanges returns the commit of hash, and its changes from its
+// first parent, or from the empty tree for an initial commit. rMutex must be
+// held.
+func (repo *GoGitRepo) firstParentChanges(ctx context.Context, hash Hash) (*object.Commit, object.Changes, error) {
 	c, err := repo.r.CommitObject(plumbing.NewHash(hash.String()))
-	if err == plumbing.ErrObjectNotFound {
-		return CommitDetail{}, ErrNotFound
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		return nil, nil, ErrNotFound
 	}
 	if err != nil {
-		return CommitDetail{}, err
+		return nil, nil, err
 	}
 
 	toTree, err := c.Tree()
 	if err != nil {
-		return CommitDetail{}, err
+		return nil, nil, err
 	}
 
 	var fromTree *object.Tree
 	if len(c.ParentHashes) > 0 {
 		parent, err := repo.r.CommitObject(c.ParentHashes[0])
 		if err != nil {
-			return CommitDetail{}, fmt.Errorf("loading parent commit: %w", err)
+			return nil, nil, fmt.Errorf("loading parent commit: %w", err)
 		}
 		fromTree, err = parent.Tree()
 		if err != nil {
-			return CommitDetail{}, fmt.Errorf("loading parent tree: %w", err)
+			return nil, nil, fmt.Errorf("loading parent tree: %w", err)
 		}
 	}
 
-	changes, err := object.DiffTree(fromTree, toTree)
+	changes, err := object.DiffTreeContext(ctx, fromTree, toTree)
+	if errors.Is(err, object.ErrCanceled) {
+		return nil, nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, changes, nil
+}
+
+// CommitDetail returns the full commit metadata and list of changed files.
+func (repo *GoGitRepo) CommitDetail(ctx context.Context, hash Hash) (CommitDetail, error) {
+	repo.rMutex.Lock()
+	defer repo.rMutex.Unlock()
+
+	c, changes, err := repo.firstParentChanges(ctx, hash)
 	if err != nil {
 		return CommitDetail{}, err
 	}
@@ -1060,36 +1129,11 @@ func changedFileFromChange(fromName, toName string) ChangedFile {
 
 // CommitFileDiff returns the unified diff for a single file in a commit,
 // relative to the first parent.
-func (repo *GoGitRepo) CommitFileDiff(hash Hash, filePath string) (FileDiff, error) {
+func (repo *GoGitRepo) CommitFileDiff(ctx context.Context, hash Hash, filePath string) (FileDiff, error) {
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
 
-	c, err := repo.r.CommitObject(plumbing.NewHash(hash.String()))
-	if err == plumbing.ErrObjectNotFound {
-		return FileDiff{}, ErrNotFound
-	}
-	if err != nil {
-		return FileDiff{}, err
-	}
-
-	toTree, err := c.Tree()
-	if err != nil {
-		return FileDiff{}, err
-	}
-
-	var fromTree *object.Tree
-	if len(c.ParentHashes) > 0 {
-		parent, err := repo.r.CommitObject(c.ParentHashes[0])
-		if err != nil {
-			return FileDiff{}, fmt.Errorf("loading parent commit: %w", err)
-		}
-		fromTree, err = parent.Tree()
-		if err != nil {
-			return FileDiff{}, fmt.Errorf("loading parent tree: %w", err)
-		}
-	}
-
-	changes, err := object.DiffTree(fromTree, toTree)
+	_, changes, err := repo.firstParentChanges(ctx, hash)
 	if err != nil {
 		return FileDiff{}, err
 	}
@@ -1109,7 +1153,10 @@ func (repo *GoGitRepo) CommitFileDiff(hash Hash, filePath string) (FileDiff, err
 			return FileDiff{}, err
 		}
 
-		patch, err := ch.Patch()
+		patch, err := ch.PatchContext(ctx)
+		if errors.Is(err, object.ErrCanceled) {
+			return FileDiff{}, ctx.Err()
+		}
 		if err != nil {
 			return FileDiff{}, err
 		}
@@ -1244,7 +1291,7 @@ func buildDiffHunks(fp fdiff.FilePatch) []DiffHunk {
 }
 
 // Head returns the ref that HEAD currently points to.
-func (repo *GoGitRepo) Head() (RefMeta, error) {
+func (repo *GoGitRepo) Head(ctx context.Context) (RefMeta, error) {
 	repo.rMutex.Lock()
 	defer repo.rMutex.Unlock()
 

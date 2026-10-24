@@ -1,0 +1,38 @@
+.nh
+.TH "GIT-BUG" "1" "Apr 2019" "Generated from git-bug's source code" ""
+
+.SH NAME
+git-bug-bridge-unlink - Stop syncing a git-bug issue with a forge
+
+
+.SH SYNOPSIS
+\fBgit-bug bridge unlink BUG_ID BRIDGE [flags]\fP
+
+
+.SH DESCRIPTION
+Stop syncing a git-bug issue with its issue on a bridge's forge.
+
+.PP
+Both keep what they have: nothing is deleted, here or on the forge. From now
+on, sync doesn't send the git-bug issue to that forge, nor create it there
+again, nor pull the forge issue, which can be linked to another git-bug
+issue with "git bug bridge link". The issue's other bridges still sync it.
+
+.PP
+This can't be undone: once unlinked from a forge, a git-bug issue can't be
+linked to an issue of that forge again.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for unlink
+
+
+.SH EXAMPLE
+.EX
+git bug bridge unlink 4f2a1c9 gl
+.EE
+
+
+.SH SEE ALSO
+\fBgit-bug-bridge(1)\fP

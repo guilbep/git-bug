@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,13 +19,13 @@ func TestIdentityPushPull(t *testing.T) {
 	require.NoError(t, err)
 
 	// A --> remote --> B
-	_, err = Push(repoA, "origin")
+	_, err = Push(t.Context(), repoA, "origin")
 	require.NoError(t, err)
 
-	err = Pull(repoB, "origin")
+	err = Pull(t.Context(), repoB, "origin")
 	require.NoError(t, err)
 
-	identities := allIdentities(t, ReadAll(repoB))
+	identities := allIdentities(t, ReadAll(t.Context(), repoB))
 
 	if len(identities) != 1 {
 		t.Fatal("Unexpected number of bugs")
@@ -36,13 +37,13 @@ func TestIdentityPushPull(t *testing.T) {
 	err = identity2.Commit(repoB)
 	require.NoError(t, err)
 
-	_, err = Push(repoB, "origin")
+	_, err = Push(t.Context(), repoB, "origin")
 	require.NoError(t, err)
 
-	err = Pull(repoA, "origin")
+	err = Pull(t.Context(), repoA, "origin")
 	require.NoError(t, err)
 
-	identities = allIdentities(t, ReadAll(repoA))
+	identities = allIdentities(t, ReadAll(t.Context(), repoA))
 
 	if len(identities) != 2 {
 		t.Fatal("Unexpected number of bugs")
@@ -68,13 +69,13 @@ func TestIdentityPushPull(t *testing.T) {
 
 	//  A --> remote --> B
 
-	_, err = Push(repoA, "origin")
+	_, err = Push(t.Context(), repoA, "origin")
 	require.NoError(t, err)
 
-	err = Pull(repoB, "origin")
+	err = Pull(t.Context(), repoB, "origin")
 	require.NoError(t, err)
 
-	identities = allIdentities(t, ReadAll(repoB))
+	identities = allIdentities(t, ReadAll(t.Context(), repoB))
 
 	if len(identities) != 2 {
 		t.Fatal("Unexpected number of bugs")
@@ -82,13 +83,13 @@ func TestIdentityPushPull(t *testing.T) {
 
 	// B --> remote --> A
 
-	_, err = Push(repoB, "origin")
+	_, err = Push(t.Context(), repoB, "origin")
 	require.NoError(t, err)
 
-	err = Pull(repoA, "origin")
+	err = Pull(t.Context(), repoA, "origin")
 	require.NoError(t, err)
 
-	identities = allIdentities(t, ReadAll(repoA))
+	identities = allIdentities(t, ReadAll(t.Context(), repoA))
 
 	if len(identities) != 2 {
 		t.Fatal("Unexpected number of bugs")
@@ -104,7 +105,7 @@ func TestIdentityPushPull(t *testing.T) {
 	err = identity1.Commit(repoA)
 	require.NoError(t, err)
 
-	identity1B, err := Read(repoB, identity1.Id())
+	identity1B, err := Read(t.Context(), repoB, identity1.Id())
 	require.NoError(t, err)
 
 	err = identity1B.Mutate(repoB, func(orig *Mutator) {
@@ -117,14 +118,14 @@ func TestIdentityPushPull(t *testing.T) {
 
 	//  A --> remote --> B
 
-	_, err = Push(repoA, "origin")
+	_, err = Push(t.Context(), repoA, "origin")
 	require.NoError(t, err)
 
 	// Pulling a non-fast-forward update should fail
-	err = Pull(repoB, "origin")
+	err = Pull(t.Context(), repoB, "origin")
 	require.Error(t, err)
 
-	identities = allIdentities(t, ReadAll(repoB))
+	identities = allIdentities(t, ReadAll(t.Context(), repoB))
 
 	if len(identities) != 2 {
 		t.Fatal("Unexpected number of bugs")
@@ -133,13 +134,13 @@ func TestIdentityPushPull(t *testing.T) {
 	// B --> remote --> A
 
 	// Pushing a non-fast-forward update should fail
-	_, err = Push(repoB, "origin")
+	_, err = Push(t.Context(), repoB, "origin")
 	require.Error(t, err)
 
-	err = Pull(repoA, "origin")
+	err = Pull(t.Context(), repoA, "origin")
 	require.NoError(t, err)
 
-	identities = allIdentities(t, ReadAll(repoA))
+	identities = allIdentities(t, ReadAll(t.Context(), repoA))
 
 	if len(identities) != 2 {
 		t.Fatal("Unexpected number of bugs")
@@ -155,4 +156,36 @@ func allIdentities(t testing.TB, identities <-chan entity.StreamedEntity[*Identi
 		result = append(result, streamed.Entity)
 	}
 	return result
+}
+
+// A merge cut short is an error, not invalid remote data, and nothing more is
+// merged.
+func TestIdentityMergeCanceled(t *testing.T) {
+	repoA, repoB, _ := repotest.SetupGoGitReposAndRemote(t)
+
+	for _, name := range []string{"name1", "name2"} {
+		i, err := NewIdentity(repoA, name, "email")
+		require.NoError(t, err)
+		require.NoError(t, i.Commit(repoA))
+	}
+
+	_, err := Push(t.Context(), repoA, "origin")
+	require.NoError(t, err)
+	_, err = Fetch(t.Context(), repoB, "origin")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	var results []entity.MergeResult
+	for result := range MergeAll(ctx, repoB, "origin") {
+		results = append(results, result)
+	}
+	require.Len(t, results, 1)
+	require.Equal(t, entity.MergeStatusError, results[0].Status)
+	require.ErrorIs(t, results[0].Err, context.Canceled)
+
+	ids, err := ListLocalIds(repoB)
+	require.NoError(t, err)
+	require.Empty(t, ids)
 }

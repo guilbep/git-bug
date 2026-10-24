@@ -50,6 +50,12 @@ func NewGoGitRepo(t testing.TB, bare bool) *GoGitRepo {
 		return errors.Join(
 			f.Set("user.name", "testuser"),
 			f.Set("user.email", "testuser@example.com"),
+			// a push to this repository runs git's receive-pack, which would
+			// start a maintenance in the background, still writing to the
+			// repository when the test removes it
+			f.Set("receive.autogc", "false"),
+			// same for a fetch from this repository with the git binary
+			f.Set("maintenance.auto", "false"),
 		)
 	})
 	require.NoError(t, err)
@@ -60,8 +66,9 @@ func NewGoGitRepo(t testing.TB, bare bool) *GoGitRepo {
 		RepoConfig:  repository.NewRepoConfig(config),
 		RepoKeyring: repository.NewRepoKeyring(keyring.NewArrayKeyring(nil)),
 		RepoStorage: repository.NewRepoStorage(storage),
-		RepoIndex:   repository.NewBleveIndexes(filepath.Join(storage.Root(), "indexes")),
+		RepoIndex:   repository.NewSqliteIndex(filepath.Join(storage.Root(), "index.db")),
 		RepoData:    git,
+		RepoRemote:  git,
 		RepoBrowse:  git,
 		RepoClock:   repository.NewPersistedClocks(storage),
 	}
